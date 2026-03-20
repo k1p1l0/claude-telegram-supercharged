@@ -133,6 +133,46 @@ if (!TOKEN) {
 const INBOX_DIR = join(STATE_DIR, "inbox");
 const DATA_DIR = join(STATE_DIR, "data");
 const DB_PATH = join(DATA_DIR, "messages.db");
+const MEMORY_FILE = join(DATA_DIR, "memory.md");
+const MEMORY_MAX_CHARS = 10_000;
+
+// ── Conversation memory ──────────────────────────────────────────────
+// Persists short summaries across /clear so context is never fully lost.
+// Loaded into MCP instructions at boot. When the file exceeds
+// MEMORY_MAX_CHARS, the older half is aggressively compressed.
+
+function readMemory(): string {
+  try {
+    return readFileSync(MEMORY_FILE, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+function appendMemory(entry: string): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  let existing = readMemory();
+
+  // Append the new entry.
+  const dated = `\n## ${new Date().toISOString().slice(0, 16).replace("T", " ")}\n${entry}\n`;
+  existing += dated;
+
+  // If over limit, trim the older half aggressively.
+  if (existing.length > MEMORY_MAX_CHARS) {
+    const half = Math.floor(existing.length / 2);
+    // Find the nearest section break (##) after the halfway point.
+    const cutIdx = existing.indexOf("\n## ", half);
+    if (cutIdx > 0) {
+      const kept = existing.slice(cutIdx);
+      existing = `# Conversation Memory (older entries compressed)\n\n[Earlier conversations were trimmed to save space]\n${kept}`;
+    } else {
+      // No section break found — just keep the last MEMORY_MAX_CHARS/2 chars.
+      existing = `# Conversation Memory (older entries compressed)\n\n[Earlier conversations were trimmed]\n${existing.slice(-Math.floor(MEMORY_MAX_CHARS / 2))}`;
+    }
+  }
+
+  writeFileSync(MEMORY_FILE, `${existing.trim()}\n`);
+}
 
 // ── Message history store (bun:sqlite) ──────────────────────────────
 // Stores every delivered message so Claude has context across restarts.
@@ -721,6 +761,10 @@ const mcp = new Server(
       "REACTIONS AS STATUS: When you receive a Telegram message, immediately react with 👀 (using the react tool) to signal you've read it. After you send your reply, react to the SAME message with 👍 to signal completion. This replaces the previous reaction — Telegram only keeps one bot reaction per message. For long tasks (multiple tool calls, research, code generation), react with 🔥 before starting heavy work, then 👍 when done.",
       "",
       "EXPRESSIVE REACTIONS: Beyond status, react to messages that genuinely stand out — but be selective, not every message deserves one. Use your judgment: 🔥 for impressive work or exciting news, 😂 for genuinely funny messages, ❤ for heartfelt or kind messages, 🤔 for thought-provoking questions, 🎉 for celebrations or milestones, 👍 for solid ideas. Expressive reactions go on the user's message BEFORE or INSTEAD of the 👀 status reaction. Don't overdo it — if you react expressively to everything, it loses meaning.",
+      "",
+      "SESSION MANAGEMENT: Use clear_history to wipe a chat's message history. Before clearing, ALWAYS: (1) use ask_user to confirm with the user, (2) call get_history to retrieve recent messages, (3) write a 2-3 sentence summary of the conversation, (4) call save_memory with the summary so context persists across clears. After saving memory, call clear_history. If the user wants a full context reset, also run /clear after.",
+      "",
+      ...(readMemory() ? ["CONVERSATION MEMORY (summaries from previous sessions):", readMemory()] : []),
     ].join("\n"),
   },
 );
@@ -873,7 +917,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "clear_history",
       description:
-        "Clear message history for a Telegram chat. Use this when the user asks to clean/reset/clear conversation history. IMPORTANT: Always confirm with the user via ask_user before clearing. Returns the number of deleted messages.",
+        "Clear message history for a Telegram chat. IMPORTANT: Before calling this, always (1) confirm via ask_user, (2) get_history to read recent messages, (3) save_memory with a summary. Returns the number of deleted messages.",
       inputSchema: {
         type: "object",
         properties: {
@@ -883,6 +927,25 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ["chat_id"],
+      },
+    },
+    {
+      name: "save_memory",
+      description:
+        "Save a conversation summary to persistent memory. Use this before clear_history to preserve context across session resets. The summary is loaded into instructions on every startup so Claude always has historical context.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          chat_id: {
+            type: "string",
+            description: "Chat ID this memory is about.",
+          },
+          summary: {
+            type: "string",
+            description: "2-3 sentence summary of the conversation. Include key topics, decisions, and action items.",
+          },
+        },
+        required: ["chat_id", "summary"],
       },
     },
   ],
@@ -1106,6 +1169,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             },
           ],
         };
+      }
+      case "save_memory": {
+        const chat_id = args.chat_id as string;
+        const summary = args.summary as string;
+        assertAllowedChat(chat_id);
+        if (!summary || summary.length < 10) {
+          return { content: [{ type: "text", text: "save_memory failed: summary must be at least 10 characters." }] };
+        }
+        appendMemory(`**Chat ${chat_id}**: ${summary}`);
+        return { content: [{ type: "text", text: "Memory saved. Summary will be loaded on next startup." }] };
       }
       default:
         return {

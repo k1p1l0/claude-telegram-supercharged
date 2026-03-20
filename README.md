@@ -68,6 +68,7 @@ Here's what we're planning to build. PRs welcome!
 - [x] **Ask User inline buttons** - Tappable choices with blocking wait for response
 - [x] **Reaction status indicators** - 👀 → 🔥 → 👍 processing status via emoji reactions
 - [x] **Voice & audio messages** - Download and transcribe voice messages using local open-source tools
+- [x] **Sticker & GIF support** - Download stickers and GIFs, convert to frame collages so Claude can see them
 
 ### Planned
 
@@ -78,7 +79,6 @@ Here's what we're planning to build. PRs welcome!
 - [ ] **Rate limiting & usage stats** - Track token usage and set limits per user
 - [ ] **Webhook mode** - Alternative to polling for production deployments
 - [ ] **Custom commands** - Define bot commands that map to Claude Code skills
-- [ ] **Sticker & GIF support** - Send and receive stickers and GIFs
 
 ## Quick Setup
 
@@ -174,8 +174,10 @@ Then restart your Claude Code session.
 | Text message | Forwarded to Claude as a channel notification with `chat_id`, `message_id`, `user`, `ts`. |
 | Photo | Downloaded to inbox, path included in notification so Claude can `Read` it. |
 | Emoji reaction | When a user reacts to a bot message, Claude receives a notification with `event_type: "reaction"`, the emoji, and the `message_id`. Use as lightweight feedback. |
-| Voice message | **NEW** — Downloaded to inbox as `.ogg`, path included in notification as `audio_path`. Claude transcribes using local whisper if available. |
-| Audio file | **NEW** — Forwarded audio files (`.mp3`, etc.) downloaded to inbox, path included as `audio_path`. |
+| Voice message | Downloaded to inbox as `.ogg`, path included in notification as `audio_path`. Claude transcribes using local whisper if available. |
+| Audio file | Forwarded audio files (`.mp3`, etc.) downloaded to inbox, path included as `audio_path`. |
+| Sticker | **NEW** — Static `.webp` passed directly as `image_path`. Animated (`.tgs`) and video (`.webm`) stickers converted to multi-frame collage. Emoji and pack name included in text. |
+| GIF / Animation | **NEW** — Downloaded and converted to a multi-frame horizontal collage so Claude can see the animation content. |
 
 Inbound messages trigger a typing indicator automatically — Telegram shows "botname is typing..." while the assistant works on a response.
 

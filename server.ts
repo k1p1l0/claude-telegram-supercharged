@@ -18,9 +18,18 @@ import {
 import { Bot, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
+import { execSync } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
+
+const ALLOWED_REACTIONS = new Set([
+  '👍','👎','❤','🔥','🥰','👏','😁','🤔','🤯','😱','🤬','😢','🎉','🤩','🤮','💩',
+  '🙏','👌','🕊','🤡','🥱','🥴','😍','🐳','❤‍🔥','🌚','🌭','💯','🤣','⚡','🍌',
+  '🏆','💔','🤨','😐','🍓','🍾','💋','🖕','😈','😴','😭','🤓','👻','👨‍💻','👀',
+  '🎃','🙈','😇','😨','🤝','✍','🤗','🫡','🎅','🎄','☃','💅','🤪','🗿','🆒',
+  '💘','🙉','🦄','😘','💊','🙊','😎','👾','🤷‍♂','🤷','🤷‍♀','😡',
+])
 
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -398,7 +407,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'react',
-      description: 'Add an emoji reaction to a Telegram message. Telegram only accepts a fixed whitelist (👍 👎 ❤ 🔥 👀 🎉 etc) — non-whitelisted emoji will be rejected.',
+      description: 'Add an emoji reaction to a Telegram message. Allowed emoji: 👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔 🤨 😐 🍓 🍾 💋 🖕 😈 😴 😭 🤓 👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷‍♂ 🤷 🤷‍♀ 😡. Any other emoji will be rejected.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -532,8 +541,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       case 'react': {
         assertAllowedChat(args.chat_id as string)
+        const emoji = args.emoji as string
+        if (!ALLOWED_REACTIONS.has(emoji)) {
+          const suggestions = [...ALLOWED_REACTIONS].slice(0, 20).join(' ')
+          return { content: [{ type: 'text', text: `react failed: "${emoji}" is not in Telegram's allowed reaction list. Try one of: ${suggestions} …` }] }
+        }
         await bot.api.setMessageReaction(args.chat_id as string, Number(args.message_id), [
-          { type: 'emoji', emoji: args.emoji as ReactionTypeEmoji['emoji'] },
+          { type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] },
         ])
         return { content: [{ type: 'text', text: 'reacted' }] }
       }
@@ -607,6 +621,56 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
+/**
+ * Extract evenly-spaced frames from a video/animated file and stitch them into
+ * a horizontal strip collage. Returns the path to the resulting .png, or
+ * undefined if ffmpeg is unavailable or the conversion fails.
+ */
+function videoToCollage(srcPath: string, outPath: string, maxFrames = 6): string | undefined {
+  try {
+    // Probe duration.
+    const probe = execSync(
+      `ffprobe -v error -show_entries format=duration -of csv=p=0 "${srcPath}"`,
+      { timeout: 10_000, encoding: 'utf-8' },
+    ).trim()
+    const duration = parseFloat(probe)
+    const frames = Math.min(maxFrames, Math.max(2, Math.round(duration * 2)))
+    const interval = duration / frames
+
+    // Extract frames into tmp dir.
+    const tmpDir = `${outPath}-frames`
+    mkdirSync(tmpDir, { recursive: true })
+    execSync(
+      `ffmpeg -i "${srcPath}" -vf "fps=1/${interval},scale=640:-1" -frames:v ${frames} "${tmpDir}/f%03d.png" -y`,
+      { timeout: 30_000, stdio: 'pipe' },
+    )
+
+    // Stitch horizontally with ffmpeg.
+    const frameFiles = readdirSync(tmpDir).filter(f => f.endsWith('.png')).sort()
+    if (frameFiles.length === 0) return undefined
+
+    if (frameFiles.length === 1) {
+      // Single frame — just move it.
+      renameSync(join(tmpDir, frameFiles[0]), outPath)
+    } else {
+      // Build hstack filter.
+      const inputs = frameFiles.map(f => `-i "${join(tmpDir, f)}"`).join(' ')
+      const n = frameFiles.length
+      execSync(
+        `ffmpeg ${inputs} -filter_complex "hstack=inputs=${n}" "${outPath}" -y`,
+        { timeout: 30_000, stdio: 'pipe' },
+      )
+    }
+
+    // Cleanup tmp frames.
+    try { rmSync(tmpDir, { recursive: true }) } catch {}
+    return outPath
+  } catch (err) {
+    process.stderr.write(`telegram channel: collage creation failed: ${err}\n`)
+    return undefined
+  }
+}
+
 bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, undefined)
 })
@@ -676,6 +740,63 @@ bot.on('message:audio', async ctx => {
       return { path, type: 'audio' as const }
     } catch (err) {
       process.stderr.write(`telegram channel: audio download failed: ${err}\n`)
+      return undefined
+    }
+  })
+})
+
+bot.on('message:sticker', async ctx => {
+  const sticker = ctx.message.sticker
+  const emoji = sticker.emoji ?? ''
+  const caption = `(sticker${emoji ? ` ${emoji}` : ''}${sticker.set_name ? ` from pack "${sticker.set_name}"` : ''})`
+  await handleInbound(ctx, caption, async () => {
+    try {
+      const file = await ctx.api.getFile(sticker.file_id)
+      if (!file.file_path) return undefined
+      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+      const res = await fetch(url)
+      const buf = Buffer.from(await res.arrayBuffer())
+      const ext = file.file_path.split('.').pop() ?? 'webp'
+      const rawPath = join(INBOX_DIR, `${Date.now()}-${sticker.file_unique_id}.${ext}`)
+      mkdirSync(INBOX_DIR, { recursive: true })
+      writeFileSync(rawPath, buf)
+
+      if (ext === 'webp') {
+        // Static sticker — Claude can read .webp directly.
+        return { path: rawPath, type: 'image' as const }
+      }
+      // Animated (.tgs) or video (.webm) sticker — create a frame collage.
+      const collagePath = join(INBOX_DIR, `${Date.now()}-${sticker.file_unique_id}-collage.png`)
+      const result = videoToCollage(rawPath, collagePath, 4)
+      return result ? { path: result, type: 'image' as const } : { path: rawPath, type: 'image' as const }
+    } catch (err) {
+      process.stderr.write(`telegram channel: sticker download failed: ${err}\n`)
+      return undefined
+    }
+  })
+})
+
+bot.on('message:animation', async ctx => {
+  const anim = ctx.message.animation
+  const caption = ctx.message.caption ?? '(GIF)'
+  await handleInbound(ctx, caption, async () => {
+    try {
+      const file = await ctx.api.getFile(anim.file_id)
+      if (!file.file_path) return undefined
+      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+      const res = await fetch(url)
+      const buf = Buffer.from(await res.arrayBuffer())
+      const ext = file.file_path.split('.').pop() ?? 'mp4'
+      const rawPath = join(INBOX_DIR, `${Date.now()}-${anim.file_unique_id}.${ext}`)
+      mkdirSync(INBOX_DIR, { recursive: true })
+      writeFileSync(rawPath, buf)
+
+      // Create a multi-frame collage so Claude sees the animation content.
+      const collagePath = join(INBOX_DIR, `${Date.now()}-${anim.file_unique_id}-collage.png`)
+      const result = videoToCollage(rawPath, collagePath, 4)
+      return result ? { path: result, type: 'image' as const } : { path: rawPath, type: 'image' as const }
+    } catch (err) {
+      process.stderr.write(`telegram channel: animation download failed: ${err}\n`)
       return undefined
     }
   })

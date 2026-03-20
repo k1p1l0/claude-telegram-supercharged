@@ -24,6 +24,21 @@ The official plugin sends all messages as plain text. `*bold*` and `_italic_` sh
 
 > Related issue: [anthropics/claude-code#36622](https://github.com/anthropics/claude-code/issues/36622)
 
+### Emoji reaction tracking
+The official plugin ignores user reactions entirely. Now when you react to a bot message with an emoji (e.g. 👍, 👎, 🔥), Claude receives a notification and can act on it.
+
+- Reactions from allowlisted users are forwarded to Claude as channel events
+- Claude sees which emoji was used and on which message
+- Use reactions as lightweight feedback: 👍 = approve, 👎 = reject, 🔥 = great job
+
+### Ask User (inline keyboard buttons)
+A new `ask_user` tool — the Telegram equivalent of Claude Code's `AskUserQuestion`. Claude sends a message with tappable inline buttons and waits for the user's choice.
+
+- Send a question with up to 10 button options
+- Blocks until the user taps a button (or timeout after 120s)
+- Buttons are removed after selection, showing a ✅ confirmation
+- Perfect for confirmations ("Deploy?" → Yes / No), choices, and approval flows
+
 ## Roadmap
 
 Here's what we're planning to build. PRs welcome!
@@ -124,6 +139,15 @@ Then restart your Claude Code session.
 | `reply` | Send to a chat. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for native threading, `files` (absolute paths) for attachments, and `parse_mode` (MarkdownV2/HTML/plain, defaults to MarkdownV2). Images (`.jpg`/`.png`/`.gif`/`.webp`) send as photos with inline preview; other types send as documents. Max 50MB each. Auto-chunks text; files send as separate messages after the text. Returns the sent message ID(s). |
 | `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 etc). |
 | `edit_message` | Edit a message the bot previously sent. Supports `parse_mode` (MarkdownV2/HTML/plain). Useful for "working..." → result progress updates. Only works on the bot's own messages. |
+| `ask_user` | **NEW** — Send a question with inline keyboard buttons and wait for the user's choice. Takes `chat_id`, `text`, `buttons` (array of labels), optional `parse_mode` and `timeout` (default 120s). Returns the label of the tapped button. |
+
+### Inbound events
+
+| Event | Description |
+| --- | --- |
+| Text message | Forwarded to Claude as a channel notification with `chat_id`, `message_id`, `user`, `ts`. |
+| Photo | Downloaded to inbox, path included in notification so Claude can `Read` it. |
+| Emoji reaction | **NEW** — When a user reacts to a bot message, Claude receives a notification with `event_type: "reaction"`, the emoji, and the `message_id`. Use as lightweight feedback. |
 
 Inbound messages trigger a typing indicator automatically — Telegram shows "botname is typing..." while the assistant works on a response.
 

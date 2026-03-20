@@ -15,7 +15,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { Bot, InputFile, type Context } from 'grammy'
+import { Bot, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync } from 'fs'
@@ -51,6 +51,13 @@ const INBOX_DIR = join(STATE_DIR, 'inbox')
 
 const bot = new Bot(TOKEN)
 let botUsername = ''
+
+// Pending ask_user callbacks — keyed by a unique ID, resolved when the user taps a button.
+type PendingCallback = {
+  resolve: (value: string) => void
+  timer: ReturnType<typeof setTimeout>
+}
+const pendingCallbacks = new Map<string, PendingCallback>()
 
 type PendingEntry = {
   senderId: string
@@ -341,7 +348,11 @@ const mcp = new Server(
       '',
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message to update a message you previously sent (e.g. progress → result).',
+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, edit_message to update a message you previously sent (e.g. progress → result), and ask_user to present inline buttons and wait for a choice.',
+      '',
+      'When the user reacts with an emoji to a bot message, you receive a channel notification with event_type "reaction" containing the emoji and message_id. Use this as feedback (e.g. 👍 = approve, 👎 = reject).',
+      '',
+      'ask_user sends a message with inline keyboard buttons and blocks until the user taps one (or timeout). Use it when you need confirmation or a choice between options. The buttons are removed after the user taps.',
       '',
       'Messages use Telegram MarkdownV2 by default. Formatting: *bold*, _italic_, `code`, ```pre```, ~strikethrough~, __underline__, ||spoiler||, [link](url). IMPORTANT: In MarkdownV2, these characters MUST be escaped with \\ when used literally (not as formatting): _ * [ ] ( ) ~ ` > # + - = | { } . ! Use parse_mode "plain" if escaping is too complex for a given message.',
       '',
@@ -410,6 +421,35 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['chat_id', 'message_id', 'text'],
+      },
+    },
+    {
+      name: 'ask_user',
+      description: 'Send a question to the Telegram user with inline keyboard buttons and wait for their choice. Returns the label of the button the user tapped. Use this when you need the user to pick between options (e.g. confirm/cancel, choose a variant). Times out after 120 seconds.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string' },
+          text: {
+            type: 'string',
+            description: 'The question or prompt to show the user.',
+          },
+          buttons: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Button labels. Each becomes a tappable inline button. Example: ["Yes", "No", "Cancel"]',
+          },
+          parse_mode: {
+            type: 'string',
+            enum: ['MarkdownV2', 'HTML', 'plain'],
+            description: 'Telegram parse mode for the question text. Default: MarkdownV2.',
+          },
+          timeout: {
+            type: 'number',
+            description: 'Timeout in seconds. Default: 120. If the user doesn\'t tap a button in time, returns "timeout".',
+          },
+        },
+        required: ['chat_id', 'text', 'buttons'],
       },
     },
   ],
@@ -506,6 +546,46 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const id = typeof edited === 'object' ? edited.message_id : args.message_id
         return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
       }
+      case 'ask_user': {
+        const chat_id = args.chat_id as string
+        const text = args.text as string
+        const buttons = args.buttons as string[]
+        const rawParseMode = (args.parse_mode as string | undefined) ?? 'MarkdownV2'
+        const parseMode = rawParseMode === 'plain' ? undefined : rawParseMode as 'MarkdownV2' | 'HTML'
+        const timeoutSecs = (args.timeout as number | undefined) ?? 120
+
+        assertAllowedChat(chat_id)
+
+        if (!buttons.length || buttons.length > 10) {
+          throw new Error('buttons must have 1-10 items')
+        }
+
+        const callbackId = randomBytes(8).toString('hex')
+        const keyboard = new InlineKeyboard()
+        for (const label of buttons) {
+          keyboard.text(label, `ask:${callbackId}:${label}`)
+        }
+
+        const choice = await new Promise<string>((resolve) => {
+          const timer = setTimeout(() => {
+            pendingCallbacks.delete(callbackId)
+            resolve('timeout')
+          }, timeoutSecs * 1000)
+
+          pendingCallbacks.set(callbackId, { resolve, timer })
+
+          bot.api.sendMessage(chat_id, text, {
+            ...(parseMode ? { parse_mode: parseMode } : {}),
+            reply_markup: keyboard,
+          }).catch(err => {
+            clearTimeout(timer)
+            pendingCallbacks.delete(callbackId)
+            resolve(`error: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        })
+
+        return { content: [{ type: 'text', text: `user chose: ${choice}` }] }
+      }
       default:
         return {
           content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
@@ -550,6 +630,86 @@ bot.on('message:photo', async ctx => {
       process.stderr.write(`telegram channel: photo download failed: ${err}\n`)
       return undefined
     }
+  })
+})
+
+// Handle inline keyboard button taps (ask_user responses).
+bot.on('callback_query:data', async ctx => {
+  const data = ctx.callbackQuery.data
+  if (!data.startsWith('ask:')) return
+
+  const parts = data.split(':')
+  if (parts.length < 3) return
+  const callbackId = parts[1]
+  const label = parts.slice(2).join(':') // rejoin in case label contained ':'
+
+  const pending = pendingCallbacks.get(callbackId)
+  if (pending) {
+    clearTimeout(pending.timer)
+    pendingCallbacks.delete(callbackId)
+    pending.resolve(label)
+  }
+
+  // Acknowledge the callback to remove the loading spinner.
+  await ctx.answerCallbackQuery({ text: label })
+
+  // Update the message to show the selected choice (remove buttons).
+  try {
+    const msg = ctx.callbackQuery.message
+    if (msg && 'text' in msg) {
+      await bot.api.editMessageText(
+        String(msg.chat.id),
+        msg.message_id,
+        `${msg.text}\n\n✅ ${label}`,
+      )
+    }
+  } catch {
+    // Non-critical — the answer was already captured.
+  }
+})
+
+// Track user emoji reactions on bot messages and forward to Claude.
+bot.on('message_reaction', async ctx => {
+  const reaction = ctx.messageReaction
+  if (!reaction) return
+
+  const chat_id = String(reaction.chat.id)
+  const access = loadAccess()
+  const senderId = reaction.user ? String(reaction.user.id) : undefined
+
+  // Only forward reactions from allowlisted users.
+  if (!senderId || !access.allowFrom.includes(senderId)) return
+
+  const newReactions = reaction.new_reaction ?? []
+  const oldReactions = reaction.old_reaction ?? []
+
+  // Find added reactions (in new but not in old).
+  const added = newReactions.filter(
+    nr => !oldReactions.some(or => or.type === nr.type && ('emoji' in or && 'emoji' in nr ? or.emoji === nr.emoji : false))
+  )
+
+  if (added.length === 0) return
+
+  const emojis = added
+    .map(r => ('emoji' in r ? r.emoji : r.type))
+    .join(', ')
+
+  const user = reaction.user
+  const username = user && 'username' in user ? (user.username ?? String(user.id)) : senderId
+
+  void mcp.notification({
+    method: 'notifications/claude/channel',
+    params: {
+      content: `reacted with ${emojis} to message ${reaction.message_id}`,
+      meta: {
+        chat_id,
+        message_id: String(reaction.message_id),
+        user: username,
+        user_id: senderId,
+        ts: new Date(reaction.date * 1000).toISOString(),
+        event_type: 'reaction',
+      },
+    },
   })
 })
 
@@ -610,6 +770,10 @@ async function handleInbound(
 }
 
 void bot.start({
+  allowed_updates: [
+    'message', 'edited_message', 'channel_post', 'edited_channel_post',
+    'callback_query', 'message_reaction',
+  ],
   onStart: info => {
     botUsername = info.username
     process.stderr.write(`telegram channel: polling as @${info.username}\n`)

@@ -1,15 +1,6 @@
 <div align="center">
 
-```
-   _____ _                 _        _____    _
-  / ____| |               | |      |_   _|  | |
- | |    | | __ _ _   _  __| | ___    | | ___| | ___  __ _ _ __ __ _ _ __ ___
- | |    | |/ _` | | | |/ _` |/ _ \   | |/ _ \ |/ _ \/ _` | '__/ _` | '_ ` _ \
- | |____| | (_| | |_| | (_| |  __/   | |  __/ |  __/ (_| | | | (_| | | | | | |
-  \_____|_|\__,_|\__,_|\__,_|\___|   |_|\___|_|\___|\__, |_|  \__,_|_| |_| |_|
-                                                      __/ |
-                  SUPERCHARGED                       |___/
-```
+<img src="./banner.png" alt="Claude Telegram Supercharged" width="100%" />
 
 <h3>Community fork of Claude Code's Telegram plugin with threading, voice, stickers, reactions, and more.</h3>
 

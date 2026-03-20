@@ -56,7 +56,7 @@ Open a chat with [@BotFather](https://t.me/BotFather) on Telegram and send `/new
 
 BotFather replies with a token that looks like `123456789:AAHfiqksKZ8...` — that's the whole token, copy it including the leading number and colon.
 
-### 2. Install the official plugin
+### 2. Install the [official plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram)
 
 These are Claude Code commands — run `claude` to start a session first.
 

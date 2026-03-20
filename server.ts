@@ -95,12 +95,20 @@ class MessageStore {
         date            INTEGER NOT NULL,
         edit_date       INTEGER,
         is_outgoing     INTEGER DEFAULT 0,
+        thread_id       INTEGER,
         UNIQUE(chat_id, message_id)
       );
       CREATE INDEX IF NOT EXISTS idx_messages_chat_date ON messages(chat_id, date DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_chat_reply ON messages(chat_id, reply_to_msg_id) WHERE reply_to_msg_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date);
+      CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(chat_id, thread_id) WHERE thread_id IS NOT NULL;
     `)
+    // Migrate: add thread_id column to existing databases.
+    try {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN thread_id INTEGER`)
+    } catch {
+      // Column already exists — expected on non-first run.
+    }
   }
 
   store(msg: {
@@ -115,16 +123,17 @@ class MessageStore {
     reply_to_msg_id?: number
     date: number
     is_outgoing?: boolean
+    thread_id?: number
   }): void {
     this.db.run(
       `INSERT OR REPLACE INTO messages
-       (message_id, chat_id, user_id, username, first_name, text, media_type, caption, reply_to_msg_id, date, is_outgoing)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (message_id, chat_id, user_id, username, first_name, text, media_type, caption, reply_to_msg_id, date, is_outgoing, thread_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         msg.message_id, msg.chat_id, msg.user_id ?? null, msg.username ?? null,
         msg.first_name ?? null, msg.text ?? null, msg.media_type ?? null,
         msg.caption ?? null, msg.reply_to_msg_id ?? null, msg.date,
-        msg.is_outgoing ? 1 : 0,
+        msg.is_outgoing ? 1 : 0, msg.thread_id ?? null,
       ],
     )
     this.insertCount++
@@ -160,8 +169,9 @@ class MessageStore {
       const ts = new Date((m.date as number) * 1000).toISOString().slice(0, 16).replace('T', ' ')
       const sender = m.is_outgoing ? '[BOT]' : `@${m.username ?? m.user_id ?? '?'}`
       const replyTag = m.reply_to_msg_id ? ` (reply to #${m.reply_to_msg_id})` : ''
+      const topicTag = m.thread_id ? ` [topic:${m.thread_id}]` : ''
       const content = m.text ?? (m.media_type ? `[${m.media_type}]` : '[no text]')
-      return `[${ts}] ${sender}${replyTag}: ${(content as string).slice(0, 300)}`
+      return `[${ts}] ${sender}${replyTag}${topicTag}: ${(content as string).slice(0, 300)}`
     })
     return `[Recent history — last ${msgs.length} messages]\n${lines.join('\n')}`
   }
@@ -844,6 +854,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             reply_to_msg_id: reply_to,
             date: Math.floor(Date.now() / 1000),
             is_outgoing: true,
+            thread_id,
           })
         }
 
@@ -932,8 +943,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const ts = new Date((m.date as number) * 1000).toISOString().slice(0, 16).replace('T', ' ')
           const sender = m.is_outgoing ? '[BOT]' : `@${m.username ?? m.user_id ?? '?'}`
           const replyTag = m.reply_to_msg_id ? ` (reply to #${m.reply_to_msg_id})` : ''
+          const topicTag = m.thread_id ? ` [topic:${m.thread_id}]` : ''
           const content = m.text ?? (m.media_type ? `[${m.media_type}]` : '[no text]')
-          return `[${ts}] #${m.message_id} ${sender}${replyTag}: ${(content as string).slice(0, 500)}`
+          return `[${ts}] #${m.message_id} ${sender}${replyTag}${topicTag}: ${(content as string).slice(0, 500)}`
         }).join('\n')
         return { content: [{ type: 'text', text: `${msgs.length} messages:\n\n${formatted}` }] }
       }
@@ -1185,6 +1197,7 @@ bot.on('message', async (ctx, next) => {
       reply_to_msg_id: msg.reply_to_message?.message_id,
       date: msg.date,
       is_outgoing: false,
+      thread_id: (msg as any).message_thread_id ?? undefined,
     })
   }
   await next()

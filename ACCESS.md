@@ -92,6 +92,8 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`chunkMode`** chooses the split strategy: `length` cuts exactly at the limit; `newline` prefers paragraph boundaries.
 
+**`autoTranscribe`** controls whether voice/audio messages are automatically transcribed in the history middleware, even when the bot isn't mentioned. When `true` (default), all voice messages in group chats are downloaded and transcribed so that `get_history` shows the spoken text (prefixed with 🎤) instead of `[voice]`. Set to `false` to disable and reduce CPU usage on busy groups.
+
 ## Skill reference
 
 | Command | Effect |
@@ -104,7 +106,7 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 | `/telegram:access policy allowlist` | Set `dmPolicy`. Values: `pairing`, `allowlist`, `disabled`. |
 | `/telegram:access group add -1001654782309` | Enable a group. Flags: `--no-mention` (also requires disabling privacy mode), `--allow id1,id2`. |
 | `/telegram:access group rm -1001654782309` | Disable a group. |
-| `/telegram:access set ackReaction 👀` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`. |
+| `/telegram:access set ackReaction 👀` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`, `autoTranscribe`. |
 
 ## Config file
 
@@ -142,6 +144,9 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
   "textChunkLimit": 4096,
 
   // length = cut at limit. newline = prefer paragraph boundaries.
-  "chunkMode": "newline"
+  "chunkMode": "newline",
+
+  // Auto-transcribe all voice/audio in history middleware. Default: true.
+  "autoTranscribe": true
 }
 ```

@@ -190,6 +190,22 @@ The server auto-detects which whisper binary is available (checked once at start
 
 Both options require **ffmpeg** (`brew install ffmpeg`) for audio format conversion.
 
+### Auto-transcription in history
+
+When `autoTranscribe` is enabled (the default), the server transcribes **all** voice/audio messages in group chats -- even ones that don't mention the bot. This means `get_history` and the auto-injected context always show the spoken text (prefixed with 🎤) instead of `[voice]`. Claude gets full conversational context including what people said in voice messages.
+
+To disable (e.g. to save CPU on busy groups):
+
+```sh
+/telegram:access set autoTranscribe false
+```
+
+To re-enable:
+
+```sh
+/telegram:access set autoTranscribe true
+```
+
 ## Group Chats & Conversation Threading
 
 The plugin supports group chats with smart conversation threading -- Claude can follow reply chains, see who said what, and respond in the correct thread.

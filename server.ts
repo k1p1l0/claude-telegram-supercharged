@@ -247,6 +247,8 @@ type Access = {
   textChunkLimit?: number
   /** Split on paragraph boundaries instead of hard char count. */
   chunkMode?: 'length' | 'newline'
+  /** Auto-transcribe voice/audio in the history middleware (even without mention). Default: true. */
+  autoTranscribe?: boolean
 }
 
 function defaultAccess(): Access {
@@ -350,6 +352,7 @@ function readAccessFile(): Access {
       replyToMode: parsed.replyToMode,
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
+      autoTranscribe: parsed.autoTranscribe,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -1130,19 +1133,54 @@ function transcribeAudio(audioPath: string): string | undefined {
 // and stores it in SQLite regardless of whether the gate passes.
 // This way get_history returns the full group conversation, not just
 // messages addressed to the bot.
+//
+// Voice & audio messages are downloaded and transcribed here so that
+// history always contains the spoken text, even when the bot wasn't
+// mentioned. Controlled by the `autoTranscribe` config flag (default: true).
+// The transcription runs inline (blocking next()) so the stored row
+// already has text by the time downstream handlers fire.
 bot.on('message', async (ctx, next) => {
   const msg = ctx.message
   if (msg) {
     const from = msg.from
+    let text: string | undefined = msg.text ?? msg.caption ?? undefined
+    const mediaType = msg.photo ? 'photo' : msg.voice ? 'voice' : msg.audio ? 'audio'
+      : msg.sticker ? 'sticker' : msg.animation ? 'animation' : undefined
+
+    // Auto-transcribe voice/audio for history — even if the bot isn't mentioned.
+    // Opt-out via `"autoTranscribe": false` in access.json.
+    const access = loadAccess()
+    if ((access.autoTranscribe ?? true) && (msg.voice || msg.audio) && !text) {
+      try {
+        const fileObj = msg.voice ?? msg.audio
+        const file = await ctx.api.getFile(fileObj!.file_id)
+        if (file.file_path) {
+          const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+          const res = await fetch(url)
+          const buf = Buffer.from(await res.arrayBuffer())
+          const ext = file.file_path.split('.').pop() ?? 'ogg'
+          const uniqueId = (msg.voice?.file_unique_id ?? msg.audio?.file_unique_id) || 'unknown'
+          const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
+          mkdirSync(INBOX_DIR, { recursive: true })
+          writeFileSync(path, buf)
+          const transcription = transcribeAudio(path)
+          if (transcription) {
+            text = `🎤 ${transcription}`
+          }
+        }
+      } catch (err) {
+        process.stderr.write(`telegram channel: middleware voice transcription failed: ${err}\n`)
+      }
+    }
+
     messageStore.store({
       message_id: msg.message_id,
       chat_id: String(ctx.chat.id),
       user_id: from ? String(from.id) : undefined,
       username: from?.username,
       first_name: from?.first_name,
-      text: msg.text ?? msg.caption ?? undefined,
-      media_type: msg.photo ? 'photo' : msg.voice ? 'voice' : msg.audio ? 'audio'
-        : msg.sticker ? 'sticker' : msg.animation ? 'animation' : undefined,
+      text,
+      media_type: mediaType,
       caption: msg.caption ?? undefined,
       reply_to_msg_id: msg.reply_to_message?.message_id,
       date: msg.date,

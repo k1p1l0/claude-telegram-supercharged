@@ -39,20 +39,39 @@ A new `ask_user` tool — the Telegram equivalent of Claude Code's `AskUserQuest
 - Buttons are removed after selection, showing a ✅ confirmation
 - Perfect for confirmations ("Deploy?" → Yes / No), choices, and approval flows
 
+### Reaction-based status indicators
+Claude now reacts to your messages with emoji to show processing status — like read receipts on steroids.
+
+- 👀 immediately when Claude reads your message
+- 🔥 when starting heavy work (research, code generation, multi-step tasks)
+- 👍 when Claude has finished and sent its reply
+- Each reaction replaces the previous one — Telegram only keeps one bot reaction per message
+- Uses only Telegram's whitelisted bot emoji (👍 👎 ❤ 🔥 👀 🎉 😂 🤔)
+
+Beyond status, Claude also reacts expressively when a message genuinely stands out — 🔥 for impressive work, 😂 for funny messages, ❤ for heartfelt ones, 🎉 for celebrations. Selective, not robotic.
+
 ## Roadmap
 
 Here's what we're planning to build. PRs welcome!
 
+### Done
+
+- [x] **MarkdownV2 formatting** - Proper bold, italic, code, and link rendering in Telegram
+- [x] **Emoji reaction tracking** - Claude receives and acts on user reactions
+- [x] **Ask User inline buttons** - Tappable choices with blocking wait for response
+- [x] **Reaction status indicators** - 👀 → 🔥 → 👍 processing status via emoji reactions
+
+### Planned
+
 - [ ] **Message history buffer** - Keep a rolling buffer of recent messages so Claude has context without asking users to repeat themselves
-- [ ] **Scheduled messages** - Send messages at a specific time
-- [ ] **Rich media replies** - Support for inline keyboards, polls, and formatted cards
 - [ ] **Voice message transcription** - Auto-transcribe voice messages before forwarding to Claude
-- [ ] **Multi-bot support** - Run multiple bots from one server instance
 - [ ] **Conversation threading** - Smart thread management for group chats
+- [ ] **Scheduled messages** - Send messages at a specific time
+- [ ] **Multi-bot support** - Run multiple bots from one server instance
 - [ ] **Rate limiting & usage stats** - Track token usage and set limits per user
 - [ ] **Webhook mode** - Alternative to polling for production deployments
 - [ ] **Custom commands** - Define bot commands that map to Claude Code skills
-- [ ] **Message templates** - Predefined response templates for common queries
+- [ ] **Sticker & GIF support** - Send and receive stickers and GIFs
 
 ## Quick Setup
 
@@ -137,7 +156,7 @@ Then restart your Claude Code session.
 | Tool | Purpose |
 | --- | --- |
 | `reply` | Send to a chat. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for native threading, `files` (absolute paths) for attachments, and `parse_mode` (MarkdownV2/HTML/plain, defaults to MarkdownV2). Images (`.jpg`/`.png`/`.gif`/`.webp`) send as photos with inline preview; other types send as documents. Max 50MB each. Auto-chunks text; files send as separate messages after the text. Returns the sent message ID(s). |
-| `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 etc). |
+| `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 🎉 😂 🤔 etc). Also used for status indicators (👀 read → 👍 done). |
 | `edit_message` | Edit a message the bot previously sent. Supports `parse_mode` (MarkdownV2/HTML/plain). Useful for "working..." → result progress updates. Only works on the bot's own messages. |
 | `ask_user` | **NEW** — Send a question with inline keyboard buttons and wait for the user's choice. Takes `chat_id`, `text`, `buttons` (array of labels), optional `parse_mode` and `timeout` (default 120s). Returns the label of the tapped button. |
 

@@ -258,6 +258,12 @@ class MessageStore {
     return `[Recent history — last ${msgs.length} messages]\n${lines.join("\n")}`;
   }
 
+  /** Delete all messages for a chat. Returns the number of rows deleted. */
+  clearHistory(chatId: string): number {
+    const result = this.db.run("DELETE FROM messages WHERE chat_id = ?", [chatId]);
+    return result.changes;
+  }
+
   /** Prune old messages: 500/chat cap + 14-day TTL. */
   private prune(): void {
     const cutoff = Math.floor(Date.now() / 1000) - 14 * 86400;
@@ -864,6 +870,21 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["chat_id", "query"],
       },
     },
+    {
+      name: "clear_history",
+      description:
+        "Clear message history for a Telegram chat. Use this when the user asks to clean/reset/clear conversation history. IMPORTANT: Always confirm with the user via ask_user before clearing. Returns the number of deleted messages.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          chat_id: {
+            type: "string",
+            description: "Chat ID to clear history for.",
+          },
+        },
+        required: ["chat_id"],
+      },
+    },
   ],
 }));
 
@@ -1072,6 +1093,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           })
           .join("\n");
         return { content: [{ type: "text", text: `${msgs.length} matches for "${query}":\n\n${formatted}` }] };
+      }
+      case "clear_history": {
+        const chat_id = args.chat_id as string;
+        assertAllowedChat(chat_id);
+        const deleted = messageStore.clearHistory(chat_id);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Cleared ${deleted} messages from chat ${chat_id}. History is now empty for this chat. If the user also wants to reset Claude's conversation context, run /clear now.`,
+            },
+          ],
+        };
       }
       default:
         return {

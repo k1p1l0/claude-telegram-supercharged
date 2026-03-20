@@ -18,7 +18,7 @@ import {
 import { Bot, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
-import { execSync } from 'child_process'
+import { execSync, spawnSync } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
@@ -104,10 +104,9 @@ class MessageStore {
       CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(chat_id, thread_id) WHERE thread_id IS NOT NULL;
     `)
     // Migrate: add thread_id column to existing databases.
-    try {
-      this.db.exec(`ALTER TABLE messages ADD COLUMN thread_id INTEGER`)
-    } catch {
-      // Column already exists — expected on non-first run.
+    const cols = this.db.query('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'thread_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN thread_id INTEGER')
     }
   }
 
@@ -154,9 +153,11 @@ class MessageStore {
 
   /** Search messages by text pattern (LIKE %query%). */
   search(chatId: string, query: string, limit = 20): Array<Record<string, unknown>> {
+    // Escape LIKE wildcards so literal % and _ in the query match themselves.
+    const escaped = query.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
     return this.db.query(
-      `SELECT * FROM messages WHERE chat_id = ? AND text LIKE ? ORDER BY date DESC LIMIT ?`,
-    ).all(chatId, `%${query}%`, limit) as Array<Record<string, unknown>>
+      `SELECT * FROM messages WHERE chat_id = ? AND text LIKE ? ESCAPE '\\' ORDER BY date DESC LIMIT ?`,
+    ).all(chatId, `%${escaped}%`, limit) as Array<Record<string, unknown>>
   }
 
   /** Format last N messages for injection into Claude's context. */
@@ -1086,6 +1087,8 @@ function hasFfmpeg(): boolean {
  * Transcribe an audio file. Returns the transcription text or undefined.
  * Tries whisper-cli (whisper.cpp) first, then whisper (openai-whisper).
  * Converts to wav via ffmpeg if needed for whisper-cli.
+ * Uses spawnSync (array args) instead of execSync (shell string) to prevent
+ * shell injection via file paths sourced from the Telegram API.
  */
 function transcribeAudio(audioPath: string): string | undefined {
   const bin = findWhisperBin()
@@ -1101,33 +1104,49 @@ function transcribeAudio(audioPath: string): string | undefined {
       // whisper-cli needs wav input — convert via ffmpeg
       const wavPath = audioPath.replace(/\.[^.]+$/, '.wav')
       if (hasFfmpeg()) {
-        execSync(`ffmpeg -i "${audioPath}" -ar 16000 -ac 1 "${wavPath}" -y`, {
+        const ffResult = spawnSync('ffmpeg', ['-i', audioPath, '-ar', '16000', '-ac', '1', wavPath, '-y'], {
           timeout: 30_000,
           stdio: 'pipe',
         })
+        if (ffResult.status !== 0) {
+          process.stderr.write(`telegram channel: ffmpeg conversion failed: ${ffResult.stderr?.toString()}\n`)
+          return undefined
+        }
       } else {
         process.stderr.write('telegram channel: ffmpeg not found — cannot convert to wav for whisper-cli\n')
         return undefined
       }
-      const output = execSync(
-        `whisper-cli -m "${model}" -l auto --no-timestamps -f "${wavPath}"`,
-        { timeout: 120_000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-      )
-      // Clean up wav
-      try { rmSync(wavPath) } catch {}
-      // whisper-cli output has the transcription on stdout, filter out timing lines
-      const lines = output.split('\n').filter(l =>
-        l.trim() && !l.startsWith('whisper_') && !l.startsWith('load_backend')
-      )
-      return lines.join(' ').trim() || undefined
+      try {
+        const result = spawnSync('whisper-cli', ['-m', model, '-l', 'auto', '--no-timestamps', '-f', wavPath], {
+          timeout: 120_000,
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+        if (result.status !== 0) {
+          process.stderr.write(`telegram channel: whisper-cli failed: ${result.stderr}\n`)
+          return undefined
+        }
+        const output = result.stdout ?? ''
+        const lines = output.split('\n').filter(l =>
+          l.trim() && !l.startsWith('whisper_') && !l.startsWith('load_backend')
+        )
+        return lines.join(' ').trim() || undefined
+      } finally {
+        // Always clean up the wav file, even on timeout/error.
+        try { rmSync(wavPath) } catch {}
+      }
     }
 
     if (bin === 'whisper') {
       // openai-whisper: outputs to /tmp/<filename>.txt
-      execSync(`whisper "${audioPath}" --output_format txt --output_dir /tmp`, {
+      const result = spawnSync('whisper', [audioPath, '--output_format', 'txt', '--output_dir', '/tmp'], {
         timeout: 120_000,
         stdio: 'pipe',
       })
+      if (result.status !== 0) {
+        process.stderr.write(`telegram channel: whisper failed: ${result.stderr?.toString()}\n`)
+        return undefined
+      }
       const baseName = audioPath.split('/').pop()?.replace(/\.[^.]+$/, '') ?? 'voice'
       const txtPath = `/tmp/${baseName}.txt`
       try {
@@ -1140,6 +1159,22 @@ function transcribeAudio(audioPath: string): string | undefined {
   return undefined
 }
 
+// ── Middleware transcription cache ─────────────────────────────────
+// The middleware downloads + transcribes voice/audio before the type-specific
+// handlers run. Cache the result so handlers can reuse it instead of
+// downloading and transcribing a second time. Entries are short-lived (60s).
+const mediaCache = new Map<string, { path: string; transcription?: string; ts: number }>()
+function cacheMedia(uniqueId: string, path: string, transcription?: string): void {
+  mediaCache.set(uniqueId, { path, transcription, ts: Date.now() })
+  // Prune stale entries (older than 60s).
+  if (mediaCache.size > 50) {
+    const cutoff = Date.now() - 60_000
+    for (const [k, v] of mediaCache) {
+      if (v.ts < cutoff) mediaCache.delete(k)
+    }
+  }
+}
+
 // ── Store ALL messages before gate check ──────────────────────────
 // This middleware runs for every message (text, photo, voice, etc.)
 // and stores it in SQLite regardless of whether the gate passes.
@@ -1150,7 +1185,8 @@ function transcribeAudio(audioPath: string): string | undefined {
 // history always contains the spoken text, even when the bot wasn't
 // mentioned. Controlled by the `autoTranscribe` config flag (default: true).
 // The transcription runs inline (blocking next()) so the stored row
-// already has text by the time downstream handlers fire.
+// already has text by the time downstream handlers fire. Results are
+// cached so the type-specific handlers avoid a redundant download.
 bot.on('message', async (ctx, next) => {
   const msg = ctx.message
   if (msg) {
@@ -1169,6 +1205,7 @@ bot.on('message', async (ctx, next) => {
         if (file.file_path) {
           const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
           const res = await fetch(url)
+          if (!res.ok) throw new Error(`Telegram file download failed: ${res.status} ${res.statusText}`)
           const buf = Buffer.from(await res.arrayBuffer())
           const ext = file.file_path.split('.').pop() ?? 'ogg'
           const uniqueId = (msg.voice?.file_unique_id ?? msg.audio?.file_unique_id) || 'unknown'
@@ -1176,6 +1213,8 @@ bot.on('message', async (ctx, next) => {
           mkdirSync(INBOX_DIR, { recursive: true })
           writeFileSync(path, buf)
           const transcription = transcribeAudio(path)
+          // Cache for the type-specific handler to reuse.
+          cacheMedia(uniqueId, path, transcription)
           if (transcription) {
             text = `🎤 ${transcription}`
           }
@@ -1237,17 +1276,23 @@ bot.on('message:voice', async ctx => {
   const caption = ctx.message.caption ?? '(voice message)'
   await handleInbound(ctx, caption, async () => {
     const voice = ctx.message.voice
+    // Reuse file + transcription from the middleware cache if available.
+    const cached = mediaCache.get(voice.file_unique_id)
+    if (cached) {
+      mediaCache.delete(voice.file_unique_id)
+      return { path: cached.path, type: 'audio' as const, transcription: cached.transcription }
+    }
     try {
       const file = await ctx.api.getFile(voice.file_id)
       if (!file.file_path) return undefined
       const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
       const res = await fetch(url)
+      if (!res.ok) throw new Error(`download failed: ${res.status}`)
       const buf = Buffer.from(await res.arrayBuffer())
       const ext = file.file_path.split('.').pop() ?? 'ogg'
       const path = join(INBOX_DIR, `${Date.now()}-${voice.file_unique_id}.${ext}`)
       mkdirSync(INBOX_DIR, { recursive: true })
       writeFileSync(path, buf)
-      // Auto-transcribe if whisper is available
       const transcription = transcribeAudio(path)
       return { path, type: 'audio' as const, transcription }
     } catch (err) {
@@ -1261,11 +1306,18 @@ bot.on('message:audio', async ctx => {
   const caption = ctx.message.caption ?? '(audio file)'
   await handleInbound(ctx, caption, async () => {
     const audio = ctx.message.audio
+    // Reuse file + transcription from the middleware cache if available.
+    const cached = mediaCache.get(audio.file_unique_id)
+    if (cached) {
+      mediaCache.delete(audio.file_unique_id)
+      return { path: cached.path, type: 'audio' as const, transcription: cached.transcription }
+    }
     try {
       const file = await ctx.api.getFile(audio.file_id)
       if (!file.file_path) return undefined
       const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
       const res = await fetch(url)
+      if (!res.ok) throw new Error(`download failed: ${res.status}`)
       const buf = Buffer.from(await res.arrayBuffer())
       const ext = file.file_path.split('.').pop() ?? 'mp3'
       const path = join(INBOX_DIR, `${Date.now()}-${audio.file_unique_id}.${ext}`)

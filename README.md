@@ -34,7 +34,7 @@ Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.co
 
 | Feature | What it does |
 | --- | --- |
-| **🎤 Voice Messages** | Talk to Claude. Whisper transcribes your voice messages server-side -- like Wispr Flow for Claude Code. Works from your phone while walking. |
+| **🎤 Voice Messages** | Talk to Claude. OpenAI Whisper API (primary) or local whisper (fallback) transcribes your voice server-side -- like Wispr Flow for Claude Code. Works from your phone while walking. |
 | **🎤 Auto-transcribe in History** | ALL voice messages in group chats are transcribed, even without mentioning the bot. Claude has full context of what everyone said. Configurable via `autoTranscribe`. |
 | **🧠 Conversation Memory** | `/clean` saves a summary before clearing. Memory persists across sessions. Claude never forgets what you talked about. |
 | **💬 Message History** | SQLite-backed rolling store. Claude has context across restarts. `get_history` + `search_messages` tools. No more "what were we talking about?" |
@@ -175,19 +175,25 @@ Think of it as **Wispr Flow for Claude Code**. Open Telegram, hold the mic butto
 
 ### Transcription Setup
 
-The server auto-detects which whisper binary is available (checked once at startup):
+The server tries transcription methods in this order:
 
-1. **[whisper.cpp](https://github.com/ggml-org/whisper.cpp)** (recommended) -- `brew install whisper-cpp`. Fast C++ port, runs fully offline. Requires a model file:
+1. **OpenAI Whisper API** (recommended) -- fastest, highest quality, non-blocking. Set your API key in `~/.claude/channels/telegram/.env`:
+   ```
+   OPENAI_API_KEY=sk-proj-...
+   ```
+   Uses the `whisper-1` model. Costs ~$0.006/minute of audio. No local install needed.
+
+2. **[whisper.cpp](https://github.com/ggml-org/whisper.cpp)** (local fallback) -- `brew install whisper-cpp`. Fast C++ port, runs fully offline. Requires a model file:
    ```sh
    # Download the small multilingual model (465MB, good quality/speed balance)
    mkdir -p /usr/local/share/whisper-cpp/models
    curl -L -o /usr/local/share/whisper-cpp/models/ggml-small.bin \
      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
    ```
-2. **[openai-whisper](https://github.com/openai/whisper)** (fallback) -- `pip install openai-whisper`. Python-based, slower but also works offline.
-3. **No whisper** -- voice messages are still downloaded and the `audio_path` is included in the notification, but no transcription is provided. Claude will suggest installing whisper.
+3. **[openai-whisper](https://github.com/openai/whisper)** (local fallback) -- `pip install openai-whisper`. Python-based, slower but also works offline.
+4. **No transcriber** -- voice messages are still downloaded and the `audio_path` is included in the notification, but no transcription is provided.
 
-Both options require **ffmpeg** (`brew install ffmpeg`) for audio format conversion.
+Local options (2 & 3) require **ffmpeg** (`brew install ffmpeg`) for audio format conversion. If you have an OpenAI API key, option 1 is recommended -- it's async (doesn't block the event loop), faster, and more accurate.
 
 ### Auto-transcription in history
 
@@ -358,6 +364,7 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 
 - [x] Daemon mode supervisor (auto-restart + context reset from Telegram)
 - [x] Telegraph Instant View for long-form content
+- [x] OpenAI Whisper API with local fallback
 
 ### Planned
 - [ ] **Remote permission approval** -- Approve Claude Code permission prompts via Telegram inline buttons

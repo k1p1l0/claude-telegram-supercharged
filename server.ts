@@ -1482,11 +1482,46 @@ function videoToCollage(srcPath: string, outPath: string, maxFrames = 6): string
 }
 
 // ── Voice/audio transcription ──────────────────────────────────────
-// Auto-transcribe voice messages and audio files using locally installed
-// whisper-cli (whisper.cpp/Homebrew) or whisper (openai-whisper/pip).
+// Priority: (1) OpenAI Whisper API if OPENAI_API_KEY is set,
+// (2) local whisper-cli (whisper.cpp), (3) local whisper (openai-whisper/pip).
 // Returns the transcription text, or undefined if no transcriber is available.
 
-/** Detect which whisper binary is available (cached after first call). */
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+/**
+ * Transcribe via OpenAI Whisper API. Non-blocking async fetch.
+ * Returns transcription text or undefined on failure.
+ */
+async function transcribeViaOpenAI(audioPath: string): Promise<string | undefined> {
+  if (!OPENAI_API_KEY) return undefined;
+  try {
+    const audioData = readFileSync(audioPath);
+    const ext = extname(audioPath).slice(1) || "ogg";
+    const filename = `voice.${ext}`;
+
+    const formData = new FormData();
+    formData.append("file", new Blob([audioData]), filename);
+    formData.append("model", "whisper-1");
+
+    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: formData,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      process.stderr.write(`telegram channel: OpenAI Whisper API error ${res.status}: ${errText}\n`);
+      return undefined;
+    }
+    const data = (await res.json()) as { text?: string };
+    return data.text?.trim() || undefined;
+  } catch (err) {
+    process.stderr.write(`telegram channel: OpenAI Whisper API failed: ${err}\n`);
+    return undefined;
+  }
+}
+
+/** Detect which local whisper binary is available (cached after first call). */
 let _whisperBin: string | false | undefined;
 function findWhisperBin(): string | false {
   if (_whisperBin !== undefined) return _whisperBin;
@@ -1535,12 +1570,15 @@ function hasFfmpeg(): boolean {
 
 /**
  * Transcribe an audio file. Returns the transcription text or undefined.
- * Tries whisper-cli (whisper.cpp) first, then whisper (openai-whisper).
- * Converts to wav via ffmpeg if needed for whisper-cli.
- * Uses spawnSync (array args) instead of execSync (shell string) to prevent
- * shell injection via file paths sourced from the Telegram API.
+ * Priority: (1) OpenAI Whisper API, (2) whisper-cli, (3) openai-whisper local.
+ * Uses spawnSync (array args) for local tools to prevent shell injection.
  */
-function transcribeAudio(audioPath: string): string | undefined {
+async function transcribeAudio(audioPath: string): Promise<string | undefined> {
+  // Try OpenAI Whisper API first (non-blocking, higher quality)
+  const openaiResult = await transcribeViaOpenAI(audioPath);
+  if (openaiResult) return openaiResult;
+
+  // Fall back to local whisper binaries
   const bin = findWhisperBin();
   if (!bin) return undefined;
 
@@ -1679,7 +1717,7 @@ bot.on("message", async (ctx, next) => {
           const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`);
           mkdirSync(INBOX_DIR, { recursive: true });
           writeFileSync(path, buf);
-          const transcription = transcribeAudio(path);
+          const transcription = await transcribeAudio(path);
           // Cache for the type-specific handler to reuse.
           cacheMedia(uniqueId, path, transcription);
           if (transcription) {
@@ -1760,7 +1798,7 @@ bot.on("message:voice", async (ctx) => {
       const path = join(INBOX_DIR, `${Date.now()}-${voice.file_unique_id}.${ext}`);
       mkdirSync(INBOX_DIR, { recursive: true });
       writeFileSync(path, buf);
-      const transcription = transcribeAudio(path);
+      const transcription = await transcribeAudio(path);
       return { path, type: "audio" as const, transcription };
     } catch (err) {
       process.stderr.write(`telegram channel: voice download failed: ${err}\n`);
@@ -1790,7 +1828,7 @@ bot.on("message:audio", async (ctx) => {
       const path = join(INBOX_DIR, `${Date.now()}-${audio.file_unique_id}.${ext}`);
       mkdirSync(INBOX_DIR, { recursive: true });
       writeFileSync(path, buf);
-      const transcription = transcribeAudio(path);
+      const transcription = await transcribeAudio(path);
       return { path, type: "audio" as const, transcription };
     } catch (err) {
       process.stderr.write(`telegram channel: audio download failed: ${err}\n`);

@@ -156,7 +156,10 @@ async function ensureTelegraphToken(authorName: string): Promise<string> {
   telegraphToken = data.result.access_token;
   try {
     const existing = readFileSync(ENV_FILE, "utf8").trimEnd();
-    const withoutOld = existing.split("\n").filter((l) => !l.startsWith("TELEGRAPH_ACCESS_TOKEN=")).join("\n");
+    const withoutOld = existing
+      .split("\n")
+      .filter((l) => !l.startsWith("TELEGRAPH_ACCESS_TOKEN="))
+      .join("\n");
     writeFileSync(ENV_FILE, `${withoutOld}\nTELEGRAPH_ACCESS_TOKEN=${telegraphToken}\n`, { mode: 0o600 });
   } catch {}
   return telegraphToken;
@@ -209,14 +212,15 @@ function inlineToNodes(text: string): TelegraphNode[] {
   const nodes: TelegraphNode[] = [];
   const re = /(\*\*(.+?)\*\*|\*(.+?)\*|`([^`]+?)`|\[(.+?)\]\((.+?)\))/g;
   let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
+  let m: RegExpExecArray | null = re.exec(text);
+  while (m !== null) {
     if (m.index > last) nodes.push(text.slice(last, m.index));
     if (m[2] != null) nodes.push({ tag: "b", children: [m[2]] });
     else if (m[3] != null) nodes.push({ tag: "i", children: [m[3]] });
     else if (m[4] != null) nodes.push({ tag: "code", children: [m[4]] });
     else if (m[5] != null) nodes.push({ tag: "a", attrs: { href: m[6] }, children: [m[5]] });
     last = m.index + m[0].length;
+    m = re.exec(text);
   }
   if (last < text.length) nodes.push(text.slice(last));
   return nodes;
@@ -244,12 +248,19 @@ function markdownToTelegraphNodes(markdown: string): TelegraphNode[] {
     }
 
     // Horizontal rule
-    if (/^[-*_]{3,}\s*$/.test(line)) { nodes.push({ tag: "hr" }); i++; continue; }
+    if (/^[-*_]{3,}\s*$/.test(line)) {
+      nodes.push({ tag: "hr" });
+      i++;
+      continue;
+    }
 
     // Markdown table — convert to pre-formatted monospace block (Telegraph has no <table>)
     if (line.includes("|") && line.trim().startsWith("|")) {
       const parseRow = (row: string): string[] =>
-        row.split("|").map((c) => c.trim()).filter((c) => c.length > 0);
+        row
+          .split("|")
+          .map((c) => c.trim())
+          .filter((c) => c.length > 0);
       const headers = parseRow(line);
       i++;
       // Skip separator row (|---|---|)
@@ -264,17 +275,12 @@ function markdownToTelegraphNodes(markdown: string): TelegraphNode[] {
       const colCount = Math.max(headers.length, ...rows.map((r) => r.length));
       const widths: number[] = [];
       for (let c = 0; c < colCount; c++) {
-        widths.push(Math.max(
-          (headers[c] ?? "").length,
-          ...rows.map((r) => (r[c] ?? "").length),
-        ));
+        widths.push(Math.max((headers[c] ?? "").length, ...rows.map((r) => (r[c] ?? "").length)));
       }
       const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - s.length));
       const headerLine = headers.map((h, c) => pad(h, widths[c])).join(" | ");
       const separator = widths.map((w) => "-".repeat(w)).join("-+-");
-      const dataLines = rows.map((row) =>
-        row.map((cell, c) => pad(cell, widths[c])).join(" | "),
-      );
+      const dataLines = rows.map((row) => row.map((cell, c) => pad(cell, widths[c])).join(" | "));
       const tableText = [headerLine, separator, ...dataLines].join("\n");
       nodes.push({ tag: "pre", children: [tableText] });
       continue;
@@ -282,9 +288,17 @@ function markdownToTelegraphNodes(markdown: string): TelegraphNode[] {
 
     // Headings (h4 before h3 so #### matches first)
     const h4 = line.match(/^#{4}\s+(.+)/);
-    if (h4) { nodes.push({ tag: "h4", children: inlineToNodes(h4[1]) }); i++; continue; }
+    if (h4) {
+      nodes.push({ tag: "h4", children: inlineToNodes(h4[1]) });
+      i++;
+      continue;
+    }
     const h3 = line.match(/^#{1,3}\s+(.+)/);
-    if (h3) { nodes.push({ tag: "h3", children: inlineToNodes(h3[1]) }); i++; continue; }
+    if (h3) {
+      nodes.push({ tag: "h3", children: inlineToNodes(h3[1]) });
+      i++;
+      continue;
+    }
 
     // Blockquote
     if (line.startsWith("> ")) {
@@ -330,15 +344,24 @@ function markdownToTelegraphNodes(markdown: string): TelegraphNode[] {
     }
 
     // Blank line
-    if (line.trim() === "") { i++; continue; }
+    if (line.trim() === "") {
+      i++;
+      continue;
+    }
 
     // Paragraph
     const paraLines: string[] = [];
-    while (i < lines.length && lines[i].trim() !== "" && !lines[i].startsWith("#")
-      && !lines[i].startsWith("```") && !lines[i].startsWith("> ")
-      && !/^[-*] /.test(lines[i]) && !/^\d+\. /.test(lines[i])
-      && !/^[-*_]{3,}\s*$/.test(lines[i])
-      && !/^!\[/.test(lines[i])) {
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !lines[i].startsWith("#") &&
+      !lines[i].startsWith("```") &&
+      !lines[i].startsWith("> ") &&
+      !/^[-*] /.test(lines[i]) &&
+      !/^\d+\. /.test(lines[i]) &&
+      !/^[-*_]{3,}\s*$/.test(lines[i]) &&
+      !/^!\[/.test(lines[i])
+    ) {
       paraLines.push(lines[i]);
       i++;
     }
@@ -1198,7 +1221,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
                 },
                 chat_id: {
                   type: "string",
-                  description: "Chat ID — needed to upload local images via Telegram. Required if content has local image paths.",
+                  description:
+                    "Chat ID — needed to upload local images via Telegram. Required if content has local image paths.",
                 },
                 author_name: {
                   type: "string",
@@ -2202,7 +2226,7 @@ void bot.start({
   onStart: (info) => {
     botUsername = info.username;
     process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-    const whisperMethod = OPENAI_API_KEY ? `OpenAI API (${OPENAI_WHISPER_MODEL})` : (findWhisperBin() || "none");
+    const whisperMethod = OPENAI_API_KEY ? `OpenAI API (${OPENAI_WHISPER_MODEL})` : findWhisperBin() || "none";
     process.stderr.write(`telegram channel: transcription: ${whisperMethod}\n`);
   },
 });

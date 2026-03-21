@@ -1487,6 +1487,8 @@ function videoToCollage(srcPath: string, outPath: string, maxFrames = 6): string
 // Returns the transcription text, or undefined if no transcriber is available.
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// Configurable model: whisper-1 (default, $0.006/min) or gpt-4o-transcribe (newer, higher quality).
+const OPENAI_WHISPER_MODEL = process.env.OPENAI_WHISPER_MODEL || "whisper-1";
 
 /**
  * Transcribe via OpenAI Whisper API. Non-blocking async fetch.
@@ -1501,7 +1503,7 @@ async function transcribeViaOpenAI(audioPath: string): Promise<string | undefine
 
     const formData = new FormData();
     formData.append("file", new Blob([audioData]), filename);
-    formData.append("model", "whisper-1");
+    formData.append("model", OPENAI_WHISPER_MODEL);
 
     const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
@@ -2089,5 +2091,7 @@ void bot.start({
   onStart: (info) => {
     botUsername = info.username;
     process.stderr.write(`telegram channel: polling as @${info.username}\n`);
+    const whisperMethod = OPENAI_API_KEY ? `OpenAI API (${OPENAI_WHISPER_MODEL})` : (findWhisperBin() || "none");
+    process.stderr.write(`telegram channel: transcription: ${whisperMethod}\n`);
   },
 });

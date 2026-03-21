@@ -181,7 +181,11 @@ The server tries transcription methods in this order:
    ```
    OPENAI_API_KEY=sk-proj-...
    ```
-   Uses the `whisper-1` model. Costs ~$0.006/minute of audio. No local install needed.
+   Uses `whisper-1` by default ($0.006/min). You can switch to a different model:
+   ```
+   OPENAI_WHISPER_MODEL=gpt-4o-transcribe
+   ```
+   No local install needed. The active transcription method is logged at startup.
 
 2. **[whisper.cpp](https://github.com/ggml-org/whisper.cpp)** (local fallback) -- `brew install whisper-cpp`. Fast C++ port, runs fully offline. Requires a model file:
    ```sh

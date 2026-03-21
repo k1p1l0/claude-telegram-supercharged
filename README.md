@@ -277,7 +277,127 @@ The supervisor spawns Claude with `--channels plugin:telegram@claude-plugins-off
 
 ### Always-on with launchd (macOS)
 
-For a truly persistent setup, create `~/Library/LaunchAgents/com.user.claude-telegram.plist` and load with `launchctl load`.
+Running the supervisor in a terminal (or tmux/screen) works for quick sessions, but has a fundamental problem on macOS: **the system suspends background processes aggressively**. When you close the lid, switch users, or the Mac goes to sleep, macOS sends `SIGSTOP` to terminal processes — your bot goes silent until you open the lid again. tmux/screen don't help because they run in userspace and get suspended too.
+
+**launchd** is Apple's native process manager — the same system that keeps Spotlight, Time Machine, and iCloud running. It operates at the OS level, outside of any terminal session, so it:
+
+- **Survives lid close** -- the process keeps running when you close your MacBook (on power)
+- **Survives logout** -- stays alive even if you log out of your user session
+- **Auto-starts on boot** -- no need to remember to start it after a restart
+- **Auto-restarts on crash** -- if the supervisor dies unexpectedly, launchd brings it back
+- **Stays awake** -- we wrap the supervisor with `caffeinate -s` to prevent system sleep
+
+#### Setup
+
+Create `~/Library/LaunchAgents/com.user.claude-telegram.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.claude-telegram</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/path/to/bun</string>
+        <string>/Users/YOU/.claude/scripts/telegram-supervisor.ts</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/.claude/channels/telegram/data/supervisor-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/.claude/channels/telegram/data/supervisor-stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/YOU</string>
+        <key>PATH</key>
+        <string>/path/to/bun/dir:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
+```
+
+Replace `/path/to/bun` with your bun path (`which bun`) and `/Users/YOU` with your home directory.
+
+#### Managing the daemon
+
+**Start the daemon:**
+
+```sh
+launchctl load ~/Library/LaunchAgents/com.user.claude-telegram.plist
+```
+
+**Stop the daemon:**
+
+```sh
+launchctl unload ~/Library/LaunchAgents/com.user.claude-telegram.plist
+```
+
+**Check if it's running:**
+
+```sh
+launchctl list | grep claude-telegram
+```
+
+A running daemon shows its PID in the first column. A `0` in the status column means it exited cleanly; non-zero means it crashed (launchd will restart it).
+
+**View logs:**
+
+```sh
+tail -f ~/.claude/channels/telegram/data/supervisor-stderr.log
+```
+
+**Restart (reload config after editing the plist):**
+
+```sh
+launchctl unload ~/Library/LaunchAgents/com.user.claude-telegram.plist
+launchctl load ~/Library/LaunchAgents/com.user.claude-telegram.plist
+```
+
+**Remove completely (stop + delete):**
+
+```sh
+launchctl unload ~/Library/LaunchAgents/com.user.claude-telegram.plist
+rm ~/Library/LaunchAgents/com.user.claude-telegram.plist
+```
+
+#### How the layers work together
+
+```
+launchd (OS-level)
+  └── caffeinate -s (prevents system sleep)
+        └── supervisor.ts (manages Claude lifecycle)
+              └── claude --channels plugin:telegram (the actual bot)
+```
+
+- **launchd** ensures the process tree is always alive
+- **caffeinate** keeps the Mac awake while the process runs
+- **supervisor** handles Claude-specific restarts (context reset, crash recovery with backoff)
+- **Claude** runs as a managed child process with the Telegram channel
+
+> **Note:** `caffeinate -s` prevents sleep only when connected to power. On battery with the lid closed, macOS will eventually sleep regardless. For true 24/7 uptime on battery, consider running on a server instead.
 
 ## Group Chats & Conversation Threading
 

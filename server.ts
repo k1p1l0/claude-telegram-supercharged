@@ -123,6 +123,7 @@ try {
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === "static";
+const TELEGRAPH_ENABLED = process.env.TELEGRAPH_ENABLED !== "false"; // default true
 
 if (!TOKEN) {
   process.stderr.write(
@@ -982,7 +983,11 @@ const mcp = new Server(
       "",
       "SESSION MANAGEMENT: Use clear_history to wipe a chat's message history. Before clearing, ALWAYS: (1) use ask_user to confirm with the user, (2) call get_history to retrieve recent messages, (3) write a 2-3 sentence summary of the conversation, (4) call save_memory with the summary so context persists across clears. (5) Send a Telegram reply confirming the reset. (6) THEN call clear_history. If the user wants a full context reset (clear both history AND conversation context), pass restart_context: true to clear_history — this signals the supervisor daemon to restart Claude for a fresh session. IMPORTANT: Send the Telegram confirmation reply BEFORE calling clear_history with restart_context, because the process will be killed ~3 seconds after the signal is written.",
       "",
-      "TELEGRAPH FOR LONG CONTENT: When you produce content longer than ~800 characters, multiple sections, code blocks, or structured documents (research summaries, analyses, how-to guides, code reviews), use create_telegraph_page instead of sending a wall of text via reply. Write the full content in Markdown, call create_telegraph_page with a title and the body, then send the returned URL via reply. IMPORTANT RULES: (1) REPLY MESSAGE: Keep it short — one sentence summary + the URL. Do NOT use emojis in the reply or article. Write clean professional text. End with 👇 pointing to the Instant View button. Example: 'Complete analysis on X. Tap Instant View to read 👇\\n\\nhttps://telegra.ph/...'. (2) IMAGES: Always include relevant images in the article when available. Use ![description](url) syntax. If the user sent photos earlier in the conversation, reference them by their local path from the inbox — local paths are auto-uploaded to Telegram and converted to public URLs. For research articles, find and include relevant public images from the web to make the article visually rich. Pass chat_id when calling the tool so local images can be uploaded. (3) Do NOT use Telegraph for short answers or single-paragraph responses.",
+      ...(TELEGRAPH_ENABLED
+        ? [
+            "TELEGRAPH FOR LONG CONTENT: When you produce content longer than ~800 characters, multiple sections, code blocks, or structured documents (research summaries, analyses, how-to guides, code reviews), use create_telegraph_page instead of sending a wall of text via reply. Write the full content in Markdown, call create_telegraph_page with a title and the body, then send the returned URL via reply. IMPORTANT RULES: (1) REPLY MESSAGE: Keep it short — one sentence summary + the URL. Do NOT use emojis in the reply or article. Write clean professional text. End with 👇 pointing to the Instant View button. Example: 'Complete analysis on X. Tap Instant View to read 👇\\n\\nhttps://telegra.ph/...'. (2) IMAGES: Always include relevant images in the article when available. Use ![description](url) syntax. If the user sent photos earlier in the conversation, reference them by their local path from the inbox — local paths are auto-uploaded to Telegram and converted to public URLs. For research articles, find and include relevant public images from the web to make the article visually rich. Pass chat_id when calling the tool so local images can be uploaded. (3) Do NOT use Telegraph for short answers or single-paragraph responses.",
+          ]
+        : []),
       "",
       ...(readMemory() ? ["CONVERSATION MEMORY (summaries from previous sessions):", readMemory()] : []),
     ].join("\n"),
@@ -1173,38 +1178,42 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["chat_id", "summary"],
       },
     },
-    {
-      name: "create_telegraph_page",
-      description:
-        "Publish long-form content (research results, articles, analyses, reports) to Telegraph (telegra.ph) and return a public URL. Telegram renders Telegraph links as Instant View — a native full-screen article reader. Use this instead of reply when the content is longer than ~800 characters, contains multiple headings/sections, or includes code blocks. After creating the page, send the URL via the reply tool with a one-sentence summary.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          title: {
-            type: "string",
-            description: "Page title. Shown as the article headline.",
-          },
-          content: {
-            type: "string",
+    ...(TELEGRAPH_ENABLED
+      ? [
+          {
+            name: "create_telegraph_page",
             description:
-              "Article body in Markdown. Supports # headings, **bold**, *italic*, `code`, ```code blocks```, > blockquotes, - bullet lists, 1. numbered lists, [text](url) links, --- rules, and ![alt](url) images. Images can be public URLs or local file paths (local files are auto-uploaded via Telegram).",
+              "Publish long-form content (research results, articles, analyses, reports) to Telegraph (telegra.ph) and return a public URL. Telegram renders Telegraph links as Instant View — a native full-screen article reader. Use this instead of reply when the content is longer than ~800 characters, contains multiple headings/sections, or includes code blocks. After creating the page, send the URL via the reply tool with a one-sentence summary.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                title: {
+                  type: "string",
+                  description: "Page title. Shown as the article headline.",
+                },
+                content: {
+                  type: "string",
+                  description:
+                    "Article body in Markdown. Supports # headings, **bold**, *italic*, `code`, ```code blocks```, > blockquotes, - bullet lists, 1. numbered lists, [text](url) links, --- rules, and ![alt](url) images. Images can be public URLs or local file paths (local files are auto-uploaded via Telegram).",
+                },
+                chat_id: {
+                  type: "string",
+                  description: "Chat ID — needed to upload local images via Telegram. Required if content has local image paths.",
+                },
+                author_name: {
+                  type: "string",
+                  description: "Optional byline under the title. Defaults to 'Claude'.",
+                },
+                author_url: {
+                  type: "string",
+                  description: "Optional URL linked from the author name.",
+                },
+              },
+              required: ["title", "content"],
+            },
           },
-          chat_id: {
-            type: "string",
-            description: "Chat ID — needed to upload local images via Telegram. Required if content has local image paths.",
-          },
-          author_name: {
-            type: "string",
-            description: "Optional byline under the title. Defaults to 'Claude'.",
-          },
-          author_url: {
-            type: "string",
-            description: "Optional URL linked from the author name.",
-          },
-        },
-        required: ["title", "content"],
-      },
-    },
+        ]
+      : []),
   ],
 }));
 
@@ -1461,6 +1470,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         return { content: [{ type: "text", text: "Memory saved. Summary will be loaded on next startup." }] };
       }
       case "create_telegraph_page": {
+        if (!TELEGRAPH_ENABLED) {
+          return {
+            content: [{ type: "text", text: "Telegraph is disabled. Set TELEGRAPH_ENABLED=true in .env to enable." }],
+            isError: true,
+          };
+        }
         const title = args.title as string;
         let content = args.content as string;
         const chatId = args.chat_id as string | undefined;

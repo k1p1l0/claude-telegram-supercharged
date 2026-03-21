@@ -215,6 +215,23 @@ To re-enable:
 /telegram:access set autoTranscribe true
 ```
 
+## Telegraph (Instant View Articles)
+
+By default, Claude creates [Telegraph](https://telegra.ph) articles for long-form content (research summaries, guides, code reviews) and sends them as Instant View links in Telegram. Telegraph posts are **publicly accessible** by URL.
+
+If you prefer to keep all content inside the chat (no public pages), disable Telegraph entirely in `~/.claude/channels/telegram/.env`:
+
+```
+TELEGRAPH_ENABLED=false
+```
+
+When disabled:
+- The `create_telegraph_page` tool is hidden from Claude
+- Claude sends long content directly in chat messages instead
+- The system prompt no longer instructs Claude to use Telegraph
+
+Default is `true` (enabled) for backward compatibility. Requires MCP server restart to take effect.
+
 ## Conversation Memory
 
 When you clear chat history, Claude first saves a short summary to `~/.claude/channels/telegram/data/memory.md`. This file is loaded into Claude's instructions on every startup -- so context from previous sessions is never fully lost.

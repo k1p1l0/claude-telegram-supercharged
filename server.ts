@@ -997,6 +997,48 @@ if (!STATIC) setInterval(checkApprovals, 5000);
 // Telegram caps messages at 4096 chars. Split long replies, preferring
 // paragraph boundaries when chunkMode is 'newline'.
 
+// ── MarkdownV2 auto-escaping ───────────────────────────────────────────
+// Telegram MarkdownV2 requires escaping these chars outside formatting spans:
+//   _ * [ ] ( ) ~ ` > # + - = | { } . !
+// Claude often over-escapes or under-escapes. This function:
+//   1. Strips any existing backslash-escapes (so we start clean)
+//   2. Identifies formatting spans (bold, italic, code, links, etc.)
+//   3. Escapes special chars ONLY in plain text portions
+
+const MDV2_SPECIAL = /([_*\[\]()~`>#+=|{}.!\-\\])/g;
+
+function escapeMarkdownV2(text: string): string {
+  // First, undo any existing escapes Claude may have added (e.g. \. \! \~ etc.)
+  // so we don't double-escape.
+  const cleaned = text.replace(/\\([_*\[\]()~`>#+=|{}.!\-\\])/g, "$1");
+
+  // Regex to match MarkdownV2 formatting spans we should NOT escape inside:
+  // ```...``` code blocks, `...` inline code, *bold*, _italic_,
+  // ~strikethrough~, __underline__, ||spoiler||, [text](url)
+  const spans =
+    /(```[\s\S]*?```|`[^`]+`|\*[^*]+\*|_[^_]+_|~[^~]+~|__[^_]+__|(?:\|\|)[^|]+(?:\|\|)|\[[^\]]+\]\([^)]+\))/g;
+
+  let result = "";
+  let lastIndex = 0;
+  let match = spans.exec(cleaned);
+
+  while (match !== null) {
+    // Escape plain text before this formatting span
+    const plain = cleaned.slice(lastIndex, match.index);
+    result += plain.replace(MDV2_SPECIAL, "\\$1");
+    // Keep the formatting span as-is
+    result += match[0];
+    lastIndex = match.index + match[0].length;
+    match = spans.exec(cleaned);
+  }
+
+  // Escape remaining plain text after last span
+  const remaining = cleaned.slice(lastIndex);
+  result += remaining.replace(MDV2_SPECIAL, "\\$1");
+
+  return result;
+}
+
 function chunk(text: string, limit: number, mode: "length" | "newline"): string[] {
   if (text.length <= limit) return [text];
   const out: string[] = [];
@@ -1037,7 +1079,7 @@ const mcp = new Server(
       "",
       "ask_user sends a message with inline keyboard buttons and blocks until the user taps one (or timeout). Use it when you need confirmation or a choice between options. The buttons are removed after the user taps.",
       "",
-      'Messages use Telegram MarkdownV2 by default. Formatting: *bold*, _italic_, `code`, ```pre```, ~strikethrough~, __underline__, ||spoiler||, [link](url). IMPORTANT: In MarkdownV2, these characters MUST be escaped with \\ when used literally (not as formatting): _ * [ ] ( ) ~ ` > # + - = | { } . ! Use parse_mode "plain" if escaping is too complex for a given message.',
+      'Messages use Telegram MarkdownV2 by default. Formatting: *bold*, _italic_, `code`, ```pre```, ~strikethrough~, __underline__, ||spoiler||, [link](url). Special characters are auto-escaped — do NOT manually escape with backslashes. Just write natural text with formatting markers and the server handles escaping. Use parse_mode "plain" if you want no formatting at all.',
       "",
       "Message history is stored locally in SQLite. Use get_history(chat_id) to retrieve recent messages (up to 200) and search_messages(chat_id, query) to search by text. History is available from when the bot joined the chat and persists across restarts. The last 5 messages are auto-injected with each notification for context.",
       "",
@@ -1313,7 +1355,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT));
         const mode = access.chunkMode ?? "length";
         const replyMode = access.replyToMode ?? "first";
-        const chunks = chunk(text, limit, mode);
+        // Auto-escape MarkdownV2 special chars so Claude doesn't have to
+        const finalText = parseMode === "MarkdownV2" ? escapeMarkdownV2(text) : text;
+        const chunks = chunk(finalText, limit, mode);
         const sentIds: number[] = [];
 
         try {
@@ -1398,10 +1442,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         assertAllowedChat(args.chat_id as string);
         const editParseMode = (args.parse_mode as string | undefined) ?? "MarkdownV2";
         const editParseModeOpt = editParseMode === "plain" ? undefined : (editParseMode as "MarkdownV2" | "HTML");
+        const editText =
+          editParseModeOpt === "MarkdownV2" ? escapeMarkdownV2(args.text as string) : (args.text as string);
         const edited = await bot.api.editMessageText(
           args.chat_id as string,
           Number(args.message_id),
-          args.text as string,
+          editText,
           editParseModeOpt ? { parse_mode: editParseModeOpt } : undefined,
         );
         const id = typeof edited === "object" ? edited.message_id : args.message_id;
@@ -1409,10 +1455,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "ask_user": {
         const chat_id = args.chat_id as string;
-        const text = args.text as string;
+        const rawAskText = args.text as string;
         const buttons = args.buttons as string[];
         const rawParseMode = (args.parse_mode as string | undefined) ?? "MarkdownV2";
         const parseMode = rawParseMode === "plain" ? undefined : (rawParseMode as "MarkdownV2" | "HTML");
+        const text = parseMode === "MarkdownV2" ? escapeMarkdownV2(rawAskText) : rawAskText;
         const timeoutSecs = (args.timeout as number | undefined) ?? 120;
 
         assertAllowedChat(chat_id);

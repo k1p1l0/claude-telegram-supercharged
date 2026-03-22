@@ -1095,7 +1095,7 @@ const mcp = new Server(
       "",
       ...(TELEGRAPH_ENABLED
         ? [
-            "TELEGRAPH FOR LONG CONTENT: When you produce content longer than ~800 characters, multiple sections, code blocks, or structured documents (research summaries, analyses, how-to guides, code reviews), use create_telegraph_page instead of sending a wall of text via reply. Write the full content in Markdown, call create_telegraph_page with a title and the body, then send the returned URL via reply. IMPORTANT RULES: (1) REPLY MESSAGE: Keep it short — one sentence summary + the URL. Do NOT use emojis in the reply or article. Write clean professional text. End with 👇 pointing to the Instant View button. Example: 'Complete analysis on X. Tap Instant View to read 👇\\n\\nhttps://telegra.ph/...'. (2) IMAGES: Always include relevant images in the article when available. Use ![description](url) syntax. If the user sent photos earlier in the conversation, reference them by their local path from the inbox — local paths are auto-uploaded to Telegram and converted to public URLs. For research articles, find and include relevant public images from the web to make the article visually rich. Pass chat_id when calling the tool so local images can be uploaded. (3) Do NOT use Telegraph for short answers or single-paragraph responses.",
+            "TELEGRAPH FOR LONG CONTENT: ONLY use create_telegraph_page when content exceeds ~3000 characters AND contains multiple sections or headings — typically deep research reports, multi-part analyses, or comprehensive guides. For everything else, reply directly in chat. Most replies should NOT use Telegraph. When you do use it: write full content in Markdown, call create_telegraph_page with a title and body, then send the URL via reply. RULES: (1) REPLY MESSAGE: Keep it short — one sentence summary + the URL. No emojis. End with 👇. Example: 'Complete analysis on X. Tap Instant View to read 👇\\n\\nhttps://telegra.ph/...'. (2) IMAGES: Include relevant images when available using ![description](url) syntax. Pass chat_id for local image uploads. (3) Do NOT use Telegraph for short answers, single-paragraph responses, quick summaries, or anything under 3000 characters.",
           ]
         : []),
       "",
@@ -1293,7 +1293,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           {
             name: "create_telegraph_page",
             description:
-              "Publish long-form content (research results, articles, analyses, reports) to Telegraph (telegra.ph) and return a public URL. Telegram renders Telegraph links as Instant View — a native full-screen article reader. Use this instead of reply when the content is longer than ~800 characters, contains multiple headings/sections, or includes code blocks. After creating the page, send the URL via the reply tool with a one-sentence summary.",
+              "Publish long-form content to Telegraph (telegra.ph) and return a public URL. Telegram renders Telegraph links as Instant View — a native article reader. ONLY use for truly long content (3000+ characters) with multiple sections — research reports, comprehensive analyses, detailed guides. Do NOT use for regular replies, short summaries, or single-topic answers. After creating the page, send the URL via the reply tool with a one-sentence summary.",
             inputSchema: {
               type: "object",
               properties: {

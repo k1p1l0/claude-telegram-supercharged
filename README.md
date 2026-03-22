@@ -383,6 +383,29 @@ launchctl unload ~/Library/LaunchAgents/com.user.claude-telegram.plist
 rm ~/Library/LaunchAgents/com.user.claude-telegram.plist
 ```
 
+#### Monitoring the daemon
+
+Use the built-in monitor skill from any Claude Code session:
+
+```
+/telegram:monitor
+```
+
+Shows a live dashboard: process status for all components, launchd state, recent logs, MCP health, remote control URL (watch the daemon live in your browser), and lock file status.
+
+You can also monitor manually:
+
+```sh
+# Live supervisor logs
+tail -f ~/.claude/channels/telegram/data/supervisor-stderr.log
+
+# Quick alive check
+ps aux | grep "channels.*telegram" | grep -v grep && echo "ALIVE" || echo "DEAD"
+
+# Find the remote control URL (open in browser to watch the daemon live)
+strings ~/.claude/channels/telegram/data/supervisor-stdout.log | grep "session_" | tail -1
+```
+
 #### How the layers work together
 
 ```

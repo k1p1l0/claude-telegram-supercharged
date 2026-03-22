@@ -123,7 +123,7 @@ try {
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === "static";
-const TELEGRAPH_ENABLED = process.env.TELEGRAPH_ENABLED !== "false"; // default true
+const TELEGRAPH_ENABLED = process.env.TELEGRAPH_ENABLED === "true"; // default false — opt-in
 
 if (!TOKEN) {
   process.stderr.write(

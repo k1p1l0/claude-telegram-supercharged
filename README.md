@@ -217,20 +217,22 @@ To re-enable:
 
 ## Telegraph (Instant View Articles)
 
-By default, Claude creates [Telegraph](https://telegra.ph) articles for long-form content (research summaries, guides, code reviews) and sends them as Instant View links in Telegram. Telegraph posts are **publicly accessible** by URL.
+Claude can publish long-form content to [Telegraph](https://telegra.ph) and send it as Instant View links in Telegram -- a native full-screen article reader. Telegraph is **disabled by default** because posts are publicly accessible by URL.
 
-If you prefer to keep all content inside the chat (no public pages), disable Telegraph entirely in `~/.claude/channels/telegram/.env`:
+To enable, add to `~/.claude/channels/telegram/.env`:
 
 ```
-TELEGRAPH_ENABLED=false
+TELEGRAPH_ENABLED=true
 ```
 
-When disabled:
+When enabled, Claude only uses Telegraph for truly long content (3000+ characters with multiple sections) -- research reports, comprehensive analyses, detailed guides. Regular replies always stay in chat.
+
+When disabled (default):
 - The `create_telegraph_page` tool is hidden from Claude
-- Claude sends long content directly in chat messages instead
-- The system prompt no longer instructs Claude to use Telegraph
+- Claude sends all content directly in chat messages
+- The system prompt does not mention Telegraph
 
-Default is `true` (enabled) for backward compatibility. Requires MCP server restart to take effect.
+Requires MCP server restart to take effect.
 
 ## Conversation Memory
 

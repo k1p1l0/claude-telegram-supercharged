@@ -69,54 +69,40 @@ Open a chat with [@BotFather](https://t.me/BotFather) on Telegram and send `/new
 
 BotFather replies with a token that looks like `123456789:AAHfiqksKZ8...` -- that's the whole token, copy it including the leading number and colon.
 
-### 2. Install the supercharged plugin
+### 2. Install the [official plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram)
 
-Run `claude` to start a session, then add the marketplace and install:
+These are Claude Code commands -- run `claude` to start a session first.
 
 ```
-/plugin marketplace add k1p1l0/claude-telegram-supercharged
-/plugin install telegram-supercharged@k1p1l0-claude-telegram-supercharged
+/plugin install telegram@claude-plugins-official
 ```
 
-That's it -- no manual file copying needed. The plugin replaces the official Telegram plugin with all supercharged features.
+### 3. Apply the supercharged version
 
-<details>
-<summary><b>Alternative: manual installation</b></summary>
-
-If you prefer to install manually, first install the official plugin, then overlay the supercharged files:
+Clone this repo and install both the supercharged server and the daemon supervisor:
 
 ```sh
-# Install official plugin first (Claude Code command)
-/plugin install telegram@claude-plugins-official
-
-# Clone and overlay
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
 cp claude-telegram-supercharged/server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/0.0.1/server.ts
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 ```
 
-</details>
-
-### 3. Give the server the token
+### 4. Give the server the token
 
 ```
-/telegram-supercharged:configure 123456789:AAHfiqksKZ8...
+/telegram:configure 123456789:AAHfiqksKZ8...
 ```
-
-> If you used the manual installation method, use `/telegram:configure` instead.
 
 Writes `TELEGRAM_BOT_TOKEN=...` to `~/.claude/channels/telegram/.env`. You can also write that file by hand, or set the variable in your shell environment -- shell takes precedence.
 
-### 4. Relaunch with the channel flag
+### 5. Relaunch with the channel flag
 
 The server won't connect without this -- exit your session and start a new one:
 
 ```sh
-claude --channels plugin:telegram-supercharged@k1p1l0-claude-telegram-supercharged
+claude --channels plugin:telegram@claude-plugins-official
 ```
-
-> If you used the manual installation method, use `plugin:telegram@claude-plugins-official` instead.
 
 Or use the **daemon supervisor** for always-on operation with auto-restart and context reset from Telegram (see [Daemon Mode](#daemon-mode)):
 

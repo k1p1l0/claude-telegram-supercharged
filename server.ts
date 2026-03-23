@@ -1202,7 +1202,7 @@ const mcp = new Server(
       "",
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has an audio_path attribute, that is a voice message or audio file the sender recorded. Voice messages and audio files are automatically transcribed by the server if whisper-cli (whisper.cpp) or whisper (openai-whisper) is installed locally. When transcription succeeds, you receive the transcription text directly in the notification content instead of just "(voice message)". The original audio file is still available at the audio_path for further processing if needed. If no transcriber is available, you receive the audio_path and can tell the user to install whisper-cpp (`brew install whisper-cpp`) for automatic transcription. Always reply with the transcription result or status via the reply tool. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       "",
-      "DOCUMENTS: If the tag has a document_path attribute, the user sent a file (PDF, DOCX, spreadsheet, etc.). Read the file to see its contents. For PDFs, use the Read tool directly — it supports PDF files. For text-based files (CSV, TXT, JSON, code), Read them directly. For DOCX/XLSX, describe what you see or suggest the user share as PDF. Always acknowledge the document and summarize what you found.",
+      "DOCUMENTS: If the tag has a document_path attribute, the user sent a file (PDF, DOCX, spreadsheet, etc.). Read the file to see its contents. PDFs and DOCX files are supported by the Read tool directly. For text-based files (CSV, TXT, JSON, code), Read them directly. For XLSX, suggest the user share as CSV or PDF. Always acknowledge the document and summarize what you found. Files >10MB are skipped.",
       "",
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, edit_message to update a message you previously sent (e.g. progress → result), and ask_user to present inline buttons and wait for a choice.',
       "",
@@ -2599,6 +2599,13 @@ bot.on("message:document", async (ctx) => {
   const caption = ctx.message.caption ?? `(document: ${doc.file_name ?? "file"})`;
   await handleInbound(ctx, caption, async () => {
     try {
+      // Skip files >10MB to avoid filling disk
+      if (doc.file_size && doc.file_size > 10 * 1024 * 1024) {
+        process.stderr.write(
+          `telegram channel: document too large (${(doc.file_size / 1024 / 1024).toFixed(1)}MB) — skipping\n`,
+        );
+        return undefined;
+      }
       const file = await ctx.api.getFile(doc.file_id);
       if (!file.file_path) return undefined;
       const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;

@@ -467,6 +467,94 @@ function appendMemory(entry: string): void {
   writeFileSync(MEMORY_FILE, `${existing.trim()}\n`);
 }
 
+// ── Scheduled messages (OpenClaw-inspired) ─────────────────────────
+// Three schedule types: "at" (one-shot ISO timestamp), "every" (interval ms),
+// "cron" (cron expression). Persists to disk, survives restarts.
+
+const SCHEDULES_FILE = join(DATA_DIR, "schedules.json");
+
+interface ScheduledJob {
+  id: string;
+  chat_id: string;
+  text: string;
+  type: "at" | "every" | "cron";
+  /** ISO 8601 timestamp for "at" jobs */
+  at?: string;
+  /** Interval in milliseconds for "every" jobs */
+  every?: number;
+  /** Cron expression (5-field) for "cron" jobs — NOT implemented in v1, placeholder */
+  cron?: string;
+  /** When the job was created */
+  created_at: string;
+  /** Next fire time (ISO 8601) */
+  next_fire: string;
+  /** Whether to delete after firing (true for "at" jobs) */
+  one_shot: boolean;
+  /** Optional label for display */
+  label?: string;
+}
+
+function loadSchedules(): ScheduledJob[] {
+  try {
+    return JSON.parse(readFileSync(SCHEDULES_FILE, "utf-8")) as ScheduledJob[];
+  } catch {
+    return [];
+  }
+}
+
+function saveSchedules(jobs: ScheduledJob[]): void {
+  mkdirSync(join(SCHEDULES_FILE, ".."), { recursive: true });
+  writeFileSync(SCHEDULES_FILE, JSON.stringify(jobs, null, 2));
+}
+
+function generateJobId(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+/** Compute next fire time for "every" jobs */
+function computeNextFire(job: ScheduledJob): string {
+  if (job.type === "every" && job.every) {
+    return new Date(Date.now() + job.every).toISOString();
+  }
+  return job.next_fire;
+}
+
+/** Check and fire due scheduled jobs. Called every 30s by the timer loop. */
+function checkSchedules(): void {
+  const jobs = loadSchedules();
+  const now = Date.now();
+  const toKeep: ScheduledJob[] = [];
+  let changed = false;
+
+  for (const job of jobs) {
+    const fireTime = new Date(job.next_fire).getTime();
+    if (fireTime <= now) {
+      // Fire the job — send message to Telegram
+      void bot.api.sendMessage(job.chat_id, `⏰ ${job.label ? `${job.label}\n\n` : ""}${job.text}`).catch((err) => {
+        process.stderr.write(`telegram channel: schedule fire failed: ${err}\n`);
+      });
+      changed = true;
+
+      if (job.one_shot) {
+        // Don't keep one-shot jobs after firing
+        continue;
+      }
+      // Recurring: compute next fire time
+      job.next_fire = computeNextFire(job);
+      toKeep.push(job);
+    } else {
+      toKeep.push(job);
+    }
+  }
+
+  if (changed) {
+    saveSchedules(toKeep);
+  }
+}
+
+// Start the schedule checker loop (every 30 seconds)
+setInterval(checkSchedules, 30_000);
+
 // ── Message history store (bun:sqlite) ──────────────────────────────
 // Stores every delivered message so Claude has context across restarts.
 // Rolling buffer: max 500 messages per chat, 14-day TTL, 50MB hard limit.
@@ -1107,6 +1195,8 @@ const mcp = new Server(
       "",
       "BATCHED MESSAGES: When multiple messages arrive quickly (e.g. forwarded conversation), they are combined into one notification with batch_size in the meta. Messages are numbered [1], [2], etc. IMPORTANT: For batched forwarded conversations, respond IMMEDIATELY with a brief summary of the conversation and ask if the user needs help with anything specific. Do NOT auto-research every link in the batch — just summarize the conversation content and offer to help. Only fetch URLs if the user explicitly asks you to.",
       "",
+      'SCHEDULED MESSAGES: Use the schedule tool to create reminders, recurring checks, or timed notifications. Supports "at" (one-shot at a specific time) and "every" (recurring interval). For relative times like "remind me in 2 hours", use at="+2h". For recurring tasks like "check every hour", use type="every" with every=3600000. Always confirm what was scheduled. Use schedule(action="list") to show active jobs. Jobs persist across restarts and fire automatically.',
+      "",
       'When the user reacts with an emoji to a bot message, you receive a channel notification with event_type "reaction" containing the emoji and message_id. Use this as feedback (e.g. 👍 = approve, 👎 = reject).',
       "",
       "ask_user sends a message with inline keyboard buttons and blocks until the user taps one (or timeout). Use it when you need confirmation or a choice between options. The buttons are removed after the user taps.",
@@ -1323,6 +1413,40 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ["chat_id", "summary"],
+      },
+    },
+    {
+      name: "schedule",
+      description:
+        'Create, list, or delete scheduled messages. Use for reminders, recurring checks, or timed notifications. Actions: "create" (new job), "list" (show all), "delete" (remove by ID).',
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["create", "list", "delete"],
+            description: "Action to perform.",
+          },
+          chat_id: { type: "string", description: "Chat ID to send the scheduled message to." },
+          text: { type: "string", description: "Message text to send when the schedule fires." },
+          type: {
+            type: "string",
+            enum: ["at", "every"],
+            description: '"at" for one-shot at a specific time, "every" for recurring interval.',
+          },
+          at: {
+            type: "string",
+            description:
+              'ISO 8601 timestamp for "at" jobs (e.g. "2026-03-24T09:00:00Z"). Also accepts relative like "+2h", "+30m", "+1d".',
+          },
+          every: {
+            type: "number",
+            description: 'Interval in milliseconds for "every" jobs. E.g. 3600000 = 1 hour, 86400000 = 1 day.',
+          },
+          label: { type: "string", description: "Optional short label for the job (shown in list and when firing)." },
+          job_id: { type: "string", description: "Job ID to delete (for action=delete)." },
+        },
+        required: ["action"],
       },
     },
     ...(ELEVENLABS_API_KEY
@@ -1642,6 +1766,103 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         appendMemory(`**Chat ${chat_id}**: ${summary}`);
         return { content: [{ type: "text", text: "Memory saved. Summary will be loaded on next startup." }] };
+      }
+      case "schedule": {
+        const action = args.action as string;
+
+        if (action === "list") {
+          const jobs = loadSchedules();
+          if (jobs.length === 0) {
+            return { content: [{ type: "text", text: "No scheduled jobs." }] };
+          }
+          const lines = jobs.map(
+            (j) =>
+              `[${j.id}] ${j.label || "(no label)"} | ${j.type} | chat: ${j.chat_id} | next: ${j.next_fire}${j.one_shot ? " (one-shot)" : ` (every ${j.every ? `${Math.round(j.every / 60000)}min` : j.cron})`}`,
+          );
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+
+        if (action === "delete") {
+          const jobId = args.job_id as string;
+          if (!jobId) return { content: [{ type: "text", text: "job_id required for delete." }], isError: true };
+          const jobs = loadSchedules();
+          const filtered = jobs.filter((j) => j.id !== jobId);
+          if (filtered.length === jobs.length) {
+            return { content: [{ type: "text", text: `Job ${jobId} not found.` }], isError: true };
+          }
+          saveSchedules(filtered);
+          return { content: [{ type: "text", text: `Deleted job ${jobId}.` }] };
+        }
+
+        if (action === "create") {
+          const chat_id = args.chat_id as string;
+          const text = args.text as string;
+          const jobType = (args.type as "at" | "every") ?? "at";
+          const label = args.label as string | undefined;
+
+          if (!chat_id || !text) {
+            return { content: [{ type: "text", text: "chat_id and text are required." }], isError: true };
+          }
+
+          let nextFire: string;
+          let oneShot = true;
+          let everyMs: number | undefined;
+
+          if (jobType === "at") {
+            const atStr = args.at as string;
+            if (!atStr)
+              return { content: [{ type: "text", text: '"at" timestamp required for at-type jobs.' }], isError: true };
+            // Support relative time: +2h, +30m, +1d
+            const relMatch = atStr.match(/^\+(\d+)(m|h|d)$/);
+            if (relMatch) {
+              const val = Number.parseInt(relMatch[1], 10);
+              const unit = relMatch[2];
+              const ms = unit === "m" ? val * 60000 : unit === "h" ? val * 3600000 : val * 86400000;
+              nextFire = new Date(Date.now() + ms).toISOString();
+            } else {
+              nextFire = new Date(atStr).toISOString();
+            }
+          } else {
+            // "every" type
+            everyMs = args.every as number | undefined;
+            if (!everyMs || everyMs < 60000) {
+              return {
+                content: [{ type: "text", text: "every (ms) required and must be >= 60000 (1 minute)." }],
+                isError: true,
+              };
+            }
+            nextFire = new Date(Date.now() + everyMs).toISOString();
+            oneShot = false;
+          }
+
+          const job: ScheduledJob = {
+            id: generateJobId(),
+            chat_id,
+            text,
+            type: jobType,
+            ...(jobType === "at" ? { at: args.at as string } : {}),
+            ...(everyMs ? { every: everyMs } : {}),
+            created_at: new Date().toISOString(),
+            next_fire: nextFire,
+            one_shot: oneShot,
+            label,
+          };
+
+          const jobs = loadSchedules();
+          jobs.push(job);
+          saveSchedules(jobs);
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Scheduled job ${job.id}${label ? ` (${label})` : ""}: ${jobType === "at" ? `fires at ${nextFire}` : `fires every ${Math.round((everyMs ?? 0) / 60000)} minutes, next: ${nextFire}`}`,
+              },
+            ],
+          };
+        }
+
+        return { content: [{ type: "text", text: `Unknown action: ${action}` }], isError: true };
       }
       case "voice_reply": {
         const chat_id = args.chat_id as string;

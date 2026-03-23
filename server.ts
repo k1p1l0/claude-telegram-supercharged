@@ -2243,7 +2243,39 @@ async function handleInbound(
   const media = downloadMedia ? await downloadMedia() : undefined;
 
   // If the media callback returned a transcription, use it as the message text.
-  const text = media?.transcription ? `🎤 Voice transcription:\n${media.transcription}` : inboundText;
+  let text = media?.transcription ? `🎤 Voice transcription:\n${media.transcription}` : inboundText;
+
+  // ── Forwarded message context ─────────────────────────────────────
+  const fwd = ctx.message?.forward_origin;
+  if (fwd) {
+    let fwdLabel = "[Forwarded";
+    switch (fwd.type) {
+      case "user": {
+        const u = fwd.sender_user;
+        const name = u.username ? `@${u.username}` : u.first_name;
+        fwdLabel += ` from ${name}`;
+        break;
+      }
+      case "hidden_user":
+        fwdLabel += ` from ${fwd.sender_user_name}`;
+        break;
+      case "chat": {
+        const c = fwd.sender_chat;
+        const cName = c.username ? `@${c.username}` : ((c as any).title ?? "chat");
+        fwdLabel += ` from ${cName}`;
+        break;
+      }
+      case "channel": {
+        const ch = fwd.chat;
+        const chName = ch.username ? `@${ch.username}` : ((ch as any).title ?? "channel");
+        fwdLabel += ` from ${chName}`;
+        if (fwd.message_id) fwdLabel += ` (msg #${fwd.message_id})`;
+        break;
+      }
+    }
+    fwdLabel += "]";
+    text = `${fwdLabel}\n${text}`;
+  }
 
   const chatType = ctx.chat?.type;
   const isGroup = chatType === "group" || chatType === "supergroup";

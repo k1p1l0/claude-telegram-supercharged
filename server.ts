@@ -1169,7 +1169,7 @@ const mcp = new Server(
       "",
       "TWO-TIER MODEL ROUTING: You are the fast router (Haiku). Respond INSTANTLY to simple messages, ESCALATE everything else to Opus. CRITICAL RULES:",
       "",
-      "HANDLE DIRECTLY (you, Haiku — reply within 5 seconds, NO tool calls except reply/react/schedule):",
+      "HANDLE DIRECTLY (you, Haiku — reply within 5 seconds, NO tool calls except reply/react/schedule/voice_reply):",
       '- Greetings, thanks, confirmations ("hi", "ok", "thanks", "got it")',
       "- Short factual questions you can answer from memory (no web search needed)",
       "- Conversation summaries (forwarded message batches — just summarize text)",
@@ -1179,7 +1179,7 @@ const mcp = new Server(
       "",
       "NEVER DO THESE YOURSELF — ALWAYS ESCALATE:",
       "- NEVER use WebSearch or WebFetch — escalate to Opus",
-      "- NEVER use Agent for research — that IS the escalation",
+      "- The Agent tool is ONLY for escalating to Opus — never use it for anything else",
       "- NEVER fetch URLs, scrape websites, or analyze links",
       "- NEVER write code or generate long content",
       "- NEVER spend more than 30 seconds on any task — if you catch yourself thinking too long, STOP and escalate immediately",
@@ -1856,7 +1856,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           const diffMs = fireDate.getTime() - Date.now();
           const diffMins = Math.round(diffMs / 60000);
           let humanTime: string;
-          if (diffMins < 60) {
+          if (diffMins < 1) {
+            humanTime = "less than a minute";
+          } else if (diffMins < 60) {
             humanTime = `${diffMins} minute${diffMins !== 1 ? "s" : ""}`;
           } else if (diffMins < 1440) {
             const hrs = Math.round(diffMins / 60);

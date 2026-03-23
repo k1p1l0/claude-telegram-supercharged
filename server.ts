@@ -496,6 +496,22 @@ interface ScheduledJob {
   label?: string;
 }
 
+/**
+ * Create a native macOS Reminder via AppleScript.
+ * Syncs to iPhone, Apple Watch, and all Apple devices.
+ * Fails silently on non-macOS or if Reminders.app isn't available.
+ */
+function createAppleReminder(title: string, dueDate: Date, notes?: string): void {
+  try {
+    const dateStr = dueDate.toLocaleString("en-US", { timeZone: "Europe/Lisbon" });
+    const body = notes ? `, body:"${notes.replace(/"/g, '\\"')}"` : "";
+    const script = `tell application "Reminders" to tell list "Inbox" to make new reminder with properties {name:"${title.replace(/"/g, '\\"')}"${body}, due date:date "${dateStr}"}`;
+    spawnSync("osascript", ["-e", script], { timeout: 5000, stdio: "pipe" });
+  } catch {
+    // Silently fail — Apple Reminders may not be available
+  }
+}
+
 function loadSchedules(): ScheduledJob[] {
   try {
     return JSON.parse(readFileSync(SCHEDULES_FILE, "utf-8")) as ScheduledJob[];
@@ -1208,7 +1224,7 @@ const mcp = new Server(
       "",
       "BATCHED MESSAGES: When multiple messages arrive quickly (e.g. forwarded conversation), they are combined into one notification with batch_size in the meta. Messages are numbered [1], [2], etc. IMPORTANT: For batched forwarded conversations, respond IMMEDIATELY with a brief summary of the conversation and ask if the user needs help with anything specific. Do NOT auto-research every link in the batch — just summarize the conversation content and offer to help. Only fetch URLs if the user explicitly asks you to.",
       "",
-      'SCHEDULED MESSAGES: Use the schedule tool to create reminders, recurring checks, or timed notifications. Supports "at" (one-shot at a specific time) and "every" (recurring interval). For relative times like "remind me in 2 hours", use at="+2h". For recurring tasks like "check every hour", use type="every" with every=3600000. Always confirm what was scheduled. Use schedule(action="list") to show active jobs. Jobs persist across restarts and fire automatically.',
+      'SCHEDULED MESSAGES: Use the schedule tool to create reminders, recurring checks, or timed notifications. Supports "at" (one-shot at a specific time) and "every" (recurring interval). For relative times like "remind me in 2 hours", use at="+2h". For recurring tasks like "check every hour", use type="every" with every=3600000. Always confirm what was scheduled. Use schedule(action="list") to show active jobs. Jobs persist across restarts and fire automatically. BONUS: Every scheduled reminder also creates a native Apple Reminder that syncs to iPhone and Apple Watch — the user gets both a Telegram message AND a native notification.',
       "",
       "GOOGLE CALENDAR: If the google-calendar MCP tools are available, use them proactively. When the user mentions dates, events, meetings, or appointments, check or create calendar events. When asked 'what do I have today' or 'daily briefing', list today's events. When the user says 'add to calendar' or mentions an event with a date/time, create a calendar event. ALWAYS ask for confirmation before creating events if the date/time is ambiguous. Default timezone: Europe/Lisbon. Format events clearly with time, title, and location. You can combine calendar with the schedule tool — e.g. create a calendar event AND set a Telegram reminder.",
       "",
@@ -1867,7 +1883,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           jobs.push(job);
           saveSchedules(jobs);
 
-          // Send a confirmation to Telegram with human-readable time
+          // Also create a native Apple Reminder (syncs to iPhone/Watch)
+          createAppleReminder(label || text, new Date(nextFire), text);
+
+          // Compute human-readable time for the tool response
           const fireDate = new Date(nextFire);
           const diffMs = fireDate.getTime() - Date.now();
           const diffMins = Math.round(diffMs / 60000);
@@ -1891,7 +1910,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             content: [
               {
                 type: "text",
-                text: `Scheduled job ${job.id}${label ? ` (${label})` : ""}: ${jobType === "at" ? `fires at ${nextFire}` : `fires every ${Math.round((everyMs ?? 0) / 60000)} minutes, next: ${nextFire}`}`,
+                text: `Scheduled job ${job.id}${label ? ` (${label})` : ""}: ${jobType === "at" ? `fires at ${nextFire}` : `fires every ${Math.round((everyMs ?? 0) / 60000)} minutes, next: ${nextFire}`}. Also created Apple Reminder (syncs to iPhone/Watch).`,
               },
             ],
           };

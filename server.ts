@@ -2008,6 +2008,12 @@ bot.on("message:photo", async (ctx) => {
 
 bot.on("message:voice", async (ctx) => {
   const caption = ctx.message.caption ?? "(voice message)";
+  // React with 🔥 immediately to signal we're transcribing (heavy work)
+  const chatId = String(ctx.chat!.id);
+  const msgId = ctx.message.message_id;
+  void bot.api
+    .setMessageReaction(chatId, msgId, [{ type: "emoji", emoji: "🔥" as ReactionTypeEmoji["emoji"] }])
+    .catch(() => {});
   await handleInbound(ctx, caption, async () => {
     const voice = ctx.message.voice;
     // Reuse file + transcription from the middleware cache if available.

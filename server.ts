@@ -1851,6 +1851,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           jobs.push(job);
           saveSchedules(jobs);
 
+          // Send a confirmation to Telegram with human-readable time
+          const fireDate = new Date(nextFire);
+          const diffMs = fireDate.getTime() - Date.now();
+          const diffMins = Math.round(diffMs / 60000);
+          let humanTime: string;
+          if (diffMins < 60) {
+            humanTime = `${diffMins} minute${diffMins !== 1 ? "s" : ""}`;
+          } else if (diffMins < 1440) {
+            const hrs = Math.round(diffMins / 60);
+            humanTime = `${hrs} hour${hrs !== 1 ? "s" : ""}`;
+          } else {
+            const days = Math.round(diffMins / 1440);
+            humanTime = `${days} day${days !== 1 ? "s" : ""}`;
+          }
+
+          const confirmMsg =
+            jobType === "at"
+              ? `Got it! I'll remind you in ${humanTime}.`
+              : `Got it! I'll repeat this every ${humanTime}.`;
+
+          void bot.api.sendMessage(chat_id, confirmMsg).catch(() => {});
+
           return {
             content: [
               {

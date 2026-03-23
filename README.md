@@ -32,32 +32,51 @@ Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.co
 
 ## Features
 
+### Voice & Audio
+
 | Feature | What it does |
 | --- | --- |
 | **🎤 Voice Messages** | Talk to Claude. Provider fallback chain: OpenAI Whisper → Groq → Deepgram → local whisper-cli. Works from your phone while walking. |
-| **🔊 Voice Replies (TTS)** | Claude replies with voice messages via ElevenLabs text-to-speech. OGG/Opus native format. Auto-fallback to audio file if voice is restricted. Set `ELEVENLABS_API_KEY` in `.env`. |
-| **🎤 Auto-transcribe in History** | ALL voice messages in group chats are transcribed, even without mentioning the bot. Claude has full context of what everyone said. Configurable via `autoTranscribe`. |
-| **🧠 Conversation Memory** | `/clean` saves a summary before clearing. Memory persists across sessions. Claude never forgets what you talked about. |
-| **💬 Message History** | SQLite-backed rolling store. Claude has context across restarts. `get_history` + `search_messages` tools. No more "what were we talking about?" |
-| **🧵 Conversation Threading** | Claude follows reply chains in groups, sees who said what, responds in the correct thread. Up to 3 levels deep. |
-| **📋 Forum Topics** | Telegram Forum topics fully supported. Each topic is isolated -- `thread_id` persists in SQLite across restarts. |
-| **🎨 MarkdownV2 Auto-escaping** | Bold, italic, code blocks, links render properly. Special characters are auto-escaped server-side -- Claude writes natural text, no manual `\.` escaping needed. |
-| **🎯 Inline Buttons** | `ask_user` tool -- send questions with tappable buttons, wait for choice. Perfect for confirmations and approvals. |
-| **😎 Sticker & GIF Support** | Claude actually sees stickers and GIFs. Static stickers as images, animated ones as multi-frame collages. |
-| **👍 Reaction Status** | Visual processing status: 👀 read → 🔥 working → 👍 done. Voice messages get ✍ instantly to signal transcription in progress. Plus expressive reactions for standout messages. |
-| **✅ Reaction Validation** | Client-side emoji whitelist prevents cryptic Telegram API errors. |
-| **👥 Group Pairing** | Add bot to group, mention it, get pairing code. No hunting for numeric chat IDs. |
-| **🔒 Shell Injection Protection** | All subprocess calls use `spawnSync` with array args. No shell interpretation of file paths. |
-| **🧹 Session Management** | `clear_history` + `save_memory` tools. Clean up with context preservation. |
-| **📰 Telegraph Instant View** | Long research (3000+ chars) published to telegra.ph as Instant View articles. Disabled by default -- opt-in via `TELEGRAPH_ENABLED=true`. |
-| **🔄 Daemon Mode** | Supervisor script auto-restarts Claude on crash or context reset. Say "clear everything" in Telegram and Claude restarts with a fresh session -- memory preserved, zero downtime. |
-| **🔒 Single-Instance Lock** | PID-based lock file prevents two bot instances from competing for Telegram updates. Stale locks auto-detected and cleaned up. |
+| **🔊 Voice Replies (TTS)** | Claude replies with voice messages via ElevenLabs TTS. OGG/Opus native format. Auto-fallback to audio file if voice is restricted. |
+| **🎤 Auto-transcribe** | ALL voice messages in group chats are transcribed, even without mentioning the bot. Configurable via `autoTranscribe`. |
+
+### Messages & Media
+
+| Feature | What it does |
+| --- | --- |
 | **📨 Forwarded Messages** | Full forwarding context preserved -- Claude sees who originally sent it and from which chat/channel. |
-| **📦 Message Batching** | Forward 20+ messages at once -- they're collected into one batch (5s debounce), auto-summarized instantly, then Claude responds to the whole conversation in one reply. |
-| **📊 Smart Caching** | Voice/audio files cached between middleware and handlers. No double downloads, no double transcriptions. |
-| **🖥 Daemon Management** | `/telegram:daemon start\|stop\|restart\|status\|logs` -- full lifecycle management. `/telegram:monitor` for health dashboard with remote control URL. |
-| **📸 Headless Screenshots** | `/screenshot` skill uses Playwright to capture web pages headlessly -- works in daemon mode where Chrome isn't available. |
-| **⚡ Two-Tier Model Routing** | Haiku handles simple messages instantly (<5s). Complex tasks auto-escalate to Opus via subagents. 80-95% of messages get instant responses. |
+| **📦 Message Batching** | Forward 20+ messages at once -- collected into one batch (5s debounce), auto-summarized instantly, then Claude responds to the whole conversation in one reply. |
+| **📄 Document Support** | Send PDFs, DOCX, CSV, TXT, JSON -- Claude downloads, reads, and summarizes. 10MB file size limit. |
+| **🎨 MarkdownV2 Auto-escaping** | Special characters auto-escaped server-side -- Claude writes natural text, no manual `\.` escaping needed. |
+| **😎 Sticker & GIF Support** | Claude sees stickers and GIFs. Static as images, animated as multi-frame collages. |
+| **📰 Telegraph Instant View** | Long research (3000+ chars) published to telegra.ph as Instant View. Disabled by default -- opt-in via `TELEGRAPH_ENABLED=true`. |
+
+### Conversations & Groups
+
+| Feature | What it does |
+| --- | --- |
+| **💬 Message History** | SQLite-backed rolling store. Claude has context across restarts. `get_history` + `search_messages` tools. |
+| **🧠 Conversation Memory** | `/clean` saves a summary before clearing. Memory persists across sessions. Claude never forgets. |
+| **🧵 Conversation Threading** | Follows reply chains in groups, sees who said what, responds in the correct thread. Up to 3 levels deep. |
+| **📋 Forum Topics** | Telegram Forum topics fully supported. Each topic isolated with persistent `thread_id`. |
+| **👥 Group Pairing** | Add bot to group, mention it, get pairing code. No hunting for numeric chat IDs. |
+| **🎯 Inline Buttons** | `ask_user` tool -- tappable buttons for confirmations and choices. |
+| **👍 Reaction Status** | 👀 read → 🔥 working → 👍 done. Voice messages get ✍ for transcription. |
+
+### Daemon & Infrastructure
+
+| Feature | What it does |
+| --- | --- |
+| **⚡ Two-Tier Model Routing** | Configurable router: Haiku (fast, 200K), Sonnet (balanced, 1M), or Opus (deep, 1M). Set via `TELEGRAM_ROUTER_MODEL`. Complex tasks auto-escalate to Opus via subagents. |
+| **🔄 Daemon Mode** | Supervisor auto-restarts Claude on crash or context reset. Memory preserved, zero downtime. |
+| **🛡 Context Watchdog** | Auto-restarts when context exceeds 70% to prevent unresponsive sessions. SQLite history and memory survive restarts. |
+| **🔒 Single-Instance Lock** | PID-based lock file prevents duplicate bot instances competing for Telegram updates. |
+| **🖥 Daemon Management** | `/telegram:daemon start\|stop\|restart\|status\|logs` -- full lifecycle. `/telegram:monitor` for health dashboard with remote control URL. |
+| **⏰ Scheduled Messages** | `schedule` tool for reminders and recurring tasks. "at" (one-shot) and "every" (interval) types. Persists across restarts. |
+| **📸 Headless Screenshots** | Playwright-based page capture -- works in daemon mode where Chrome isn't available. |
+| **✅ Reaction Validation** | Client-side emoji whitelist prevents cryptic Telegram API errors. |
+| **🔒 Shell Injection Protection** | All subprocess calls use `spawnSync` with array args. No shell interpretation. |
+| **📊 Smart Caching** | Voice/audio cached between middleware and handlers. No double downloads or transcriptions. |
 
 ## Getting Started
 

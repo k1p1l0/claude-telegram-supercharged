@@ -86,6 +86,8 @@ git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
 cp claude-telegram-supercharged/server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/0.0.1/server.ts
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
+cp claude-telegram-supercharged/scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
+chmod +x ~/.claude/scripts/claude-daemon-wrapper.exp
 ```
 
 ### 4. Give the server the token
@@ -135,6 +137,8 @@ cd claude-telegram-supercharged
 git pull
 cp server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/0.0.1/server.ts
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
+cp scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
+chmod +x ~/.claude/scripts/claude-daemon-wrapper.exp
 ```
 
 Then restart your Claude Code session.
@@ -414,7 +418,8 @@ strings ~/.claude/channels/telegram/data/supervisor-stdout.log | grep "session_"
 launchd (OS-level)
   └── caffeinate -s (prevents system sleep)
         └── supervisor.ts (manages Claude lifecycle)
-              └── claude --channels plugin:telegram (the actual bot)
+              └── claude-daemon-wrapper.exp (PTY + auto-accept trust dialog)
+                    └── claude --channels plugin:telegram (the actual bot)
 ```
 
 - **launchd** ensures the process tree is always alive

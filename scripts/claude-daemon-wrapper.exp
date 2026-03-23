@@ -1,0 +1,27 @@
+#!/usr/bin/expect -f
+# Wrapper that allocates a PTY for Claude Code and auto-accepts the
+# workspace trust dialog so it can run as a daemon (no interactive TTY).
+#
+# Referenced by supervisor.ts — must be installed at:
+#   ~/.claude/scripts/claude-daemon-wrapper.exp
+
+set timeout -1
+
+# Build the command: "claude" + all arguments passed to this script
+set cmd [list claude {*}$argv]
+
+# Spawn claude inside a pseudo-TTY
+spawn -noecho {*}$cmd
+
+# Auto-accept the "trust this folder" prompt if it appears
+expect {
+    -re {trust.*\?|Trust.*\?|Yes.*No} {
+        send "\r"
+        exp_continue
+    }
+    eof {
+        # Claude exited — capture exit code
+        catch wait result
+        exit [lindex $result 3]
+    }
+}

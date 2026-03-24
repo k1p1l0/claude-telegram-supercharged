@@ -2464,29 +2464,9 @@ bot.on("message", async (ctx, next) => {
 });
 
 bot.on("message:text", async (ctx) => {
-  // Debug: log forwarded messages
-  if (ctx.message.forward_origin) {
-    process.stderr.write(
-      `telegram channel: forwarded text message received — from_id=${ctx.from?.id}, chat=${ctx.chat?.id}, text_len=${ctx.message.text?.length ?? 0}, forward_type=${ctx.message.forward_origin.type}\n`,
-    );
-  }
   await handleInbound(ctx, ctx.message.text, undefined);
 });
 
-// Catch-all: log messages that don't match any handler (forwarded without text?)
-bot.on("message", async (ctx) => {
-  const msg = ctx.message;
-  if (msg && !msg.text && !msg.photo && !msg.voice && !msg.audio && !msg.sticker && !msg.animation && !msg.document) {
-    process.stderr.write(
-      `telegram channel: unhandled message type — keys: ${Object.keys(msg).filter((k) => !["message_id", "from", "chat", "date", "forward_origin", "forward_date"].includes(k)).join(",")}, from=${msg.from?.id}, chat=${msg.chat?.id}\n`,
-    );
-    // If it has forward_origin but no text, try to use caption or any available text
-    const fallbackText = (msg as any).caption ?? "(forwarded message with no text)";
-    if (msg.forward_origin) {
-      await handleInbound(ctx, fallbackText, undefined);
-    }
-  }
-});
 
 bot.on("message:photo", async (ctx) => {
   const caption = ctx.message.caption ?? "(photo)";

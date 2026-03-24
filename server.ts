@@ -2915,9 +2915,20 @@ async function handleInbound(
   const replyContext: Record<string, string> = {};
   if (replyToMsg) {
     replyContext.reply_to_message_id = String(replyToMsg.message_id);
-    if (replyToMsg.text) replyContext.reply_to_text = replyToMsg.text.slice(0, 300);
+    // Include text OR caption (forwarded messages often use caption instead of text)
+    const replyText = replyToMsg.text ?? replyToMsg.caption;
+    if (replyText) replyContext.reply_to_text = replyText.slice(0, 1000);
     if (replyToMsg.from) {
       replyContext.reply_to_user = replyToMsg.from.username ?? String(replyToMsg.from.id);
+    }
+    // Include forward origin if the replied-to message was forwarded
+    const fwdOrigin = (replyToMsg as any).forward_origin;
+    if (fwdOrigin) {
+      if (fwdOrigin.type === "user" && fwdOrigin.sender_user) {
+        replyContext.reply_to_forwarded_from = fwdOrigin.sender_user.username ?? fwdOrigin.sender_user.first_name;
+      } else if (fwdOrigin.type === "hidden_user") {
+        replyContext.reply_to_forwarded_from = fwdOrigin.sender_user_name;
+      }
     }
   }
 

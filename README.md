@@ -73,6 +73,7 @@ Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.co
 | **🔒 Single-Instance Lock** | PID-based lock file prevents duplicate bot instances competing for Telegram updates. |
 | **🖥 Daemon Management** | `/telegram:daemon start\|stop\|restart\|status\|logs` -- full lifecycle. `/telegram:monitor` for health dashboard with remote control URL. |
 | **⏰ Scheduled Messages** | `schedule` tool for reminders and recurring tasks. "at" (one-shot) and "every" (interval) types. Persists across restarts. |
+| **📅 Google Calendar** | Check schedule, create events, daily briefings from Telegram. Multi-account support. Proactive — Claude uses calendar context when answering. |
 | **📸 Headless Screenshots** | Playwright-based page capture -- works in daemon mode where Chrome isn't available. |
 | **✅ Reaction Validation** | Client-side emoji whitelist prevents cryptic Telegram API errors. |
 | **🔒 Shell Injection Protection** | All subprocess calls use `spawnSync` with array args. No shell interpretation. |

@@ -496,6 +496,22 @@ interface ScheduledJob {
   label?: string;
 }
 
+/**
+ * Create a native macOS Reminder via AppleScript.
+ * Syncs to iPhone, Apple Watch, and all Apple devices.
+ * Fails silently on non-macOS or if Reminders.app isn't available.
+ */
+function createAppleReminder(title: string, dueDate: Date, notes?: string): void {
+  try {
+    const dateStr = dueDate.toLocaleString("en-US", { timeZone: "Europe/Lisbon" });
+    const body = notes ? `, body:"${notes.replace(/"/g, '\\"')}"` : "";
+    const script = `tell application "Reminders" to tell list "Inbox" to make new reminder with properties {name:"${title.replace(/"/g, '\\"')}"${body}, due date:date "${dateStr}"}`;
+    spawnSync("osascript", ["-e", script], { timeout: 5000, stdio: "pipe" });
+  } catch {
+    // Silently fail — Apple Reminders may not be available
+  }
+}
+
 function loadSchedules(): ScheduledJob[] {
   try {
     return JSON.parse(readFileSync(SCHEDULES_FILE, "utf-8")) as ScheduledJob[];
@@ -531,8 +547,9 @@ function checkSchedules(): void {
   for (const job of jobs) {
     const fireTime = new Date(job.next_fire).getTime();
     if (fireTime <= now) {
-      // Fire the job — send message to Telegram
-      void bot.api.sendMessage(job.chat_id, `⏰ ${job.label ? `${job.label}\n\n` : ""}${job.text}`).catch((err) => {
+      // Fire the job — send a clean single-line reminder
+      const reminderText = job.label && job.label !== job.text ? `⏰ ${job.label}` : `⏰ ${job.text}`;
+      void bot.api.sendMessage(job.chat_id, reminderText).catch((err) => {
         process.stderr.write(`telegram channel: schedule fire failed: ${err}\n`);
       });
       changed = true;
@@ -681,6 +698,14 @@ class MessageStore {
       return `[${ts}] ${sender}${replyTag}${topicTag}: ${(content as string).slice(0, 300)}`;
     });
     return `[Recent history — last ${msgs.length} messages]\n${lines.join("\n")}`;
+  }
+
+  /** Look up a message's text by its message_id and chat_id. Used as fallback when reply_to_message.text is empty. */
+  getByMessageId(chatId: string, messageId: number): string | undefined {
+    const row = this.db
+      .query("SELECT text FROM messages WHERE chat_id = ? AND message_id = ? LIMIT 1")
+      .get(chatId, messageId) as { text: string | null } | null;
+    return row?.text ?? undefined;
   }
 
   /** Delete all messages for a chat. Returns the number of rows deleted. */
@@ -1208,7 +1233,9 @@ const mcp = new Server(
       "",
       "BATCHED MESSAGES: When multiple messages arrive quickly (e.g. forwarded conversation), they are combined into one notification with batch_size in the meta. Messages are numbered [1], [2], etc. IMPORTANT: For batched forwarded conversations, respond IMMEDIATELY with a brief summary of the conversation and ask if the user needs help with anything specific. Do NOT auto-research every link in the batch — just summarize the conversation content and offer to help. Only fetch URLs if the user explicitly asks you to.",
       "",
-      'SCHEDULED MESSAGES: Use the schedule tool to create reminders, recurring checks, or timed notifications. Supports "at" (one-shot at a specific time) and "every" (recurring interval). For relative times like "remind me in 2 hours", use at="+2h". For recurring tasks like "check every hour", use type="every" with every=3600000. Always confirm what was scheduled. Use schedule(action="list") to show active jobs. Jobs persist across restarts and fire automatically.',
+      'SCHEDULED MESSAGES: Use the schedule tool to create reminders, recurring checks, or timed notifications. Supports "at" (one-shot at a specific time) and "every" (recurring interval). For relative times like "remind me in 2 hours", use at="+2h". For recurring tasks like "check every hour", use type="every" with every=3600000. Always confirm what was scheduled. Use schedule(action="list") to show active jobs. Jobs persist across restarts and fire automatically. BONUS: Every scheduled reminder also creates a native Apple Reminder that syncs to iPhone and Apple Watch — the user gets both a Telegram message AND a native notification.',
+      "",
+      "GOOGLE CALENDAR: Use google-calendar tools for viewing schedule, creating meetings/appointments, and finding free time. IMPORTANT: For REMINDERS, use the schedule tool (NOT Google Calendar) — it creates both a Telegram reminder AND an Apple Reminder automatically. Only use Google Calendar create-event for actual calendar appointments (meetings, events with attendees, locations). When asked 'what do I have today' or 'daily briefing', use list-events. ALWAYS ask for confirmation before creating calendar events. Default timezone: Europe/Lisbon.",
       "",
       'When the user reacts with an emoji to a bot message, you receive a channel notification with event_type "reaction" containing the emoji and message_id. Use this as feedback (e.g. 👍 = approve, 👎 = reject).',
       "",
@@ -1865,7 +1892,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           jobs.push(job);
           saveSchedules(jobs);
 
-          // Send a confirmation to Telegram with human-readable time
+          // Also create a native Apple Reminder (syncs to iPhone/Watch)
+          createAppleReminder(label || text, new Date(nextFire), text);
+
+          // Compute human-readable time for the tool response
           const fireDate = new Date(nextFire);
           const diffMs = fireDate.getTime() - Date.now();
           const diffMins = Math.round(diffMs / 60000);
@@ -1882,18 +1912,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             humanTime = `${days} day${days !== 1 ? "s" : ""}`;
           }
 
-          const confirmMsg =
-            jobType === "at"
-              ? `Got it! I'll remind you in ${humanTime}.`
-              : `Got it! I'll repeat this every ${humanTime}.`;
-
-          void bot.api.sendMessage(chat_id, confirmMsg).catch(() => {});
+          // Note: Claude sends its own confirmation reply, so we don't send
+          // a server-side message to avoid duplicate confirmations.
 
           return {
             content: [
               {
                 type: "text",
-                text: `Scheduled job ${job.id}${label ? ` (${label})` : ""}: ${jobType === "at" ? `fires at ${nextFire}` : `fires every ${Math.round((everyMs ?? 0) / 60000)} minutes, next: ${nextFire}`}`,
+                text: `Scheduled job ${job.id}${label ? ` (${label})` : ""}: ${jobType === "at" ? `fires at ${nextFire}` : `fires every ${Math.round((everyMs ?? 0) / 60000)} minutes, next: ${nextFire}`}. Also created Apple Reminder (syncs to iPhone/Watch).`,
               },
             ],
           };
@@ -2438,7 +2464,28 @@ bot.on("message", async (ctx, next) => {
 });
 
 bot.on("message:text", async (ctx) => {
+  // Debug: log forwarded messages
+  if (ctx.message.forward_origin) {
+    process.stderr.write(
+      `telegram channel: forwarded text message received — from_id=${ctx.from?.id}, chat=${ctx.chat?.id}, text_len=${ctx.message.text?.length ?? 0}, forward_type=${ctx.message.forward_origin.type}\n`,
+    );
+  }
   await handleInbound(ctx, ctx.message.text, undefined);
+});
+
+// Catch-all: log messages that don't match any handler (forwarded without text?)
+bot.on("message", async (ctx) => {
+  const msg = ctx.message;
+  if (msg && !msg.text && !msg.photo && !msg.voice && !msg.audio && !msg.sticker && !msg.animation && !msg.document) {
+    process.stderr.write(
+      `telegram channel: unhandled message type — keys: ${Object.keys(msg).filter((k) => !["message_id", "from", "chat", "date", "forward_origin", "forward_date"].includes(k)).join(",")}, from=${msg.from?.id}, chat=${msg.chat?.id}\n`,
+    );
+    // If it has forward_origin but no text, try to use caption or any available text
+    const fallbackText = (msg as any).caption ?? "(forwarded message with no text)";
+    if (msg.forward_origin) {
+      await handleInbound(ctx, fallbackText, undefined);
+    }
+  }
 });
 
 bot.on("message:photo", async (ctx) => {
@@ -2897,9 +2944,56 @@ async function handleInbound(
   const replyContext: Record<string, string> = {};
   if (replyToMsg) {
     replyContext.reply_to_message_id = String(replyToMsg.message_id);
-    if (replyToMsg.text) replyContext.reply_to_text = replyToMsg.text.slice(0, 300);
+
+    // Debug: log what Telegram actually sends in reply_to_message
+    const debugFields = {
+      has_text: !!replyToMsg.text,
+      text_len: replyToMsg.text?.length ?? 0,
+      has_caption: !!replyToMsg.caption,
+      caption_len: replyToMsg.caption?.length ?? 0,
+      has_forward_origin: !!(replyToMsg as any).forward_origin,
+      has_from: !!replyToMsg.from,
+      from_username: replyToMsg.from?.username,
+      msg_id: replyToMsg.message_id,
+      has_quote: !!(ctx.message as any)?.quote,
+      quote_text: (ctx.message as any)?.quote?.text?.slice(0, 100),
+    };
+    process.stderr.write(`telegram channel: reply_to debug: ${JSON.stringify(debugFields)}\n`);
+
+    // Try multiple sources for the replied-to message text:
+    // 1. Telegram's reply_to_message.text or .caption
+    // 2. SQLite history (if the middleware stored it earlier)
+    // 3. quote.text (Telegram's partial quote feature)
+    let replyText = replyToMsg.text ?? replyToMsg.caption;
+
+    // Fallback: check SQLite history for the original message
+    if (!replyText && replyToMsg.message_id) {
+      const stored = messageStore.getByMessageId(chat_id, replyToMsg.message_id);
+      if (stored) {
+        replyText = stored;
+        process.stderr.write("telegram channel: reply_to text recovered from SQLite history\n");
+      }
+    }
+
+    // Fallback: check Telegram's quote feature (partial quote)
+    const quote = (ctx.message as any)?.quote;
+    if (!replyText && quote?.text) {
+      replyText = quote.text;
+    }
+
+    if (replyText) replyContext.reply_to_text = replyText.slice(0, 1000);
+
     if (replyToMsg.from) {
       replyContext.reply_to_user = replyToMsg.from.username ?? String(replyToMsg.from.id);
+    }
+    // Include forward origin if the replied-to message was forwarded
+    const fwdOrigin = (replyToMsg as any).forward_origin;
+    if (fwdOrigin) {
+      if (fwdOrigin.type === "user" && fwdOrigin.sender_user) {
+        replyContext.reply_to_forwarded_from = fwdOrigin.sender_user.username ?? fwdOrigin.sender_user.first_name;
+      } else if (fwdOrigin.type === "hidden_user") {
+        replyContext.reply_to_forwarded_from = fwdOrigin.sender_user_name;
+      }
     }
   }
 

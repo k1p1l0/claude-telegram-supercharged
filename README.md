@@ -155,16 +155,25 @@ Pairing is for capturing IDs. Once you're in, switch to `allowlist` so strangers
 
 ### Updating
 
-When the official plugin updates, re-apply the supercharged files:
+> **Important:** The official plugin auto-updates and will overwrite your supercharged `server.ts`. When the bot suddenly stops working after an update, this is why.
+
+When the official plugin updates (check for new version directories in `~/.claude/plugins/cache/claude-plugins-official/telegram/`):
 
 ```sh
 cd claude-telegram-supercharged
 git pull
-cp server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/0.0.1/server.ts
+# Find the current version (e.g. 0.0.4)
+PLUGIN_VERSION=$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
+echo "Updating to version: $PLUGIN_VERSION"
+cp server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/server.ts
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
+# Copy skills
+cp -r skills/* ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/skills/
+# Copy scripts
+cp scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
 ```
 
-Then restart your Claude Code session.
+Then restart your daemon or Claude Code session.
 
 ## Tools Exposed to the Assistant
 

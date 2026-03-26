@@ -2753,10 +2753,12 @@ interface BufferedCtx {
 }
 
 const pregateBuffers = new Map<string, { messages: BufferedCtx[]; timer: ReturnType<typeof setTimeout> }>();
+const MAX_PREGATE_BUFFER = 20;
 
 function discardPregateBuffer(chatId: string): void {
   const buf = pregateBuffers.get(chatId);
   if (buf) {
+    process.stderr.write(`telegram channel: discarded ${buf.messages.length} unbuffered message(s) from chat ${chatId}\n`);
     clearTimeout(buf.timer);
     pregateBuffers.delete(chatId);
   }
@@ -2898,6 +2900,7 @@ async function handleInbound(
     const chat_id = String(ctx.chat!.id);
     const buf = pregateBuffers.get(chat_id);
     if (buf) {
+      if (buf.messages.length >= MAX_PREGATE_BUFFER) return; // safety cap
       clearTimeout(buf.timer);
       buf.messages.push({ ctx, inboundText, downloadMedia, access: result.access });
       buf.timer = setTimeout(() => discardPregateBuffer(chat_id), BATCH_WINDOW_MS);

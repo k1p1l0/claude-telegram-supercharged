@@ -379,6 +379,8 @@ Create `~/Library/LaunchAgents/com.user.claude-telegram.plist`:
 
 Replace `/path/to/bun` with your bun path (`which bun`) and `/Users/YOU` with your home directory.
 
+> **Important:** Both `RunAtLoad` and `KeepAlive` should be set to `<true/>` for hands-off operation. `RunAtLoad` starts the daemon automatically on login/boot. `KeepAlive` tells launchd to restart the process if it exits unexpectedly. Setting either to `<false/>` means you'll need to manually start the daemon or it won't recover from crashes.
+
 #### Managing the daemon
 
 **Start the daemon:**
@@ -520,6 +522,29 @@ If your supergroup has **Topics** enabled, the plugin forwards `thread_id` (Tele
 Full access control docs in [ACCESS.md](./ACCESS.md) -- DM policies, groups, mention detection, delivery config, skill commands, and the `access.json` schema.
 
 Quick reference: Default policy is `pairing` -- DMs and groups both use the pairing flow. For DMs, message the bot to get a code. For groups, add the bot and mention it to get a code. Then `/telegram:access pair <code>` approves either. `ackReaction` only accepts Telegram's fixed emoji whitelist.
+
+### Acknowledgment Reactions
+
+The bot can react to incoming messages with an emoji to signal it received and is processing them. This is controlled by the `ackReaction` field in `access.json`:
+
+```json
+{
+  "ackReaction": "👀"
+}
+```
+
+**Reaction flow:**
+
+| Stage | Emoji | When |
+| --- | --- | --- |
+| **Received** | `👀` (configurable via `ackReaction`) | Immediately on receipt |
+| **Processing voice** | `✍` | When transcribing a voice message |
+| **Working** | `🔥` | During long tasks (multiple tool calls, research, code generation) |
+| **Done** | `👍` | After the reply is sent |
+
+Telegram only keeps **one bot reaction per message**, so each new reaction replaces the previous — creating a natural status progression.
+
+**Note:** `ackReaction` is **not set by default**. To enable it, add it to your `~/.claude/channels/telegram/access.json`. It only accepts emoji from [Telegram's fixed reaction whitelist](https://core.telegram.org/bots/api#reactiontypeemoji). Common choices: `👀`, `⚡`, `🔥`.
 
 ## Message History Buffer
 

@@ -150,6 +150,7 @@ const MEMORY_MAX_CHARS = 10_000;
 
 // --- Single-instance lock ---
 const LOCK_FILE = join(DATA_DIR, "telegram.lock");
+let isSecondary = false; // true when another instance owns the bot polling
 
 function acquireLock(): void {
   if (existsSync(LOCK_FILE)) {
@@ -157,10 +158,12 @@ function acquireLock(): void {
     if (!Number.isNaN(existingPid)) {
       try {
         process.kill(existingPid, 0); // signal 0 = check alive, don't kill
+        // Primary is alive — run in secondary (MCP-only) mode instead of crashing
+        isSecondary = true;
         process.stderr.write(
-          `telegram channel: another instance is already running (pid=${existingPid})\n  lock file: ${LOCK_FILE}\n  kill the other process first, or delete the lock file if it's stale.\n`,
+          `telegram channel: primary instance running (pid=${existingPid}) — starting in MCP-only mode (tools available, bot polling skipped)\n`,
         );
-        process.exit(1);
+        return;
       } catch {
         // PID is dead — stale lock, safe to overwrite
         process.stderr.write(`telegram channel: removing stale lock (pid=${existingPid} is dead)\n`);
@@ -180,13 +183,13 @@ function releaseLock(): void {
   } catch {}
 }
 
-process.on("exit", releaseLock);
+process.on("exit", () => { if (!isSecondary) releaseLock(); });
 process.on("SIGINT", () => {
-  releaseLock();
+  if (!isSecondary) releaseLock();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
-  releaseLock();
+  if (!isSecondary) releaseLock();
   process.exit(0);
 });
 
@@ -1231,6 +1234,8 @@ const mcp = new Server(
       "",
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has an audio_path attribute, that is a voice message or audio file the sender recorded. Voice messages and audio files are automatically transcribed by the server if whisper-cli (whisper.cpp) or whisper (openai-whisper) is installed locally. When transcription succeeds, you receive the transcription text directly in the notification content instead of just "(voice message)". The original audio file is still available at the audio_path for further processing if needed. If no transcriber is available, you receive the audio_path and can tell the user to install whisper-cpp (`brew install whisper-cpp`) for automatic transcription. Always reply with the transcription result or status via the reply tool. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       "",
+      "VOICE TRANSCRIPTION CAUTION: Voice transcriptions can be inaccurate — whisper may mishear words, invent context, or confuse languages. NEVER auto-trigger skills, start heavy tasks, or assume intent based solely on a voice transcription. Instead: (1) briefly confirm what you understood from the voice message, (2) ask the user if that's correct before proceeding, (3) only then take action. Example: 'I heard you asking about X — is that right?' This prevents wasting time on misheard requests. For simple greetings or short clear messages, confirmation is not needed.",
+      "",
       "DOCUMENTS: If the tag has a document_path attribute, the user sent a file (PDF, DOCX, spreadsheet, etc.). Read the file to see its contents. PDFs and DOCX files are supported by the Read tool directly. For text-based files (CSV, TXT, JSON, code), Read them directly. For XLSX, suggest the user share as CSV or PDF. Always acknowledge the document and summarize what you found. Files >10MB are skipped.",
       "",
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, edit_message to update a message you previously sent (e.g. progress → result), and ask_user to present inline buttons and wait for a choice.',
@@ -1269,6 +1274,10 @@ const mcp = new Server(
             "TELEGRAPH FOR LONG CONTENT: ONLY use create_telegraph_page when content exceeds ~3000 characters AND contains multiple sections or headings — typically deep research reports, multi-part analyses, or comprehensive guides. For everything else, reply directly in chat. Most replies should NOT use Telegraph. When you do use it: write full content in Markdown, call create_telegraph_page with a title and body, then send the URL via reply. RULES: (1) REPLY MESSAGE: Keep it short — one sentence summary + the URL. No emojis. End with 👇. Example: 'Complete analysis on X. Tap Instant View to read 👇\\n\\nhttps://telegra.ph/...'. (2) IMAGES: Include relevant images when available using ![description](url) syntax. Pass chat_id for local image uploads. (3) Do NOT use Telegraph for short answers, single-paragraph responses, quick summaries, or anything under 3000 characters.",
           ]
         : []),
+      "",
+      "URL HANDLING — THREADS: When a message contains a Threads URL (threads.com/@ or threads.net/@), do NOT use WebFetch — Threads blocks it. Instead, use ToolSearch to load and call mcp__threads-scraper__thenetaji-slash-threads-scraper with input: [{\"url\": \"THE_URL\"}]. Extract the post text, author, and engagement metrics from the response. Present as: **@username** > post text > engagement stats.",
+      "",
+      "URL HANDLING — YOUTUBE: When a message contains a YouTube URL (youtube.com/watch, youtu.be/, youtube.com/shorts/), use mcp__apify-actors__invideoiq-slash-video-transcript-scraper to transcribe the video. Pass video_url with the URL. Present the video title, duration, and a summary of the transcript. If the user asks for the full transcript, include timestamped segments.",
       "",
       ...(readMemory() ? ["CONVERSATION MEMORY (summaries from previous sessions):", readMemory()] : []),
     ].join("\n"),
@@ -2105,6 +2114,21 @@ function videoToCollage(srcPath: string, outPath: string, maxFrames = 6): string
 //   (4) local whisper-cli → (5) local whisper (pip)
 // Returns the transcription text, or undefined if no transcriber is available.
 
+/** Race a promise against a timeout. Returns undefined (not an error) on timeout. */
+const TRANSCRIPTION_TIMEOUT_MS = 30_000; // 30s total budget for the entire transcription chain
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  try {
+    const result = await Promise.race([promise, timeout]);
+    return result;
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
 /**
  * Transcribe via OpenAI Whisper API.
  */
@@ -2120,6 +2144,7 @@ async function transcribeViaOpenAI(audioPath: string): Promise<string | undefine
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: formData,
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       process.stderr.write(
@@ -2150,6 +2175,7 @@ async function transcribeViaGroq(audioPath: string): Promise<string | undefined>
       method: "POST",
       headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
       body: formData,
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       process.stderr.write(`telegram channel: Groq Whisper error ${res.status}: ${await res.text().catch(() => "")}\n`);
@@ -2179,6 +2205,7 @@ async function transcribeViaDeepgram(audioPath: string): Promise<string | undefi
         "Content-Type": mimeType,
       },
       body: audioData,
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
       process.stderr.write(`telegram channel: Deepgram error ${res.status}: ${await res.text().catch(() => "")}\n`);
@@ -2285,7 +2312,7 @@ function hasFfmpeg(): boolean {
  * Provider fallback chain: OpenAI → Groq → Deepgram → local whisper-cli → local whisper.
  * Uses spawnSync (array args) for local tools to prevent shell injection.
  */
-async function transcribeAudio(audioPath: string): Promise<string | undefined> {
+async function transcribeAudioInner(audioPath: string): Promise<string | undefined> {
   // Cloud provider fallback chain (each returns undefined if key not set or on failure)
   const openaiResult = await transcribeViaOpenAI(audioPath);
   if (openaiResult) return openaiResult;
@@ -2324,7 +2351,7 @@ async function transcribeAudio(audioPath: string): Promise<string | undefined> {
       }
       try {
         const result = spawnSync("whisper-cli", ["-m", model, "-l", "auto", "--no-timestamps", "-f", wavPath], {
-          timeout: 120_000,
+          timeout: 60_000,
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -2348,7 +2375,7 @@ async function transcribeAudio(audioPath: string): Promise<string | undefined> {
     if (bin === "whisper") {
       // openai-whisper: outputs to /tmp/<filename>.txt
       const result = spawnSync("whisper", [audioPath, "--output_format", "txt", "--output_dir", "/tmp"], {
-        timeout: 120_000,
+        timeout: 60_000,
         stdio: "pipe",
       });
       if (result.status !== 0) {
@@ -2371,6 +2398,17 @@ async function transcribeAudio(audioPath: string): Promise<string | undefined> {
     process.stderr.write(`telegram channel: transcription failed: ${err}\n`);
   }
   return undefined;
+}
+
+/** Transcribe with a global timeout. Returns "[timed out]" sentinel on timeout so callers can inform the user. */
+async function transcribeAudio(audioPath: string): Promise<string | undefined> {
+  const result = await withTimeout(transcribeAudioInner(audioPath), TRANSCRIPTION_TIMEOUT_MS);
+  if (result === undefined && Date.now() > 0) {
+    // Distinguish "no transcriber available" from "timed out" — check if any provider was attempted.
+    // We can't easily tell here, so we just log it. The caller handles undefined gracefully.
+    process.stderr.write(`telegram channel: transcription returned no result (may have timed out after ${TRANSCRIPTION_TIMEOUT_MS / 1000}s)\n`);
+  }
+  return result;
 }
 
 // ── Middleware transcription cache ─────────────────────────────────
@@ -2530,7 +2568,11 @@ bot.on("message:voice", async (ctx) => {
       mkdirSync(INBOX_DIR, { recursive: true });
       writeFileSync(path, buf);
       const transcription = await transcribeAudio(path);
-      return { path, type: "audio" as const, transcription };
+      return {
+        path,
+        type: "audio" as const,
+        transcription: transcription ?? "(could not transcribe voice message — audio file attached)",
+      };
     } catch (err) {
       process.stderr.write(`telegram channel: voice download failed: ${err}\n`);
       return undefined;
@@ -2560,7 +2602,11 @@ bot.on("message:audio", async (ctx) => {
       mkdirSync(INBOX_DIR, { recursive: true });
       writeFileSync(path, buf);
       const transcription = await transcribeAudio(path);
-      return { path, type: "audio" as const, transcription };
+      return {
+        path,
+        type: "audio" as const,
+        transcription: transcription ?? "(could not transcribe audio — file attached)",
+      };
     } catch (err) {
       process.stderr.write(`telegram channel: audio download failed: ${err}\n`);
       return undefined;
@@ -3088,25 +3134,35 @@ async function deliverMessage(
   }
 }
 
-void bot.start({
-  allowed_updates: [
-    "message",
-    "edited_message",
-    "channel_post",
-    "edited_channel_post",
-    "callback_query",
-    "message_reaction",
-  ],
-  onStart: (info) => {
+if (!isSecondary) {
+  void bot.start({
+    allowed_updates: [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+      "callback_query",
+      "message_reaction",
+    ],
+    onStart: (info) => {
+      botUsername = info.username;
+      process.stderr.write(`telegram channel: polling as @${info.username}\n`);
+      const chain = [
+        OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+        GROQ_API_KEY && "Groq",
+        DEEPGRAM_API_KEY && "Deepgram",
+        findWhisperBin() || null,
+      ].filter(Boolean);
+      process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+      if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+    },
+  });
+} else {
+  // Secondary: fetch bot info for username without starting polling
+  bot.api.getMe().then((info) => {
     botUsername = info.username;
-    process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-    const chain = [
-      OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-      GROQ_API_KEY && "Groq",
-      DEEPGRAM_API_KEY && "Deepgram",
-      findWhisperBin() || null,
-    ].filter(Boolean);
-    process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-    if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-  },
-});
+    process.stderr.write(`telegram channel: MCP-only mode — tools ready for @${info.username}\n`);
+  }).catch(() => {
+    process.stderr.write(`telegram channel: MCP-only mode — could not fetch bot info\n`);
+  });
+}

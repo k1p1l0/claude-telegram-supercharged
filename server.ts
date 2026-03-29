@@ -1275,9 +1275,9 @@ const mcp = new Server(
           ]
         : []),
       "",
-      "URL HANDLING — THREADS: When a message contains a Threads URL (threads.com/@ or threads.net/@), do NOT use WebFetch — Threads blocks it. Instead, use ToolSearch to load and call mcp__threads-scraper__thenetaji-slash-threads-scraper with input: [{\"url\": \"THE_URL\"}]. Extract the post text, author, and engagement metrics from the response. Present as: **@username** > post text > engagement stats.",
+      "URL HANDLING — THREADS: When a message contains a Threads URL (threads.com/@ or threads.net/@), do NOT use WebFetch — Threads blocks it. Instead, check if mcp__threads-scraper__thenetaji-slash-threads-scraper is available via ToolSearch. If available, call it with input: [{\"url\": \"THE_URL\"}]. Extract the post text, author, and engagement metrics. Present as: **@username** > post text > engagement stats. If the tool is not available, fall back to WebFetch.",
       "",
-      "URL HANDLING — YOUTUBE: When a message contains a YouTube URL (youtube.com/watch, youtu.be/, youtube.com/shorts/), use mcp__apify-actors__invideoiq-slash-video-transcript-scraper to transcribe the video. Pass video_url with the URL. Present the video title, duration, and a summary of the transcript. If the user asks for the full transcript, include timestamped segments.",
+      "URL HANDLING — YOUTUBE: When a message contains a YouTube URL (youtube.com/watch, youtu.be/, youtube.com/shorts/), check if mcp__apify-actors__invideoiq-slash-video-transcript-scraper is available. If so, use it to transcribe the video. Pass video_url with the URL. Present the video title, duration, and a summary of the transcript. If the tool is not available, fall back to WebFetch.",
       "",
       ...(readMemory() ? ["CONVERSATION MEMORY (summaries from previous sessions):", readMemory()] : []),
     ].join("\n"),
@@ -2403,9 +2403,7 @@ async function transcribeAudioInner(audioPath: string): Promise<string | undefin
 /** Transcribe with a global timeout. Returns "[timed out]" sentinel on timeout so callers can inform the user. */
 async function transcribeAudio(audioPath: string): Promise<string | undefined> {
   const result = await withTimeout(transcribeAudioInner(audioPath), TRANSCRIPTION_TIMEOUT_MS);
-  if (result === undefined && Date.now() > 0) {
-    // Distinguish "no transcriber available" from "timed out" — check if any provider was attempted.
-    // We can't easily tell here, so we just log it. The caller handles undefined gracefully.
+  if (result === undefined) {
     process.stderr.write(`telegram channel: transcription returned no result (may have timed out after ${TRANSCRIPTION_TIMEOUT_MS / 1000}s)\n`);
   }
   return result;

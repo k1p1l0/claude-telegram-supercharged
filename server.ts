@@ -132,6 +132,8 @@ const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "pNInz6obpgDQGcFmaJgB";
 const OPENAI_WHISPER_MODEL = process.env.OPENAI_WHISPER_MODEL || "whisper-1";
+const WHISPER_LANGUAGE = process.env.WHISPER_LANGUAGE; // e.g. "ko", "en" — omit for auto-detect
+const WHISPER_PROMPT = process.env.WHISPER_PROMPT;     // e.g. "The audio may contain mixed languages."
 const ROUTER_MODEL = process.env.TELEGRAM_ROUTER_MODEL || "sonnet";
 const IS_HAIKU_ROUTER = ROUTER_MODEL === "haiku";
 
@@ -2141,6 +2143,8 @@ async function transcribeViaOpenAI(audioPath: string): Promise<string | undefine
     const formData = new FormData();
     formData.append("file", new Blob([audioData]), `voice.${ext}`);
     formData.append("model", OPENAI_WHISPER_MODEL);
+    if (WHISPER_LANGUAGE) formData.append("language", WHISPER_LANGUAGE);
+    if (WHISPER_PROMPT) formData.append("prompt", WHISPER_PROMPT);
     const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },

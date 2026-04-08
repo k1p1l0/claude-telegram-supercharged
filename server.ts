@@ -2139,7 +2139,8 @@ async function transcribeViaOpenAI(audioPath: string): Promise<string | undefine
   if (!OPENAI_API_KEY) return undefined;
   try {
     const audioData = readFileSync(audioPath);
-    const ext = extname(audioPath).slice(1) || "ogg";
+    const rawExt = extname(audioPath).slice(1) || "ogg";
+    const ext = rawExt === "oga" ? "ogg" : rawExt; // .oga rejected by gpt-4o-transcribe
     const formData = new FormData();
     formData.append("file", new Blob([audioData]), `voice.${ext}`);
     formData.append("model", OPENAI_WHISPER_MODEL);

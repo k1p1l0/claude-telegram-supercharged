@@ -30,7 +30,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), ".claude", "channels", "telegram");
 const DATA_DIR = join(STATE_DIR, "data");
 const SIGNAL_FILE = join(DATA_DIR, "restart.signal");
 const CLAUDE_CMD = "claude";

@@ -107,7 +107,7 @@ const ALLOWED_REACTIONS = new Set([
   "😡",
 ]);
 
-const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), ".claude", "channels", "telegram");
 const ACCESS_FILE = join(STATE_DIR, "access.json");
 const APPROVED_DIR = join(STATE_DIR, "approved");
 const ENV_FILE = join(STATE_DIR, ".env");
@@ -193,6 +193,7 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
+mkdirSync(DATA_DIR, { recursive: true });
 acquireLock();
 
 // ── Telegraph integration ─────────────────────────────────────────────

@@ -814,6 +814,8 @@ type Access = {
   chunkMode?: "length" | "newline";
   /** Auto-transcribe voice/audio in the history middleware (even without mention). Default: true. */
   autoTranscribe?: boolean;
+  /** Tool names whose permission_requests are auto-allowed without a Telegram round-trip. */
+  autoApproveTools?: string[];
 };
 
 function defaultAccess(): Access {
@@ -1207,7 +1209,11 @@ const mcp = new Server(
   {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
     instructions: [
-      "The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. IMPORTANT: When a Telegram message asks you to do something (write a post, generate code, answer a question), ALWAYS send the full result back via the reply tool. Never just acknowledge the request — deliver the actual content to Telegram. The user may only be reading Telegram, not your terminal.",
+      "CRITICAL — READ THIS FIRST: Every user-visible output MUST go through the reply tool. Your terminal output is INVISIBLE to the user — they are on a phone reading Telegram. If you write a question, a list, a recommendation, or any text meant for the user WITHOUT calling reply, they will never see it and will think you are broken. This includes follow-up questions, clarifications, option menus, and decision prompts — ALL of them must be sent via reply.",
+      "",
+      "EXAMPLES: (a) WRONG: responding with 'Which voice do you want, A or B?' in your normal output. (b) RIGHT: calling reply({ chat_id, text: 'Which voice do you want, A or B?' }). (c) WRONG: printing a numbered list of decisions for the user to review. (d) RIGHT: calling reply with the same list as the text parameter. If you are asking the user anything, the question goes in a reply call, period.",
+      "",
+      "The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool. When a Telegram message asks you to do something (write a post, generate code, answer a question), ALWAYS send the full result back via the reply tool. Never just acknowledge the request — deliver the actual content to Telegram.",
       "",
       ...(IS_HAIKU_ROUTER
         ? [
@@ -1286,6 +1292,8 @@ const mcp = new Server(
       "URL HANDLING — THREADS: When a message contains a Threads URL (threads.com/@ or threads.net/@), do NOT use WebFetch — Threads blocks it. Instead, check if mcp__threads-scraper__thenetaji-slash-threads-scraper is available via ToolSearch. If available, call it with input: [{\"url\": \"THE_URL\"}]. Extract the post text, author, and engagement metrics. Present as: **@username** > post text > engagement stats. If the tool is not available, fall back to WebFetch.",
       "",
       "URL HANDLING — YOUTUBE: When a message contains a YouTube URL (youtube.com/watch, youtu.be/, youtube.com/shorts/), check if mcp__apify-actors__invideoiq-slash-video-transcript-scraper is available. If so, use it to transcribe the video. Pass video_url with the URL. Present the video title, duration, and a summary of the transcript. If the tool is not available, fall back to WebFetch.",
+      "",
+      "FINAL REMINDER: Nothing you write outside the reply tool reaches the user. When in doubt, call reply. It is always correct to call reply. It is never correct to answer only in your terminal.",
       "",
       ...(readMemory() ? ["CONVERSATION MEMORY (summaries from previous sessions):", readMemory()] : []),
     ].join("\n"),

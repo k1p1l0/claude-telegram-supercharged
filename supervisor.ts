@@ -312,6 +312,19 @@ function startContextWatchdog(): void {
 		// Debounce: don't trigger more than once per 60 seconds
 		if (Date.now() - lastWatchdogTrigger < 60_000) return;
 		try {
+			// Check 1: session running too long (prevents dormancy bug).
+			// Runs FIRST and independently of log parsing — the age-based cap must fire
+			// even when the stdout log is unparseable (e.g. PTY ANSI escapes swallow the
+			// status bar rendering, which is how a 7-day dormant session slipped past).
+			const uptime = Date.now() - lastStartTime;
+			if (uptime > MAX_SESSION_UPTIME_MS) {
+				log(`context watchdog: session uptime ${Math.round(uptime / 60000)}min exceeds max ${Math.round(MAX_SESSION_UPTIME_MS / 60000)}min — triggering restart`);
+				lastWatchdogTrigger = Date.now();
+				mkdirSync(join(SIGNAL_FILE, ".."), { recursive: true });
+				writeFileSync(SIGNAL_FILE, String(Date.now() + 2000));
+				return;
+			}
+
 			// Read the last 2KB of the stdout log to find the context percentage
 			const stat = statSync(STDOUT_LOG);
 			const readSize = Math.min(stat.size, 2048);
@@ -329,19 +342,9 @@ function startContextWatchdog(): void {
 			// Take the last percentage found (most recent status bar)
 			const lastPct = Number.parseInt(matches[matches.length - 1][1], 10);
 
-			// Check 1: context too high
+			// Check 2: context too high
 			if (lastPct >= CONTEXT_THRESHOLD_PCT && lastPct <= 100) {
 				log(`context watchdog: usage at ${lastPct}% (threshold: ${CONTEXT_THRESHOLD_PCT}%) — triggering restart`);
-				lastWatchdogTrigger = Date.now();
-				mkdirSync(join(SIGNAL_FILE, ".."), { recursive: true });
-				writeFileSync(SIGNAL_FILE, String(Date.now() + 2000));
-				return;
-			}
-
-			// Check 2: session running too long (prevents dormancy bug)
-			const uptime = Date.now() - lastStartTime;
-			if (uptime > MAX_SESSION_UPTIME_MS) {
-				log(`context watchdog: session uptime ${Math.round(uptime / 60000)}min exceeds max ${Math.round(MAX_SESSION_UPTIME_MS / 60000)}min — triggering restart`);
 				lastWatchdogTrigger = Date.now();
 				mkdirSync(join(SIGNAL_FILE, ".."), { recursive: true });
 				writeFileSync(SIGNAL_FILE, String(Date.now() + 2000));

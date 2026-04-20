@@ -31,6 +31,11 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Bot, type Context, InlineKeyboard, InputFile } from "grammy";
 import type { ReactionTypeEmoji } from "grammy/types";
 
+if (!process.env.TELEGRAM_CHANNEL_ENABLED) {
+  process.stderr.write("telegram: skipping (no TELEGRAM_CHANNEL_ENABLED)\n");
+  process.exit(0);
+}
+
 const ALLOWED_REACTIONS = new Set([
   "👍",
   "👎",

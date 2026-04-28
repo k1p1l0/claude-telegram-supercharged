@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/k1p1l0-claude-telegram-supercharged-badge.png)](https://mseep.ai/app/k1p1l0-claude-telegram-supercharged)
+
 <div align="center">
 
 <img src="./banner.jpg" alt="Claude Telegram Supercharged" width="100%" />

@@ -240,26 +240,58 @@ async function shutdown(sig: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-// Kill any orphaned claude --channels telegram processes from previous runs
+// Kill any orphaned processes from previous runs. Two classes are caught:
+//   1. claude --channels telegram   — the worker itself
+//   2. bun server.ts adopted by init (PPID=1) — the bot MCP subprocess
+//
+// The bot orphans are the dangerous ones: when an old claude session dies
+// without cleanly tearing down its MCP child, the bot is adopted by init
+// and keeps an exclusive lock on messages.db. New daemons then receive
+// messages, react, but their DB writes silently fail — symptom: bot reacts
+// but never replies. The 28-day-old PPID=1 orphan we hit on 2026-04-28 is
+// the canonical failure this guards against.
+//
+// PPID=1 is the right scope: a healthy bot is always parented by a live
+// claude worker, so PPID=1 only matches genuinely stranded ones.
 async function cleanupOrphans(): Promise<void> {
 	const { execSync } = await import("node:child_process");
 	try {
 		const myPid = process.pid;
-		// Find claude processes with telegram channel flag, excluding our own PID
-		const result = execSync(
-			`pgrep -f 'claude.*--channels.*telegram' || true`,
-			{ encoding: "utf-8" },
-		).trim();
-		if (!result) return;
-
-		const pids = result
-			.split("\n")
-			.map((p) => Number.parseInt(p.trim(), 10))
-			.filter((p) => !Number.isNaN(p) && p !== myPid);
+		const seen = new Set<number>();
+		// Class 1: claude worker
+		try {
+			const r = execSync(`pgrep -f 'claude.*--channels.*telegram' || true`, {
+				encoding: "utf-8",
+			}).trim();
+			for (const line of r.split("\n").filter(Boolean)) {
+				const p = Number.parseInt(line.trim(), 10);
+				if (!Number.isNaN(p) && p !== myPid) seen.add(p);
+			}
+		} catch {}
+		// Class 2: bot subprocess adopted by init. Any `bun server.ts` with
+		// PPID=1 is necessarily a stranded MCP child from a dead claude
+		// session — no legitimate `bun server.ts` runs with init as parent.
+		try {
+			const r = execSync(`pgrep -f 'bun.*server\\.ts' || true`, {
+				encoding: "utf-8",
+			}).trim();
+			for (const line of r.split("\n").filter(Boolean)) {
+				const p = Number.parseInt(line.trim(), 10);
+				if (Number.isNaN(p) || p === myPid) continue;
+				try {
+					const ppid = Number.parseInt(
+						execSync(`ps -o ppid= -p ${p}`, { encoding: "utf-8" }).trim(),
+						10,
+					);
+					if (ppid === 1) seen.add(p);
+				} catch {} // ps failed → process gone; skip
+			}
+		} catch {}
+		if (seen.size === 0) return;
 
 		// Filter out interactive sessions (processes with a TTY are user terminals)
 		const orphanPids: number[] = [];
-		for (const pid of pids) {
+		for (const pid of seen) {
 			try {
 				const tty = execSync(`ps -p ${pid} -o tty=`, {
 					encoding: "utf-8",

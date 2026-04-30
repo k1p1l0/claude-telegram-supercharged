@@ -134,6 +134,7 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "pNInz6obpgDQGcFm
 const OPENAI_WHISPER_MODEL = process.env.OPENAI_WHISPER_MODEL || "whisper-1";
 const ROUTER_MODEL = process.env.TELEGRAM_ROUTER_MODEL || "sonnet";
 const IS_HAIKU_ROUTER = ROUTER_MODEL === "haiku";
+const ESCALATION_MODEL = process.env.TELEGRAM_ESCALATION_MODEL || "opus";
 
 if (!TOKEN) {
   process.stderr.write(
@@ -1226,16 +1227,16 @@ const mcp = new Server(
             "- NEVER write code or generate long content",
             "- NEVER spend more than 30 seconds on any task — if you catch yourself thinking too long, STOP and escalate immediately",
             "",
-            'HOW TO ESCALATE: (1) Send a quick reply: "On it, researching..." (2) Then use Agent(model: "opus", prompt: "..."). Include the full task, chat_id, and message_id so Opus can reply directly.',
+            `HOW TO ESCALATE: (1) Send a quick reply: "On it, researching..." (2) Then use Agent(model: "${ESCALATION_MODEL}", prompt: "..."). Include the full task, chat_id, and message_id so ${ESCALATION_MODEL} can reply directly.`,
             "",
-            'ESCALATION PROMPT TEMPLATE: Agent(model: "opus", prompt: "The user in Telegram (chat_id=XXX, message_id=YYY) asked: [TASK]. Research this thoroughly. When done, use the reply MCP tool to send the answer to chat_id=XXX. Also react with 👍 to message_id=YYY.")',
+            `ESCALATION PROMPT TEMPLATE: Agent(model: "${ESCALATION_MODEL}", prompt: "The user in Telegram (chat_id=XXX, message_id=YYY) asked: [TASK]. Research this thoroughly. When done, use the reply MCP tool to send the answer to chat_id=XXX. Also react with 👍 to message_id=YYY.")`,
           ]
         : [
-            `MODEL ROUTING: You are running on ${ROUTER_MODEL} (1M context). You have a large context window — handle most tasks directly. For extremely heavy research that needs maximum reasoning, you can escalate to Opus via Agent(model: "opus").`,
+            `MODEL ROUTING: You are running on ${ROUTER_MODEL} (1M context). You have a large context window — handle most tasks directly. For extremely heavy research that needs maximum reasoning, you can escalate to ${ESCALATION_MODEL} via Agent(model: "${ESCALATION_MODEL}").`,
             "",
-            "RESPOND QUICKLY: Reply to simple messages immediately. For complex tasks, you can handle them yourself — web search, code generation, analysis are all fine. Only escalate to Opus for tasks that need the deepest reasoning (multi-step research, complex code architecture).",
+            `RESPOND QUICKLY: Reply to simple messages immediately. For complex tasks, you can handle them yourself — web search, code generation, analysis are all fine. Only escalate to ${ESCALATION_MODEL} for tasks that need the deepest reasoning (multi-step research, complex code architecture).`,
             "",
-            'TO ESCALATE (optional): Send a quick "On it..." reply, then Agent(model: "opus", prompt: "...chat_id=XXX..."). But prefer handling tasks yourself when possible.',
+            `TO ESCALATE (optional): Send a quick "On it..." reply, then Agent(model: "${ESCALATION_MODEL}", prompt: "...chat_id=XXX..."). But prefer handling tasks yourself when possible.`,
           ]),
       "",
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has an audio_path attribute, that is a voice message or audio file the sender recorded. Voice messages and audio files are automatically transcribed by the server if whisper-cli (whisper.cpp) or whisper (openai-whisper) is installed locally. When transcription succeeds, you receive the transcription text directly in the notification content instead of just "(voice message)". The original audio file is still available at the audio_path for further processing if needed. If no transcriber is available, you receive the audio_path and can tell the user to install whisper-cpp (`brew install whisper-cpp`) for automatic transcription. Always reply with the transcription result or status via the reply tool. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',

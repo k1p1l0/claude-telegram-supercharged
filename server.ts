@@ -589,6 +589,25 @@ setInterval(checkSchedules, 30_000);
 // Stores every delivered message so Claude has context across restarts.
 // Rolling buffer: max 500 messages per chat, 14-day TTL, 50MB hard limit.
 
+/**
+ * UTF-16 surrogate-safe truncation for the recent-history injector.
+ *
+ * Why: JS String.prototype.slice operates on UTF-16 code units. Non-BMP
+ * characters (most emoji, some CJK extensions) are encoded as surrogate
+ * pairs (2 code units). A naive .slice(0, N) that lands inside a pair
+ * leaves a lone high surrogate, which Claude's API rejects as
+ * `invalid_request_error: no low surrogate in string` because the JSON
+ * payload then carries an unpaired \uD8XX escape.
+ *
+ * This function clamps the cut back to the boundary before any half pair.
+ */
+function safeSlice(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const c = s.charCodeAt(n - 1);
+  // High surrogate at the cut → drop it so we don't emit a lone half.
+  return c >= 0xD800 && c <= 0xDBFF ? s.slice(0, n - 1) : s.slice(0, n);
+}
+
 class MessageStore {
   private db: Database;
   private insertCount = 0;
@@ -706,7 +725,7 @@ class MessageStore {
       const replyTag = m.reply_to_msg_id ? ` (reply to #${m.reply_to_msg_id})` : "";
       const topicTag = m.thread_id ? ` [topic:${m.thread_id}]` : "";
       const content = m.text ?? (m.media_type ? `[${m.media_type}]` : "[no text]");
-      return `[${ts}] ${sender}${replyTag}${topicTag}: ${(content as string).slice(0, 300)}`;
+      return `[${ts}] ${sender}${replyTag}${topicTag}: ${safeSlice(content as string, 300)}`;
     });
     return `[Recent history — last ${msgs.length} messages]\n${lines.join("\n")}`;
   }

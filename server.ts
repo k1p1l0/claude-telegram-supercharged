@@ -31,6 +31,11 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Bot, type Context, InlineKeyboard, InputFile } from "grammy";
 import type { ReactionTypeEmoji } from "grammy/types";
 
+if (!process.env.TELEGRAM_CHANNEL_ENABLED) {
+  process.stderr.write("telegram: skipping (no TELEGRAM_CHANNEL_ENABLED)\n");
+  process.exit(0);
+}
+
 const ALLOWED_REACTIONS = new Set([
   "👍",
   "👎",
@@ -107,7 +112,7 @@ const ALLOWED_REACTIONS = new Set([
   "😡",
 ]);
 
-const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), ".claude", "channels", "telegram");
 const ACCESS_FILE = join(STATE_DIR, "access.json");
 const APPROVED_DIR = join(STATE_DIR, "approved");
 const ENV_FILE = join(STATE_DIR, ".env");
@@ -132,6 +137,8 @@ const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "pNInz6obpgDQGcFmaJgB";
 const OPENAI_WHISPER_MODEL = process.env.OPENAI_WHISPER_MODEL || "whisper-1";
+const WHISPER_LANGUAGE = process.env.WHISPER_LANGUAGE; // e.g. "ko", "en" — omit for auto-detect
+const WHISPER_PROMPT = process.env.WHISPER_PROMPT;     // e.g. "The audio may contain mixed languages."
 const ROUTER_MODEL = process.env.TELEGRAM_ROUTER_MODEL || "sonnet";
 const IS_HAIKU_ROUTER = ROUTER_MODEL === "haiku";
 
@@ -193,6 +200,7 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
+mkdirSync(DATA_DIR, { recursive: true });
 acquireLock();
 
 // ── Telegraph integration ─────────────────────────────────────────────
@@ -581,6 +589,25 @@ setInterval(checkSchedules, 30_000);
 // Stores every delivered message so Claude has context across restarts.
 // Rolling buffer: max 500 messages per chat, 14-day TTL, 50MB hard limit.
 
+/**
+ * UTF-16 surrogate-safe truncation for the recent-history injector.
+ *
+ * Why: JS String.prototype.slice operates on UTF-16 code units. Non-BMP
+ * characters (most emoji, some CJK extensions) are encoded as surrogate
+ * pairs (2 code units). A naive .slice(0, N) that lands inside a pair
+ * leaves a lone high surrogate, which Claude's API rejects as
+ * `invalid_request_error: no low surrogate in string` because the JSON
+ * payload then carries an unpaired \uD8XX escape.
+ *
+ * This function clamps the cut back to the boundary before any half pair.
+ */
+function safeSlice(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const c = s.charCodeAt(n - 1);
+  // High surrogate at the cut → drop it so we don't emit a lone half.
+  return c >= 0xD800 && c <= 0xDBFF ? s.slice(0, n - 1) : s.slice(0, n);
+}
+
 class MessageStore {
   private db: Database;
   private insertCount = 0;
@@ -698,7 +725,7 @@ class MessageStore {
       const replyTag = m.reply_to_msg_id ? ` (reply to #${m.reply_to_msg_id})` : "";
       const topicTag = m.thread_id ? ` [topic:${m.thread_id}]` : "";
       const content = m.text ?? (m.media_type ? `[${m.media_type}]` : "[no text]");
-      return `[${ts}] ${sender}${replyTag}${topicTag}: ${(content as string).slice(0, 300)}`;
+      return `[${ts}] ${sender}${replyTag}${topicTag}: ${safeSlice(content as string, 300)}`;
     });
     return `[Recent history — last ${msgs.length} messages]\n${lines.join("\n")}`;
   }
@@ -2144,10 +2171,13 @@ async function transcribeViaOpenAI(audioPath: string): Promise<string | undefine
   if (!OPENAI_API_KEY) return undefined;
   try {
     const audioData = readFileSync(audioPath);
-    const ext = extname(audioPath).slice(1) || "ogg";
+    const rawExt = extname(audioPath).slice(1) || "ogg";
+    const ext = rawExt === "oga" ? "ogg" : rawExt; // .oga rejected by gpt-4o-transcribe
     const formData = new FormData();
     formData.append("file", new Blob([audioData]), `voice.${ext}`);
     formData.append("model", OPENAI_WHISPER_MODEL);
+    if (WHISPER_LANGUAGE) formData.append("language", WHISPER_LANGUAGE);
+    if (WHISPER_PROMPT) formData.append("prompt", WHISPER_PROMPT);
     const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },

@@ -900,11 +900,34 @@ function assertSendable(f: string): void {
   }
 }
 
+// Best-effort sanity check — emit warnings for shapes that are syntactically
+// valid JSON but semantically broken in ways that silently disable the channel
+// (e.g. group entry with empty allowFrom, dmPolicy with no allowFrom). We log
+// but don't reject, to preserve current behavior; operators can grep stderr.
+function warnOnAccessAnomalies(a: Access): void {
+  if (a.dmPolicy === "allowlist" && a.allowFrom.length === 0) {
+    process.stderr.write(
+      "telegram channel: access.json WARNING — dmPolicy=allowlist but allowFrom is empty; no DM will reach Claude\n",
+    );
+  }
+  for (const [chatId, cfg] of Object.entries(a.groups)) {
+    if (!cfg || typeof cfg !== "object") {
+      process.stderr.write(`telegram channel: access.json WARNING — groups[${chatId}] is not an object; ignored\n`);
+      continue;
+    }
+    if (cfg.requireMention && (!cfg.allowFrom || cfg.allowFrom.length === 0)) {
+      process.stderr.write(
+        `telegram channel: access.json WARNING — groups[${chatId}] has requireMention=true with empty allowFrom; group messages will be silently dropped\n`,
+      );
+    }
+  }
+}
+
 function readAccessFile(): Access {
   try {
     const raw = readFileSync(ACCESS_FILE, "utf8");
     const parsed = JSON.parse(raw) as Partial<Access>;
-    return {
+    const access: Access = {
       dmPolicy: parsed.dmPolicy ?? "pairing",
       allowFrom: parsed.allowFrom ?? [],
       groups: parsed.groups ?? {},
@@ -916,6 +939,8 @@ function readAccessFile(): Access {
       chunkMode: parsed.chunkMode,
       autoTranscribe: parsed.autoTranscribe,
     };
+    warnOnAccessAnomalies(access);
+    return access;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return defaultAccess();
     try {
@@ -3200,30 +3225,57 @@ function replayUnanswered(): void {
 }
 
 if (!isSecondary) {
-  void bot.start({
-    allowed_updates: [
-      "message",
-      "edited_message",
-      "channel_post",
-      "edited_channel_post",
-      "callback_query",
-      "message_reaction",
-    ],
-    onStart: (info) => {
-      botUsername = info.username;
-      process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-      const chain = [
-        OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-        GROQ_API_KEY && "Groq",
-        DEEPGRAM_API_KEY && "Deepgram",
-        findWhisperBin() || null,
-      ].filter(Boolean);
-      process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-      if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-      // Check for messages that were lost during the restart gap
-      setTimeout(replayUnanswered, 3000);
-    },
-  });
+  // bot.start() returns a promise that resolves only when polling stops. If
+  // grammY's poll loop crashes (TCP eviction, NAT timeout, transient TG edge
+  // error), the previous `void bot.start(...)` silently dropped the rejection
+  // — bot stayed alive but stopped consuming updates with no observability.
+  // Wrap with .then/.catch and exponential backoff so polling self-heals and
+  // the failure is at least logged.
+  let pollRestartCount = 0;
+  const startPolling = (): void => {
+    bot
+      .start({
+        allowed_updates: [
+          "message",
+          "edited_message",
+          "channel_post",
+          "edited_channel_post",
+          "callback_query",
+          "message_reaction",
+        ],
+        onStart: (info) => {
+          botUsername = info.username;
+          pollRestartCount = 0;
+          process.stderr.write(`telegram channel: polling as @${info.username}\n`);
+          const chain = [
+            OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+            GROQ_API_KEY && "Groq",
+            DEEPGRAM_API_KEY && "Deepgram",
+            findWhisperBin() || null,
+          ].filter(Boolean);
+          process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+          if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+          // Check for messages that were lost during the restart gap
+          setTimeout(replayUnanswered, 3000);
+        },
+      })
+      .then(() => {
+        process.stderr.write("telegram channel: bot.start() resolved (polling stopped) — restarting in 2s\n");
+        setTimeout(startPolling, 2_000);
+      })
+      .catch((err) => {
+        pollRestartCount++;
+        const delay = Math.min(2_000 * 2 ** Math.min(pollRestartCount, 5), 60_000);
+        process.stderr.write(
+          `telegram channel: bot.start() rejected (attempt ${pollRestartCount}): ${
+            err instanceof Error ? err.stack || err.message : String(err)
+          }\n`,
+        );
+        process.stderr.write(`telegram channel: restarting polling in ${delay}ms\n`);
+        setTimeout(startPolling, delay);
+      });
+  };
+  startPolling();
 } else {
   // Secondary: fetch bot info for username without starting polling
   bot.api.getMe().then((info) => {

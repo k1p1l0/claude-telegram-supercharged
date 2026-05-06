@@ -258,16 +258,39 @@ async function cleanupOrphans(): Promise<void> {
 	try {
 		const myPid = process.pid;
 		const seen = new Set<number>();
-		// Class 1: claude worker
-		try {
-			const r = execSync(`pgrep -f 'claude.*--channels.*telegram' || true`, {
-				encoding: "utf-8",
-			}).trim();
-			for (const line of r.split("\n").filter(Boolean)) {
-				const p = Number.parseInt(line.trim(), 10);
-				if (!Number.isNaN(p) && p !== myPid) seen.add(p);
-			}
-		} catch {}
+
+		// Class 1: prior claude worker for THIS channel.
+		// The MCP server writes its own PID to $DATA_DIR/telegram.lock when it
+		// becomes primary. We resolve that PID's process group leader (the
+		// detached claude worker) and add it to the kill set. This is per-channel
+		// scoped — running multiple supervisors with different STATE_DIRs no
+		// longer cross-kills each other. The previous global
+		// `pgrep -f 'claude.*--channels.*telegram'` matched every channel and
+		// also a user's interactive `claude --channels` session, requiring the
+		// fragile TTY-skip heuristic that misfires under PTY-wrapped daemons.
+		const LOCK_FILE = join(DATA_DIR, "telegram.lock");
+		if (existsSync(LOCK_FILE)) {
+			try {
+				const lockedPid = Number.parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
+				if (!Number.isNaN(lockedPid) && lockedPid !== myPid) {
+					try {
+						process.kill(lockedPid, 0); // alive check
+						// Resolve to the process-group leader (claude was spawned with
+						// detached:true, so PGID==claude.pid; the MCP child shares the pgid)
+						let pgid = lockedPid;
+						try {
+							const out = execSync(`ps -o pgid= -p ${lockedPid}`, { encoding: "utf-8" }).trim();
+							const parsed = Number.parseInt(out, 10);
+							if (!Number.isNaN(parsed) && parsed > 0) pgid = parsed;
+						} catch {}
+						seen.add(pgid);
+					} catch {
+						log(`stale telegram.lock found (pid=${lockedPid} is dead) — ignoring`);
+					}
+				}
+			} catch {}
+		}
+
 		// Class 2: bot subprocess adopted by init. Any `bun server.ts` with
 		// PPID=1 is necessarily a stranded MCP child from a dead claude
 		// session — no legitimate `bun server.ts` runs with init as parent.
@@ -289,23 +312,11 @@ async function cleanupOrphans(): Promise<void> {
 		} catch {}
 		if (seen.size === 0) return;
 
-		// Filter out interactive sessions (processes with a TTY are user terminals)
-		const orphanPids: number[] = [];
-		for (const pid of seen) {
-			try {
-				const tty = execSync(`ps -p ${pid} -o tty=`, {
-					encoding: "utf-8",
-				}).trim();
-				if (tty && tty !== "??" && tty !== "") {
-					log(`skipping pid=${pid} (interactive session on ${tty})`);
-					continue;
-				}
-			} catch {
-				// ps failed — process may already be dead, skip it
-				continue;
-			}
-			orphanPids.push(pid);
-		}
+		// No TTY-skip needed: lock-scoped Class 1 PIDs are always the previous
+		// MCP server we own (which inherits the daemon's PTY anyway, so a TTY
+		// check would falsely skip them); Class 2 PIDs are PPID=1 orphans which
+		// by definition aren't interactive.
+		const orphanPids = [...seen];
 
 		for (const pid of orphanPids) {
 			log(`killing orphaned process pid=${pid}`);

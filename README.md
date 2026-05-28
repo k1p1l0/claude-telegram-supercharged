@@ -110,7 +110,7 @@ Clone this repo and install both the supercharged server and the daemon supervis
 
 ```sh
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
-cp claude-telegram-supercharged/server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/0.0.1/server.ts
+cp claude-telegram-supercharged/server.ts "$(ls -vd ~/.claude/plugins/cache/claude-plugins-official/telegram/*/ | tail -n 1)server.ts"
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 ```

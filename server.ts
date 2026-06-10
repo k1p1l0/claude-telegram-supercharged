@@ -31,6 +31,135 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Bot, type Context, InlineKeyboard, InputFile } from "grammy";
 import type { ReactionTypeEmoji } from "grammy/types";
 
+// ── Orphan watchdog helpers (pure — unit-tested in server.test.ts) ────────
+// This MCP subprocess (`bun server.ts`) is a grandchild of Claude Code:
+//   claude → `bun run start` (launcher) → bun server.ts (us)
+// When Claude dies its child launcher waits on us while we'd be waiting on it,
+// so watching only our immediate parent deadlocks. We resolve Claude's PID
+// (our grandparent) and poll its liveness, self-terminating when it dies so
+// the single-instance lock is released instead of stranded.
+
+// Parse the PPID field from a Linux /proc/<pid>/stat line. Format is
+// "PID (comm) STATE PPID ..."; comm may contain spaces and ")", so read the
+// fields after the final ")".
+export function parsePpidFromStat(stat: string): number | null {
+  const rparen = stat.lastIndexOf(")");
+  if (rparen === -1) return null;
+  const after = stat.slice(rparen + 1).trim().split(/\s+/);
+  const ppid = Number.parseInt(after[1] ?? "", 10);
+  return Number.isFinite(ppid) ? ppid : null;
+}
+
+// Resolve Claude Code's PID (our grandparent) given the launcher's PID
+// (our immediate parent). Tries Linux /proc first, then a `ps` fallback
+// (macOS). Returns null when neither yields a meaningful pid (> 1).
+export function resolveGrandparentPid(
+  parentPid: number,
+  readStat: (pid: number) => string | null,
+  psPpid: (pid: number) => number | null,
+): number | null {
+  const stat = readStat(parentPid);
+  if (stat) {
+    const p = parsePpidFromStat(stat);
+    if (p !== null && p > 1) return p;
+  }
+  const p2 = psPpid(parentPid);
+  return p2 !== null && p2 > 1 ? p2 : null;
+}
+
+export interface WatchdogState {
+  platform: string;
+  currentPpid: number;
+  bootPpid: number;
+  grandparentPid: number | null;
+  isProcessAlive: (pid: number) => boolean;
+  stdinDestroyed: boolean;
+  stdinReadableEnded: boolean;
+}
+
+// Decide whether this subprocess has been orphaned and should self-terminate.
+export function isOrphaned(s: WatchdogState): boolean {
+  // Immediate parent (the `bun run` launcher) died → we were reparented.
+  // No POSIX reparenting on Windows, so skip there.
+  if (s.platform !== "win32" && s.currentPpid !== s.bootPpid) return true;
+  // Claude Code (our grandparent) died — the launcher is now a dead end.
+  if (s.grandparentPid !== null && !s.isProcessAlive(s.grandparentPid)) return true;
+  // stdin pipe to Claude severed.
+  if (s.stdinDestroyed || s.stdinReadableEnded) return true;
+  return false;
+}
+
+// Wire the pure helpers above into a live watchdog. Resolves Claude's PID at
+// boot, then self-terminates — releasing the single-instance lock — the moment
+// Claude dies, via stdin EOF or the 5s liveness poll. Without this an orphaned
+// bot keeps the lock alive, forcing the next session into MCP-only (secondary)
+// mode where it never replies. Only invoked when running as the real server.
+function startOrphanWatchdog(): void {
+  const bootPpid = process.ppid;
+  const grandparentPid = resolveGrandparentPid(
+    bootPpid,
+    (pid) => {
+      try {
+        return readFileSync(`/proc/${pid}/stat`, "utf-8");
+      } catch {
+        return null;
+      }
+    },
+    (pid) => {
+      try {
+        const n = Number.parseInt(
+          execSync(`ps -o ppid= -p ${pid}`, { encoding: "utf-8" }).trim(),
+          10,
+        );
+        return Number.isFinite(n) ? n : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+  const isProcessAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0); // signal 0 = existence check, does not kill
+      return true;
+    } catch (e) {
+      // EPERM = the process exists but we may not signal it → still alive.
+      return (e as { code?: string }).code === "EPERM";
+    }
+  };
+  let terminating = false;
+  const selfTerminate = (reason: string): void => {
+    if (terminating) return;
+    terminating = true;
+    process.stderr.write(`telegram channel: ${reason} — self-terminating\n`);
+    try {
+      if (!isSecondary) releaseLock();
+    } catch {}
+    process.exit(0);
+  };
+  process.stdin.on("end", () => selfTerminate("stdin closed"));
+  process.stdin.on("close", () => selfTerminate("stdin closed"));
+  setInterval(() => {
+    if (
+      isOrphaned({
+        platform: process.platform,
+        currentPpid: process.ppid,
+        bootPpid,
+        grandparentPid,
+        isProcessAlive,
+        stdinDestroyed: process.stdin.destroyed,
+        stdinReadableEnded: process.stdin.readableEnded,
+      })
+    ) {
+      selfTerminate("parent (Claude Code) gone");
+    }
+  }, 5000).unref();
+}
+
+if (!process.env.TELEGRAM_CHANNEL_ENABLED) {
+  process.stderr.write("telegram: skipping (no TELEGRAM_CHANNEL_ENABLED)\n");
+  process.exit(0);
+}
+
 const ALLOWED_REACTIONS = new Set([
   "👍",
   "👎",
@@ -107,7 +236,7 @@ const ALLOWED_REACTIONS = new Set([
   "😡",
 ]);
 
-const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), ".claude", "channels", "telegram");
 const ACCESS_FILE = join(STATE_DIR, "access.json");
 const APPROVED_DIR = join(STATE_DIR, "approved");
 const ENV_FILE = join(STATE_DIR, ".env");
@@ -132,6 +261,8 @@ const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "pNInz6obpgDQGcFmaJgB";
 const OPENAI_WHISPER_MODEL = process.env.OPENAI_WHISPER_MODEL || "whisper-1";
+const WHISPER_LANGUAGE = process.env.WHISPER_LANGUAGE; // e.g. "ko", "en" — omit for auto-detect
+const WHISPER_PROMPT = process.env.WHISPER_PROMPT;     // e.g. "The audio may contain mixed languages."
 const ROUTER_MODEL = process.env.TELEGRAM_ROUTER_MODEL || "sonnet";
 const IS_HAIKU_ROUTER = ROUTER_MODEL === "haiku";
 
@@ -193,6 +324,7 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
+mkdirSync(DATA_DIR, { recursive: true });
 acquireLock();
 
 // ── Telegraph integration ─────────────────────────────────────────────
@@ -581,6 +713,25 @@ setInterval(checkSchedules, 30_000);
 // Stores every delivered message so Claude has context across restarts.
 // Rolling buffer: max 500 messages per chat, 14-day TTL, 50MB hard limit.
 
+/**
+ * UTF-16 surrogate-safe truncation for the recent-history injector.
+ *
+ * Why: JS String.prototype.slice operates on UTF-16 code units. Non-BMP
+ * characters (most emoji, some CJK extensions) are encoded as surrogate
+ * pairs (2 code units). A naive .slice(0, N) that lands inside a pair
+ * leaves a lone high surrogate, which Claude's API rejects as
+ * `invalid_request_error: no low surrogate in string` because the JSON
+ * payload then carries an unpaired \uD8XX escape.
+ *
+ * This function clamps the cut back to the boundary before any half pair.
+ */
+function safeSlice(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const c = s.charCodeAt(n - 1);
+  // High surrogate at the cut → drop it so we don't emit a lone half.
+  return c >= 0xD800 && c <= 0xDBFF ? s.slice(0, n - 1) : s.slice(0, n);
+}
+
 class MessageStore {
   private db: Database;
   private insertCount = 0;
@@ -698,7 +849,7 @@ class MessageStore {
       const replyTag = m.reply_to_msg_id ? ` (reply to #${m.reply_to_msg_id})` : "";
       const topicTag = m.thread_id ? ` [topic:${m.thread_id}]` : "";
       const content = m.text ?? (m.media_type ? `[${m.media_type}]` : "[no text]");
-      return `[${ts}] ${sender}${replyTag}${topicTag}: ${(content as string).slice(0, 300)}`;
+      return `[${ts}] ${sender}${replyTag}${topicTag}: ${safeSlice(content as string, 300)}`;
     });
     return `[Recent history — last ${msgs.length} messages]\n${lines.join("\n")}`;
   }
@@ -2060,7 +2211,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
 });
 
-await mcp.connect(new StdioServerTransport());
+if (import.meta.main) {
+  await mcp.connect(new StdioServerTransport());
+  startOrphanWatchdog();
+}
 
 /**
  * Extract evenly-spaced frames from a video/animated file and stitch them into
@@ -2144,10 +2298,13 @@ async function transcribeViaOpenAI(audioPath: string): Promise<string | undefine
   if (!OPENAI_API_KEY) return undefined;
   try {
     const audioData = readFileSync(audioPath);
-    const ext = extname(audioPath).slice(1) || "ogg";
+    const rawExt = extname(audioPath).slice(1) || "ogg";
+    const ext = rawExt === "oga" ? "ogg" : rawExt; // .oga rejected by gpt-4o-transcribe
     const formData = new FormData();
     formData.append("file", new Blob([audioData]), `voice.${ext}`);
     formData.append("model", OPENAI_WHISPER_MODEL);
+    if (WHISPER_LANGUAGE) formData.append("language", WHISPER_LANGUAGE);
+    if (WHISPER_PROMPT) formData.append("prompt", WHISPER_PROMPT);
     const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -3199,7 +3356,7 @@ function replayUnanswered(): void {
   }
 }
 
-if (!isSecondary) {
+if (import.meta.main && !isSecondary) {
   void bot.start({
     allowed_updates: [
       "message",
@@ -3224,7 +3381,7 @@ if (!isSecondary) {
       setTimeout(replayUnanswered, 3000);
     },
   });
-} else {
+} else if (import.meta.main) {
   // Secondary: fetch bot info for username without starting polling
   bot.api.getMe().then((info) => {
     botUsername = info.username;

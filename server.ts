@@ -107,7 +107,17 @@ const ALLOWED_REACTIONS = new Set([
   "😡",
 ]);
 
-const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
+// Honor TELEGRAM_STATE_DIR so each project session uses its OWN state dir
+// (.env/token, access.json, inbox, data/db + single-instance lock). Upstream
+// k1p1l0 hardcoded one shared dir, so every bot shared one telegram.lock and one
+// token — only the first poller became primary; all other bots ran send-only and
+// never received. Ported from claude-plugins-official/telegram so the supercharged
+// channel works in Vas's multi-bot fleet. Authorized by Vas.
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR
+  ? (process.env.TELEGRAM_STATE_DIR.startsWith("/")
+      ? process.env.TELEGRAM_STATE_DIR
+      : join(homedir(), process.env.TELEGRAM_STATE_DIR))
+  : join(homedir(), ".claude", "channels", "telegram");
 const ACCESS_FILE = join(STATE_DIR, "access.json");
 const APPROVED_DIR = join(STATE_DIR, "approved");
 const ENV_FILE = join(STATE_DIR, ".env");
@@ -900,11 +910,30 @@ function assertSendable(f: string): void {
   }
 }
 
+function warnOnAccessAnomalies(a: Access): void {
+  if (a.dmPolicy === "allowlist" && a.allowFrom.length === 0) {
+    process.stderr.write(
+      "telegram channel: access.json WARNING — dmPolicy=allowlist but allowFrom is empty; no DM will reach Claude\n",
+    );
+  }
+  for (const [chatId, cfg] of Object.entries(a.groups)) {
+    if (!cfg || typeof cfg !== "object") {
+      process.stderr.write(`telegram channel: access.json WARNING — groups[${chatId}] is not an object; ignored\n`);
+      continue;
+    }
+    if (cfg.requireMention && (!cfg.allowFrom || cfg.allowFrom.length === 0)) {
+      process.stderr.write(
+        `telegram channel: access.json WARNING — groups[${chatId}] has requireMention=true with empty allowFrom; group messages will be silently dropped\n`,
+      );
+    }
+  }
+}
+
 function readAccessFile(): Access {
   try {
     const raw = readFileSync(ACCESS_FILE, "utf8");
     const parsed = JSON.parse(raw) as Partial<Access>;
-    return {
+    const access: Access = {
       dmPolicy: parsed.dmPolicy ?? "pairing",
       allowFrom: parsed.allowFrom ?? [],
       groups: parsed.groups ?? {},
@@ -916,6 +945,8 @@ function readAccessFile(): Access {
       chunkMode: parsed.chunkMode,
       autoTranscribe: parsed.autoTranscribe,
     };
+    warnOnAccessAnomalies(access);
+    return access;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return defaultAccess();
     try {
@@ -1243,6 +1274,7 @@ const mcp = new Server(
       "VOICE TRANSCRIPTION CAUTION: Voice transcriptions can be inaccurate — whisper may mishear words, invent context, or confuse languages. NEVER auto-trigger skills, start heavy tasks, or assume intent based solely on a voice transcription. Instead: (1) briefly confirm what you understood from the voice message, (2) ask the user if that's correct before proceeding, (3) only then take action. Example: 'I heard you asking about X — is that right?' This prevents wasting time on misheard requests. For simple greetings or short clear messages, confirmation is not needed.",
       "",
       "DOCUMENTS: If the tag has a document_path attribute, the user sent a file (PDF, DOCX, spreadsheet, etc.). Read the file to see its contents. PDFs and DOCX files are supported by the Read tool directly. For text-based files (CSV, TXT, JSON, code), Read them directly. For XLSX, suggest the user share as CSV or PDF. Always acknowledge the document and summarize what you found. Files >10MB are skipped.",
+      "LOCATION PINS: If the tag has lat and lon attributes, the user shared their location. The coordinates are in decimal degrees (WGS84). If a place attribute is also present, it is the reverse-geocoded place name from Nominatim. Use the location as context for any location-relevant task (route planning, finding nearby places, event lookup, etc.) — no need to ask the user where they are. Acknowledge the location naturally in your reply.",
       "",
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, edit_message to update a message you previously sent (e.g. progress → result), and ask_user to present inline buttons and wait for a choice.',
       "",
@@ -2708,6 +2740,49 @@ bot.on("message:document", async (ctx) => {
   });
 });
 
+bot.on("message:location", async (ctx) => {
+  const loc = ctx.message.location;
+  const msgId = ctx.message.message_id;
+  const chat_id = String(ctx.chat!.id);
+
+  // Reverse-geocode via Nominatim (free, no key, 1 rps limit — fine for occasional location pins).
+  let placeName: string | undefined;
+  try {
+    const geoRes = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${loc.latitude}&lon=${loc.longitude}&format=json`,
+      { headers: { "User-Agent": "telegram-sc/1.0" }, signal: AbortSignal.timeout(3000) },
+    );
+    if (geoRes.ok) {
+      const geoData = (await geoRes.json()) as { display_name?: string };
+      placeName = geoData.display_name;
+    }
+  } catch {
+    // Geocoding failed — coordinates only, that's fine.
+  }
+
+  // Register location data so deliverMessage can attach it to the BatchedMessage.
+  pendingLocations.set(`${chat_id}:${msgId}`, { latitude: loc.latitude, longitude: loc.longitude, placeName });
+
+  const coordStr = `${loc.latitude.toFixed(5)}, ${loc.longitude.toFixed(5)}`;
+  const text = placeName ? `(location pin: ${placeName} — ${coordStr})` : `(location pin: ${coordStr})`;
+
+  await handleInbound(ctx, text, undefined);
+});
+
+// Live location updates arrive as edited_message with a location field.
+// Write the latest coords to a file; no geocoding (rate limits) and no Claude invocation.
+bot.on("edited_message:location", async (ctx) => {
+  const loc = ctx.editedMessage.location;
+  const chat_id = String(ctx.chat!.id);
+  const filePath = join(homedir(), ".claude", "tmp", `live_location_${chat_id}.json`);
+  const data = JSON.stringify({ lat: loc.latitude, lon: loc.longitude, timestamp: new Date().toISOString() });
+  try {
+    await Bun.write(filePath, data);
+  } catch {
+    // Non-fatal — silently ignore write errors.
+  }
+});
+
 // Handle inline keyboard button taps (ask_user responses).
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
@@ -2841,6 +2916,7 @@ interface BatchedMessage {
   userId: string;
   timestamp: Date;
   media?: { path: string; type: "image" | "audio" | "document" };
+  location?: { latitude: number; longitude: number; placeName?: string };
   threadId?: number;
   replyContext: Record<string, string>;
   isGroup: boolean;
@@ -2848,6 +2924,9 @@ interface BatchedMessage {
 }
 
 const pendingBatches = new Map<string, { messages: BatchedMessage[]; timer: ReturnType<typeof setTimeout> }>();
+
+// Side-channel for location data: keyed by "chatId:msgId", consumed in deliverMessage.
+const pendingLocations = new Map<string, { latitude: number; longitude: number; placeName?: string }>();
 
 function flushBatch(chatId: string): void {
   const batch = pendingBatches.get(chatId);
@@ -2875,12 +2954,18 @@ function flushBatch(chatId: string): void {
     const senderStr = senders.length > 0 ? ` from ${senders.join(", ")}` : "";
     const summary = `Got ${msgs.length} messages${senderStr} (${parts.join(", ")}). Processing...`;
 
-    // Send the summary instantly — fire and forget
-    void bot.api
-      .sendMessage(chatId, summary, {
-        ...(last.msgId != null ? { reply_parameters: { message_id: last.msgId } } : {}),
-      })
-      .catch(() => {});
+    // Send the summary instantly — fire and forget.
+    // Suppress in GROUP chats: the ack is posted as a reply to the last message,
+    // and a reply-to-you bypasses requireMention, so in a multi-bot group each
+    // bot's ack re-wakes the bot it replied to → infinite "Got N messages…" loop.
+    // The ack is also pure noise in a group. DM-only. (2026-06-30 cookbot fix.)
+    if (!first.isGroup) {
+      void bot.api
+        .sendMessage(chatId, summary, {
+          ...(last.msgId != null ? { reply_parameters: { message_id: last.msgId } } : {}),
+        })
+        .catch(() => {});
+    }
   }
 
   // Combine all message texts
@@ -2890,6 +2975,7 @@ function flushBatch(chatId: string): void {
   const imagePaths = msgs.filter((m) => m.media?.type === "image").map((m) => m.media!.path);
   const audioPaths = msgs.filter((m) => m.media?.type === "audio").map((m) => m.media!.path);
   const docPaths = msgs.filter((m) => m.media?.type === "document").map((m) => m.media!.path);
+  const loc = msgs.find((m) => m.location)?.location;
 
   // Use the last message's context for thread tracking
   const recentHistory = messageStore.formatRecent(chatId, 5);
@@ -2920,6 +3006,8 @@ function flushBatch(chatId: string): void {
         ...(audioPaths.length > 0 ? { audio_path: audioPaths[0] } : {}),
         ...(docPaths.length > 0 ? { document_path: docPaths[0] } : {}),
         ...(docPaths.length > 1 ? { document_paths: docPaths.join(",") } : {}),
+        ...(loc ? { lat: String(loc.latitude), lon: String(loc.longitude) } : {}),
+        ...(loc?.placeName ? { place: loc.placeName } : {}),
         ...(last.threadId != null ? { thread_id: String(last.threadId) } : {}),
         ...last.replyContext,
         ...threadChainContext,
@@ -2985,6 +3073,11 @@ async function deliverMessage(
   const from = ctx.from!;
   const chat_id = String(ctx.chat!.id);
   const msgId = ctx.message?.message_id;
+
+  // Consume any location data registered by the location message handler.
+  const locationKey = msgId != null ? `${chat_id}:${msgId}` : undefined;
+  const location = locationKey ? pendingLocations.get(locationKey) : undefined;
+  if (locationKey && location) pendingLocations.delete(locationKey);
 
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void bot.api.sendChatAction(chat_id, "typing").catch(() => {});
@@ -3119,6 +3212,7 @@ async function deliverMessage(
     userId: String(from.id),
     timestamp,
     media: media ? { path: media.path, type: media.type } : undefined,
+    location,
     threadId,
     replyContext,
     isGroup,
@@ -3200,30 +3294,55 @@ function replayUnanswered(): void {
 }
 
 if (!isSecondary) {
-  void bot.start({
-    allowed_updates: [
-      "message",
-      "edited_message",
-      "channel_post",
-      "edited_channel_post",
-      "callback_query",
-      "message_reaction",
-    ],
-    onStart: (info) => {
-      botUsername = info.username;
-      process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-      const chain = [
-        OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-        GROQ_API_KEY && "Groq",
-        DEEPGRAM_API_KEY && "Deepgram",
-        findWhisperBin() || null,
-      ].filter(Boolean);
-      process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-      if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-      // Check for messages that were lost during the restart gap
-      setTimeout(replayUnanswered, 3000);
-    },
-  });
+  // bot.start() returns a promise that resolves only when polling stops. The
+  // previous `void bot.start(...)` silently dropped rejections — bot stayed
+  // alive but stopped receiving updates with no log line. Wrap with self-heal
+  // and exponential backoff so polling restarts and failures are visible.
+  let pollRestartCount = 0;
+  const startPolling = (): void => {
+    bot
+      .start({
+        allowed_updates: [
+          "message",
+          "edited_message",
+          "channel_post",
+          "edited_channel_post",
+          "callback_query",
+          "message_reaction",
+        ],
+        onStart: (info) => {
+          botUsername = info.username;
+          pollRestartCount = 0;
+          process.stderr.write(`telegram channel: polling as @${info.username}\n`);
+          const chain = [
+            OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+            GROQ_API_KEY && "Groq",
+            DEEPGRAM_API_KEY && "Deepgram",
+            findWhisperBin() || null,
+          ].filter(Boolean);
+          process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+          if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+          // Check for messages that were lost during the restart gap
+          setTimeout(replayUnanswered, 3000);
+        },
+      })
+      .then(() => {
+        process.stderr.write("telegram channel: bot.start() resolved (polling stopped) — restarting in 2s\n");
+        setTimeout(startPolling, 2_000);
+      })
+      .catch((err) => {
+        pollRestartCount++;
+        const delay = Math.min(2_000 * 2 ** Math.min(pollRestartCount, 5), 60_000);
+        process.stderr.write(
+          `telegram channel: bot.start() rejected (attempt ${pollRestartCount}): ${
+            err instanceof Error ? err.stack || err.message : String(err)
+          }\n`,
+        );
+        process.stderr.write(`telegram channel: restarting polling in ${delay}ms\n`);
+        setTimeout(startPolling, delay);
+      });
+  };
+  startPolling();
 } else {
   // Secondary: fetch bot info for username without starting polling
   bot.api.getMe().then((info) => {

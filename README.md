@@ -62,6 +62,7 @@ Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.co
 | **👥 Group Pairing** | Add bot to group, mention it, get pairing code. No hunting for numeric chat IDs. |
 | **🎯 Inline Buttons** | `ask_user` tool -- tappable buttons for confirmations and choices. |
 | **👍 Reaction Status** | 👀 read → 🔥 working → 👍 done. Voice messages get ✍ for transcription. |
+| **💬 Status Bubbles** | Live progress messages while Claude works: 🎙️ Transcribing → 🗣️ what it heard → 🤔 Thinking. Auto-deleted the moment the answer lands, leaving just question + answer. Server-driven; opt-out via `TELEGRAM_STATUS_BUBBLES=off`. |
 
 ### Daemon & Infrastructure
 
@@ -545,6 +546,22 @@ The bot can react to incoming messages with an emoji to signal it received and i
 Telegram only keeps **one bot reaction per message**, so each new reaction replaces the previous — creating a natural status progression.
 
 **Note:** `ackReaction` is **not set by default**. To enable it, add it to your `~/.claude/channels/telegram/access.json`. It only accepts emoji from [Telegram's fixed reaction whitelist](https://core.telegram.org/bots/api#reactiontypeemoji). Common choices: `👀`, `⚡`, `🔥`.
+
+### Status Bubbles
+
+Alongside (or instead of) reactions, the bot posts plain **status messages** while it works, so the chat never looks frozen during the seconds before an answer lands. They're **server-driven** -- sent by `server.ts` itself with no reliance on the model -- and **auto-delete** the moment Claude emits its first user-visible message, leaving the chat as just your question and the answer.
+
+**Bubble flow:**
+
+| Stage | Bubble | When |
+| --- | --- | --- |
+| **Transcribing** | `🎙️ Transcribing…` | A voice/audio message is downloaded, before transcription runs |
+| **Heard** | `🗣️ "<transcript>"` | After transcription -- confirms what the bot understood |
+| **Thinking** | `🤔 Thinking…` | The moment the turn is handed to Claude |
+
+The transcription bubbles fire from the always-on auto-transcribe middleware, gated to approved direct messages so they never appear on unaddressed group chatter; the voice/audio handlers cover the cache-miss fallback. The Thinking bubble fires once per turn and skips reaction-only events. A grammY API transformer watches outbound content sends and tears down a chat's bubbles on the first real reply, with a re-entrancy guard so a bubble's own send isn't mistaken for the answer.
+
+Status bubbles are **on by default**. Disable them by setting `TELEGRAM_STATUS_BUBBLES=off` in the server's environment (the daemon's launchd/systemd env block, or `~/.claude/channels/telegram/.env`). Reactions (`ackReaction`) and bubbles are independent -- use either, both, or neither.
 
 ## Message History Buffer
 

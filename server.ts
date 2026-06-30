@@ -2468,6 +2468,9 @@ bot.on("message", async (ctx, next) => {
     // Opt-out via `"autoTranscribe": false` in access.json.
     const access = loadAccess();
     if ((access.autoTranscribe ?? true) && (msg.voice || msg.audio) && !text) {
+      // Emit bubbles here, not just in the handlers: this middleware transcribes
+      // and caches first, so the handlers cache-HIT and never run their own.
+      const showBubbles = isApprovedDirectMessage(ctx, access);
       try {
         const fileObj = msg.voice ?? msg.audio;
         const file = await ctx.api.getFile(fileObj!.file_id);
@@ -2481,7 +2484,9 @@ bot.on("message", async (ctx, next) => {
           const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`);
           mkdirSync(INBOX_DIR, { recursive: true });
           writeFileSync(path, buf);
+          if (showBubbles) sendStatusBubble(String(ctx.chat.id), "🎙️ Transcribing…");
           const transcription = await transcribeAudio(path);
+          if (showBubbles && transcription) sendStatusBubble(String(ctx.chat.id), `🗣️ "${transcription}"`);
           // Cache for the type-specific handler to reuse.
           cacheMedia(uniqueId, path, transcription);
           if (transcription) {
@@ -2573,7 +2578,9 @@ bot.on("message:voice", async (ctx) => {
       const path = join(INBOX_DIR, `${Date.now()}-${voice.file_unique_id}.${ext}`);
       mkdirSync(INBOX_DIR, { recursive: true });
       writeFileSync(path, buf);
+      sendStatusBubble(String(ctx.chat!.id), "🎙️ Transcribing…");
       const transcription = await transcribeAudio(path);
+      if (transcription) sendStatusBubble(String(ctx.chat!.id), `🗣️ "${transcription}"`);
       return {
         path,
         type: "audio" as const,
@@ -2607,7 +2614,9 @@ bot.on("message:audio", async (ctx) => {
       const path = join(INBOX_DIR, `${Date.now()}-${audio.file_unique_id}.${ext}`);
       mkdirSync(INBOX_DIR, { recursive: true });
       writeFileSync(path, buf);
+      sendStatusBubble(String(ctx.chat!.id), "🎙️ Transcribing…");
       const transcription = await transcribeAudio(path);
+      if (transcription) sendStatusBubble(String(ctx.chat!.id), `🗣️ "${transcription}"`);
       return {
         path,
         type: "audio" as const,
@@ -3233,3 +3242,75 @@ if (!isSecondary) {
     process.stderr.write(`telegram channel: MCP-only mode — could not fetch bot info\n`);
   });
 }
+
+// ── Status bubbles ─────────────────────────────────────────────────────
+// Transient progress messages (🎙️ Transcribing… → 🗣️ heard → 🤔 Thinking…)
+// that delete themselves once the real reply lands. Opt out with
+// TELEGRAM_STATUS_BUBBLES=off.
+const STATUS_BUBBLES_ENABLED = process.env.TELEGRAM_STATUS_BUBBLES !== "off";
+
+const liveBubbles = new Map<string, number[]>(); // chatId → its on-screen bubble ids
+// chatId → in-flight bubble sends, so the auto-delete hook never mistakes a
+// bubble's own send for the reply that should clear the bubbles.
+const bubbleSendsInFlight = new Map<string, number>();
+
+type ChannelNotification = { method?: string; params?: { meta?: { chat_id?: unknown; event_type?: unknown } } };
+
+// A direct message from an allow-listed sender — i.e. one the bot will reply to.
+function isApprovedDirectMessage(ctx: Context, access: Access): boolean {
+  const senderId = ctx.from ? String(ctx.from.id) : undefined;
+  return ctx.chat?.type === "private" && !!senderId && access.allowFrom.includes(senderId);
+}
+
+async function sendStatusBubble(chatId: string, text: string): Promise<void> {
+  if (!STATUS_BUBBLES_ENABLED) return;
+  bubbleSendsInFlight.set(chatId, (bubbleSendsInFlight.get(chatId) ?? 0) + 1);
+  try {
+    const { message_id } = await bot.api.sendMessage(chatId, text);
+    liveBubbles.set(chatId, [...(liveBubbles.get(chatId) ?? []), message_id]);
+  } catch {
+    // best-effort
+  } finally {
+    const remaining = (bubbleSendsInFlight.get(chatId) ?? 1) - 1;
+    if (remaining > 0) bubbleSendsInFlight.set(chatId, remaining);
+    else bubbleSendsInFlight.delete(chatId);
+  }
+}
+
+function clearStatusBubbles(chatId: string): void {
+  const ids = liveBubbles.get(chatId);
+  if (!ids?.length) return;
+  liveBubbles.delete(chatId);
+  for (const id of ids) void bot.api.deleteMessage(chatId, id).catch(() => {});
+}
+
+// The first content-bearing send to a chat is the reply — it clears that chat's bubbles.
+const CONTENT_SEND_METHODS = new Set([
+  "sendMessage",
+  "sendPhoto",
+  "sendVoice",
+  "sendAudio",
+  "sendDocument",
+  "sendVideo",
+  "sendAnimation",
+  "sendMediaGroup",
+  "sendSticker",
+]);
+bot.api.config.use((prev, method, payload, signal) => {
+  const chatId = (payload as { chat_id?: number | string } | undefined)?.chat_id;
+  if (chatId != null && CONTENT_SEND_METHODS.has(method) && !bubbleSendsInFlight.has(String(chatId))) {
+    clearStatusBubbles(String(chatId));
+  }
+  return prev(method, payload, signal);
+});
+
+// 🤔 Thinking… — once per inbound message handed to Claude, skipping reaction forwards.
+const forwardNotification = mcp.notification.bind(mcp);
+mcp.notification = ((...args: Parameters<typeof forwardNotification>) => {
+  const note = args[0] as ChannelNotification;
+  const meta = note?.params?.meta;
+  if (note?.method === "notifications/claude/channel" && meta?.chat_id && meta.event_type !== "reaction") {
+    void sendStatusBubble(String(meta.chat_id), "🤔 Thinking…");
+  }
+  return forwardNotification(...args);
+}) as typeof mcp.notification;

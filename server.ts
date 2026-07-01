@@ -2958,7 +2958,7 @@ function flushBatch(chatId: string): void {
     // Suppress in GROUP chats: the ack is posted as a reply to the last message,
     // and a reply-to-you bypasses requireMention, so in a multi-bot group each
     // bot's ack re-wakes the bot it replied to → infinite "Got N messages…" loop.
-    // The ack is also pure noise in a group. DM-only. (2026-06-30 cookbot fix.)
+    // The ack is also pure noise in a group. DM-only. (2026-06-30 fix.)
     if (!first.isGroup) {
       void bot.api
         .sendMessage(chatId, summary, {

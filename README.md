@@ -67,7 +67,7 @@ Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.co
 
 | Feature | What it does |
 | --- | --- |
-| **⚡ Two-Tier Model Routing** | Configurable router: Haiku (fast, 200K), Sonnet (balanced, 1M), or Opus (deep, 1M). Set via `TELEGRAM_ROUTER_MODEL`. Complex tasks auto-escalate to Opus via subagents. |
+| **⚡ Two-Tier Model Routing** | Configurable router: Haiku (fast, 200K), Sonnet (balanced, 1M), or Opus (deep, 1M). Set via `TELEGRAM_ROUTER_MODEL`. Complex tasks auto-escalate to Opus via subagents (change the target with `TELEGRAM_ESCALATION_MODEL`). |
 | **🔄 Daemon Mode** | Supervisor auto-restarts Claude on crash or context reset. Memory preserved, zero downtime. |
 | **🛡 Context Watchdog** | Auto-restarts when context exceeds 70% to prevent unresponsive sessions. SQLite history and memory survive restarts. |
 | **🔒 Single-Instance Lock** | PID-based lock file prevents duplicate bot instances competing for Telegram updates. |
@@ -110,7 +110,7 @@ Clone this repo and install both the supercharged server and the daemon supervis
 
 ```sh
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
-cp claude-telegram-supercharged/server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/0.0.1/server.ts
+cp claude-telegram-supercharged/server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)/server.ts
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 cp claude-telegram-supercharged/scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp

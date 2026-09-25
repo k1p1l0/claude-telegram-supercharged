@@ -59,6 +59,25 @@ const BASE_ARGS = [
 	ROUTER_MODEL,
 ];
 
+// Agentic Mode: report every tool call to server.ts, which shows a live
+// "Working..." message in Telegram. Passed via --settings so the hook only runs
+// in the daemon, never in your interactive sessions. TELEGRAM_AGENTIC_MODE=off
+// disables it.
+const PROGRESS_HOOK = join(REAL_HOME, ".claude", "scripts", "telegram-progress-hook.ts");
+if (process.env.TELEGRAM_AGENTIC_MODE !== "off" && existsSync(PROGRESS_HOOK)) {
+	const hook = [{ type: "command", command: `"${process.execPath}" "${PROGRESS_HOOK}"`, timeout: 5 }];
+	BASE_ARGS.push(
+		"--settings",
+		JSON.stringify({
+			hooks: {
+				PreToolUse: [{ matcher: "*", hooks: hook }],
+				PostToolUse: [{ matcher: "*", hooks: hook }],
+				Stop: [{ hooks: hook }],
+			},
+		}),
+	);
+}
+
 // Extra args passed to this supervisor are forwarded to claude
 const EXTRA_ARGS = process.argv.slice(2);
 

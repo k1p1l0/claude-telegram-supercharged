@@ -2,25 +2,66 @@
 # Wrapper that auto-accepts all startup prompts (workspace trust, MCP approval,
 # etc.), then keeps Claude alive indefinitely for channel listening.
 #
-# Strategy: during the first 30 seconds, every time we see "Esc" or "cancel"
+# Strategy: during the first 60 seconds, every time we see prompt indicators
 # (interactive prompt endings), send Enter to accept the default. After the
-# startup window, switch to indefinite wait mode.
+# startup window, switch to indefinite wait mode — but keep watching for the
+# workspace-trust dialog specifically (see the note on the second loop).
+#
+# NOTE: Claude renders text with ANSI cursor-move codes (\e[1C, \e[2C etc.)
+# between every word in PTY mode. Patterns must match individual words rather
+# than multi-word phrases, since "Esc to cancel" actually arrives as
+# "Esc\e[1Cto\e[1Ccancel" in the stream.
 
 set timeout 10
+
+# Run from a dedicated cwd, never from $HOME (found 2026-09-09, Claude Code
+# 2.1.266): with cwd=$HOME, Claude Code reads the telegram plugin's own
+# .mcp.json (under ~/.claude/plugins/cache/...) a second time as a *project*
+# server named "telegram" ("pending approval", CLAUDE_PLUGIN_ROOT unexpanded),
+# and then drops the real plugin server as a duplicate. Result: no poller,
+# no channel, and nothing in the logs. `claude mcp list` from $HOME shows the
+# stray entry; from any other cwd it does not.
+# Override with TELEGRAM_DAEMON_CWD. Claude Code keys project memory by cwd, so
+# symlink ~/.claude/projects/<cwd-slug>/memory to your usual project's memory
+# dir if the daemon should share it.
+if {[info exists env(TELEGRAM_DAEMON_CWD)]} {
+    set daemon_cwd $env(TELEGRAM_DAEMON_CWD)
+} else {
+    set daemon_cwd "$env(HOME)/.claude-telegram-daemon"
+}
+file mkdir $daemon_cwd
+cd $daemon_cwd
 
 # Forward all args to claude
 spawn claude {*}$argv
 
-# Auto-accept startup prompts for up to 30 seconds.
-# Each prompt ends with "Esc to cancel" or similar — send Enter to accept.
-set deadline [expr {[clock seconds] + 30}]
+# Auto-accept startup prompts for up to 60 seconds.
+# Match individual keywords that signal an interactive prompt, since ANSI
+# escape codes fragment multi-word strings.
+set deadline [expr {[clock seconds] + 60}]
 while {[clock seconds] < $deadline} {
     expect {
-        -re "Esc.*cancel" {
+        -re {trust[^\n]{0,40}folder} {
+            # Workspace-trust dialog: default is "No, exit", so Down then
+            # Enter. Listed first so it wins over the broad keywords below.
+            sleep 0.5
+            send "\033\[B"
+            sleep 0.3
+            send "\r"
+        }
+        "cancel" {
             sleep 0.5
             send "\r"
         }
-        -re "confirm" {
+        "confirm" {
+            sleep 0.5
+            send "\r"
+        }
+        "Yes" {
+            sleep 0.5
+            send "\r"
+        }
+        "approve" {
             sleep 0.5
             send "\r"
         }
@@ -34,9 +75,56 @@ while {[clock seconds] < $deadline} {
     }
 }
 
+# Safety net: make sure the telegram plugin's poller actually started. Claude
+# Code skips a plugin MCP server silently for 15 minutes after any session on
+# the machine failed to start it (the shared ~/.claude/mcp-needs-auth-cache.json).
+# supervisor.ts clears that entry before each spawn, so this should not fire;
+# if the poller still doesn't appear, exit non-zero and let the supervisor
+# respawn us (backoff 2s->30s).
+set claude_pid [exp_pid]
+set poller_ok 0
+for {set i 0} {$i < 20} {incr i} {
+    if {![catch {exec pgrep -P $claude_pid -f plugins-official/telegram} out] && $out ne ""} {
+        set poller_ok 1
+        break
+    }
+    sleep 3
+}
+if {!$poller_ok} {
+    send_user "wrapper: telegram plugin MCP did not start (see docs/DAEMON-TROUBLESHOOTING.md) — exiting so the supervisor respawns claude\n"
+    catch {exec kill $claude_pid}
+    sleep 3
+    catch {exec kill -9 $claude_pid}
+    exit 1
+}
+send_user "wrapper: telegram plugin poller detected under claude pid $claude_pid\n"
+
 # Wait for Claude to exit on its own (indefinitely).
 # Do NOT use `interact` — it exits immediately when there's no real stdin.
+#
+# Keep answering the workspace-trust dialog for the WHOLE session lifetime, not
+# just the 60s startup window above. Claude Code re-shows it mid-session (after
+# an auto-update respawn, or when the cwd changes), and with nobody left to
+# press Enter the daemon wedges on the modal: the plugin's MCP server keeps
+# ack-reacting to Telegram messages while the agent loop is frozen, so the user
+# gets emoji and no replies. That is how 2026-08-08 13:05 -> 14:02 was lost.
+#
+# The pattern must be unique to the dialog. The broad keywords used during
+# startup ("trust", "Yes", "confirm") are unsafe here — every Telegram message
+# is rendered into this same PTY stream, so a chat message containing "trust"
+# would inject a stray Enter into the prompt box. Match instead on the menu
+# line "1. Yes, I trust this folder", whose "trust" -> "folder" span appears in
+# no ordinary prose. ANSI cursor-move codes sit between the words (the line
+# arrives as "trust\e[20Gthis\e[25Gfolder"), hence the bounded [^\n]{0,40}.
 expect {
     eof { exit 0 }
+    -re {trust[^\n]{0,40}folder} {
+        # Same dialog as above: default is "No, exit", so Down then Enter.
+        sleep 0.5
+        send "\033\[B"
+        sleep 0.3
+        send "\r"
+        exp_continue
+    }
     timeout { exp_continue }
 }

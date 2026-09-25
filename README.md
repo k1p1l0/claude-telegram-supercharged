@@ -113,6 +113,8 @@ git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
 cp claude-telegram-supercharged/server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)/server.ts
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
+cp claude-telegram-supercharged/scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
+chmod +x ~/.claude/scripts/claude-daemon-wrapper.exp
 ```
 
 ### 4. Give the server the token
@@ -359,8 +361,6 @@ Create `~/Library/LaunchAgents/com.user.claude-telegram.plist`:
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>HOME</key>
-        <string>/Users/YOU</string>
         <key>PATH</key>
         <string>/path/to/bun/dir:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
@@ -378,6 +378,8 @@ Create `~/Library/LaunchAgents/com.user.claude-telegram.plist`:
 ```
 
 Replace `/path/to/bun` with your bun path (`which bun`) and `/Users/YOU` with your home directory.
+
+> **Don't override `HOME` in the plist.** The wrapper runs claude from `~/.claude-telegram-daemon`, because a cwd of `$HOME` makes Claude Code drop the telegram plugin. To use another directory, set `TELEGRAM_DAEMON_CWD` in `EnvironmentVariables`. If the daemon misbehaves, see [Daemon Troubleshooting](docs/DAEMON-TROUBLESHOOTING.md).
 
 > **Important:** Both `RunAtLoad` and `KeepAlive` should be set to `<true/>` for hands-off operation. `RunAtLoad` starts the daemon automatically on login/boot. `KeepAlive` tells launchd to restart the process if it exits unexpectedly. Setting either to `<false/>` means you'll need to manually start the daemon or it won't recover from crashes.
 

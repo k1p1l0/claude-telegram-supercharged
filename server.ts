@@ -10,7 +10,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   existsSync,
@@ -28,7 +28,7 @@ import { extname, join, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Bot, type Context, InlineKeyboard, InputFile } from "grammy";
+import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { ReactionTypeEmoji } from "grammy/types";
 
 const ALLOWED_REACTIONS = new Set([
@@ -152,13 +152,26 @@ const MEMORY_MAX_CHARS = 10_000;
 // --- Single-instance lock ---
 const LOCK_FILE = join(DATA_DIR, "telegram.lock");
 let isSecondary = false; // true when another instance owns the bot polling
+// Set by supervisor.ts. The daemon always owns polling: if an interactive
+// `claude` session grabbed the lock first (e.g. during a daemon restart gap),
+// the daemon terminates that poller instead of going secondary. Otherwise
+// inbound messages land in the terminal session and the user gets the ack
+// emoji but no reply.
+const DAEMON_MODE = process.env.TELEGRAM_DAEMON_MODE === "1";
 
 function acquireLock(): void {
   if (existsSync(LOCK_FILE)) {
     const existingPid = Number.parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
-    if (!Number.isNaN(existingPid)) {
+    if (!Number.isNaN(existingPid) && existingPid !== process.pid) {
       try {
         process.kill(existingPid, 0); // signal 0 = check alive, don't kill
+        if (!isServerProcess(existingPid)) throw new Error("pid recycled");
+        if (DAEMON_MODE) {
+          process.stderr.write(`telegram channel: daemon taking over polling from pid=${existingPid}\n`);
+          process.kill(existingPid, "SIGTERM");
+          writeFileSync(LOCK_FILE, String(process.pid));
+          return;
+        }
         // Primary is alive — run in secondary (MCP-only) mode instead of crashing
         isSecondary = true;
         process.stderr.write(
@@ -173,6 +186,19 @@ function acquireLock(): void {
   }
   writeFileSync(LOCK_FILE, String(process.pid));
   process.stderr.write(`telegram channel: lock acquired (pid=${process.pid})\n`);
+}
+
+// PIDs get recycled: only SIGTERM the lock holder if it really is a server.ts.
+function isServerProcess(pid: number): boolean {
+  try {
+    const cmd = execFileSync("ps", ["-p", String(pid), "-o", "args="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return cmd.includes("server.ts");
+  } catch {
+    return false;
+  }
 }
 
 function releaseLock(): void {
@@ -3200,31 +3226,87 @@ function replayUnanswered(): void {
   }
 }
 
+// Without this, any throw in a message handler stops polling permanently
+// (grammY's default error handler calls bot.stop() and rethrows).
+bot.catch((err) => {
+  process.stderr.write(`telegram channel: handler error (polling continues): ${err.error}\n`);
+});
+
+// Last-resort safety net: log instead of dying on a stray rejection.
+process.on("unhandledRejection", (err) => {
+  process.stderr.write(`telegram channel: unhandled rejection: ${err}\n`);
+});
+process.on("uncaughtException", (err) => {
+  process.stderr.write(`telegram channel: uncaught exception: ${err}\n`);
+});
+
+function ownsLock(): boolean {
+  try {
+    return readFileSync(LOCK_FILE, "utf-8").trim() === String(process.pid);
+  } catch {
+    return false;
+  }
+}
+
+// Retry polling with backoff on any error. grammY rejects bot.start() on a 409
+// Conflict (any other getUpdates call: a restart overlap, a second poller, even
+// a manual curl) and on errors thrown by middleware. Unhandled, that killed the
+// server and left the daemon deaf until its next restart.
+let pollingSetupDone = false;
 if (!isSecondary) {
-  void bot.start({
-    allowed_updates: [
-      "message",
-      "edited_message",
-      "channel_post",
-      "edited_channel_post",
-      "callback_query",
-      "message_reaction",
-    ],
-    onStart: (info) => {
-      botUsername = info.username;
-      process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-      const chain = [
-        OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-        GROQ_API_KEY && "Groq",
-        DEEPGRAM_API_KEY && "Deepgram",
-        findWhisperBin() || null,
-      ].filter(Boolean);
-      process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-      if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-      // Check for messages that were lost during the restart gap
-      setTimeout(replayUnanswered, 3000);
-    },
-  });
+  void (async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await bot.start({
+          allowed_updates: [
+            "message",
+            "edited_message",
+            "channel_post",
+            "edited_channel_post",
+            "callback_query",
+            "message_reaction",
+          ],
+          onStart: (info) => {
+            attempt = 0;
+            botUsername = info.username;
+            process.stderr.write(`telegram channel: polling as @${info.username}\n`);
+            if (pollingSetupDone) return;
+            pollingSetupDone = true;
+            const chain = [
+              OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+              GROQ_API_KEY && "Groq",
+              DEEPGRAM_API_KEY && "Deepgram",
+              findWhisperBin() || null,
+            ].filter(Boolean);
+            process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+            if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+            // Check for messages that were lost during the restart gap
+            setTimeout(replayUnanswered, 3000);
+          },
+        });
+        return; // bot.stop() was called
+      } catch (err) {
+        // bot.stop() during setup rejects with "Aborted delay": expected.
+        if (err instanceof Error && err.message === "Aborted delay") return;
+        if (!ownsLock()) {
+          process.stderr.write("telegram channel: polling stopped and another instance owns the lock; not retrying\n");
+          return;
+        }
+        const is409 = err instanceof GrammyError && err.error_code === 409;
+        if (is409 && attempt >= 8 && !DAEMON_MODE) {
+          // Someone else keeps polling. Stay alive for the outbound tools.
+          process.stderr.write(`telegram channel: 409 Conflict after ${attempt} attempts; switching to MCP-only mode\n`);
+          releaseLock();
+          isSecondary = true;
+          return;
+        }
+        const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
+        const detail = is409 ? "409 Conflict (another getUpdates caller)" : String(err);
+        process.stderr.write(`telegram channel: polling failed: ${detail}, retrying in ${delay / 1000}s\n`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  })();
 } else {
   // Secondary: fetch bot info for username without starting polling
   bot.api.getMe().then((info) => {

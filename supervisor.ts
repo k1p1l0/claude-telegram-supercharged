@@ -21,6 +21,7 @@ import {
 	openSync,
 	readFileSync,
 	readSync,
+	renameSync,
 	rmSync,
 	statSync,
 	unwatchFile,
@@ -70,6 +71,31 @@ const CONTEXT_THRESHOLD_PCT = 50; // Auto-restart when context exceeds 50% — k
 const MAX_SESSION_UPTIME_MS = 2 * 60 * 60 * 1000; // Force restart after 2 hours regardless of context
 const STDOUT_LOG = join(DATA_DIR, "supervisor-stdout.log");
 const PID_FILE = join(DATA_DIR, "supervisor.pid");
+
+// Claude Code remembers a failed plugin MCP connection for 15 minutes in
+// ~/.claude/mcp-needs-auth-cache.json. The cache is shared by every Claude
+// session on the machine and keyed by server name ("plugin:telegram:telegram"),
+// so any other session that fails to start the plugin (e.g. a cron or launchd
+// job whose PATH lacks bun: "Executable not found in $PATH") makes every new
+// session, this daemon included, silently skip the telegram plugin until the
+// entry expires. Nothing is logged; the daemon just never gets a poller.
+// Drop our entries before each spawn.
+const MCP_FAILURE_CACHE = join(process.env.CLAUDE_CONFIG_DIR ?? join(REAL_HOME, ".claude"), "mcp-needs-auth-cache.json");
+
+function clearTelegramMcpFailureCache(): void {
+	try {
+		const cache = JSON.parse(readFileSync(MCP_FAILURE_CACHE, "utf-8")) as Record<string, unknown>;
+		const stale = Object.keys(cache).filter((k) => k.startsWith("plugin:telegram"));
+		if (stale.length === 0) return;
+		for (const k of stale) delete cache[k];
+		const tmp = `${MCP_FAILURE_CACHE}.tmp.${process.pid}`;
+		writeFileSync(tmp, JSON.stringify(cache));
+		renameSync(tmp, MCP_FAILURE_CACHE);
+		log(`cleared cached MCP connection failure for ${stale.join(", ")} (another Claude session failed to start the plugin)`);
+	} catch {
+		// No cache file yet, or unreadable: nothing to clear.
+	}
+}
 // Delay before restart to let Claude finish sending Telegram replies
 const RESTART_DELAY_MS = 3_000;
 // Auth watchdog: detect 401 errors and notify via Telegram
@@ -141,6 +167,7 @@ function startClaude(): void {
 	}
 
 	lastStartTime = Date.now();
+	clearTelegramMcpFailureCache();
 	const args = [...BASE_ARGS, ...EXTRA_ARGS];
 	log(`spawning: ${CLAUDE_CMD} ${args.join(" ")}`);
 	// Use `expect` wrapper to allocate a PTY and auto-accept the workspace trust dialog.

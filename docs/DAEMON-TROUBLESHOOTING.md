@@ -27,7 +27,7 @@ State, token, and logs live in `~/.claude/channels/telegram/` (`.env`, `access.j
    ```
    - `409 Conflict` at least once: a poller is alive.
    - Always `200`: nobody is polling. `getWebhookInfo` then shows how many updates are queued.
-   - A `getUpdates` call without `offset` does not consume the queue, so this check is safe.
+   - A `getUpdates` call without `offset` does not consume the queue. It does cut the bot's current long poll short with a 409, which the server now retries (see "Server died on a 409" below).
 
 ## Restarting
 
@@ -37,7 +37,7 @@ State, token, and logs live in `~/.claude/channels/telegram/` (`.env`, `access.j
   launchctl bootout gui/$(id -u)/com.user.claude-telegram
   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-telegram.plist
   ```
-- A healthy boot can take a few minutes because of the startup race below.
+- A healthy boot connects the plugin within a few seconds. If `supervisor-stderr.log` shows `claude crashed (code=1)` every ~2 minutes, see "Plugin silently skipped at boot" below.
 
 ## Failures
 
@@ -47,11 +47,21 @@ Another `claude` session (a terminal with the plugin enabled) holds the polling 
 
 The supervisor sets `TELEGRAM_DAEMON_MODE=1`, and a server started in daemon mode now terminates a non-daemon poller and takes the lock. Non-daemon sessions still start in MCP-only mode when a poller is alive. If you still see this, check which process owns `data/telegram.lock`.
 
-### Plugin randomly missing at boot (startup race)
+### Plugin silently skipped at boot (the old "startup race")
 
-Seen on Claude Code 2.1.266 through at least 2.1.281. On roughly 2 of 3 boots the telegram plugin's MCP server is silently left out of the session. There's no poller child, no MCP log file, and only "1 setup issue: MCP" in the TUI. No config change fixes it.
+Symptom: claude boots, every other MCP server connects, but the telegram plugin never starts. There's no poller child, no new file in the plugin's MCP log directory, and nothing in the debug log. It used to look random ("about 1 boot in 3") and recover after 10 to 15 minutes.
 
-The wrapper waits up to 60 seconds for a `plugins-official/telegram` child under claude. If none appears, it kills claude and exits 1, and the supervisor respawns it with backoff. Expect `claude crashed (code=1)` every ~2 minutes in `supervisor-stderr.log` until a boot wins. Streaks of 8 lost boots (about 18 minutes) have happened.
+Cause: Claude Code remembers a failed plugin MCP connection for 15 minutes in `~/.claude/mcp-needs-auth-cache.json`. That cache is shared by every Claude session on the machine and keyed by server name (`plugin:telegram:telegram`). While an entry is fresh, every new session skips the server without logging anything. Any other session that fails to start the plugin creates one. A common trigger is a cron or launchd job that runs `claude` with a PATH lacking bun: its plugin log (`~/Library/Caches/claude-cli-nodejs/<project>/mcp-logs-plugin-telegram-telegram/`) shows `Connection failed after 3ms (ENOENT): Executable not found in $PATH: "bun"`. A job every 10 minutes keeps the daemon blocked about 70% of the time.
+
+Fix: the supervisor removes `plugin:telegram*` entries from that cache before each spawn and logs `cleared cached MCP connection failure ...` when it does. Also give such jobs a PATH that includes bun, or set `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS=1` for them. The wrapper still checks for the poller child for 60 seconds and respawns claude if it never appears, as a safety net.
+
+### Server died on a 409
+
+Symptom: the bot works for a while, then goes deaf. `data/telegram.lock` disappears, and there's no `bun server.ts` under claude.
+
+Cause: grammY rejects `bot.start()` on a 409 Conflict, which any other `getUpdates` call causes: a restart overlap, a second poller, even a manual curl. The rejection was unhandled, so the server exited. A throw inside a message handler stopped polling the same way.
+
+Fix: the server now retries polling with backoff (up to 30 seconds) for any error, registers `bot.catch()` so handler errors don't stop polling, and logs unhandled rejections instead of exiting. It stops retrying only if another instance took the lock. After 8 straight 409s, a non-daemon session gives up polling and stays in tools-only mode.
 
 ### cwd = `$HOME` drops the plugin
 

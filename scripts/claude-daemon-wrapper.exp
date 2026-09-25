@@ -75,13 +75,12 @@ while {[clock seconds] < $deadline} {
     }
 }
 
-# Claude Code 2.1.266 has a startup race (found 2026-09-09): on roughly 2 of
-# 3 boots the telegram plugin's MCP server is silently left out of the
-# session — no debug-log line, no `bun server.ts` poller child, only
-# "1 setup issue: MCP" in the TUI. Identical interactive runs loaded it 1/3
-# of the time. Nothing in config fixes it, so verify the poller child exists
-# and, if it never appears, exit non-zero so the supervisor respawns us
-# (backoff 2s→30s) until a boot wins the race.
+# Safety net: make sure the telegram plugin's poller actually started. Claude
+# Code skips a plugin MCP server silently for 15 minutes after any session on
+# the machine failed to start it (the shared ~/.claude/mcp-needs-auth-cache.json).
+# supervisor.ts clears that entry before each spawn, so this should not fire;
+# if the poller still doesn't appear, exit non-zero and let the supervisor
+# respawn us (backoff 2s->30s).
 set claude_pid [exp_pid]
 set poller_ok 0
 for {set i 0} {$i < 20} {incr i} {
@@ -92,7 +91,7 @@ for {set i 0} {$i < 20} {incr i} {
     sleep 3
 }
 if {!$poller_ok} {
-    send_user "wrapper: telegram plugin MCP did not start (startup race) — exiting so the supervisor respawns claude\n"
+    send_user "wrapper: telegram plugin MCP did not start (see docs/DAEMON-TROUBLESHOOTING.md) — exiting so the supervisor respawns claude\n"
     catch {exec kill $claude_pid}
     sleep 3
     catch {exec kill -9 $claude_pid}

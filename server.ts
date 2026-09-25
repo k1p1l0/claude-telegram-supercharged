@@ -28,7 +28,7 @@ import { extname, join, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Bot, type Context, InlineKeyboard, InputFile } from "grammy";
+import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { ReactionTypeEmoji } from "grammy/types";
 
 const ALLOWED_REACTIONS = new Set([
@@ -3226,31 +3226,87 @@ function replayUnanswered(): void {
   }
 }
 
+// Without this, any throw in a message handler stops polling permanently
+// (grammY's default error handler calls bot.stop() and rethrows).
+bot.catch((err) => {
+  process.stderr.write(`telegram channel: handler error (polling continues): ${err.error}\n`);
+});
+
+// Last-resort safety net: log instead of dying on a stray rejection.
+process.on("unhandledRejection", (err) => {
+  process.stderr.write(`telegram channel: unhandled rejection: ${err}\n`);
+});
+process.on("uncaughtException", (err) => {
+  process.stderr.write(`telegram channel: uncaught exception: ${err}\n`);
+});
+
+function ownsLock(): boolean {
+  try {
+    return readFileSync(LOCK_FILE, "utf-8").trim() === String(process.pid);
+  } catch {
+    return false;
+  }
+}
+
+// Retry polling with backoff on any error. grammY rejects bot.start() on a 409
+// Conflict (any other getUpdates call: a restart overlap, a second poller, even
+// a manual curl) and on errors thrown by middleware. Unhandled, that killed the
+// server and left the daemon deaf until its next restart.
+let pollingSetupDone = false;
 if (!isSecondary) {
-  void bot.start({
-    allowed_updates: [
-      "message",
-      "edited_message",
-      "channel_post",
-      "edited_channel_post",
-      "callback_query",
-      "message_reaction",
-    ],
-    onStart: (info) => {
-      botUsername = info.username;
-      process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-      const chain = [
-        OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-        GROQ_API_KEY && "Groq",
-        DEEPGRAM_API_KEY && "Deepgram",
-        findWhisperBin() || null,
-      ].filter(Boolean);
-      process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-      if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-      // Check for messages that were lost during the restart gap
-      setTimeout(replayUnanswered, 3000);
-    },
-  });
+  void (async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await bot.start({
+          allowed_updates: [
+            "message",
+            "edited_message",
+            "channel_post",
+            "edited_channel_post",
+            "callback_query",
+            "message_reaction",
+          ],
+          onStart: (info) => {
+            attempt = 0;
+            botUsername = info.username;
+            process.stderr.write(`telegram channel: polling as @${info.username}\n`);
+            if (pollingSetupDone) return;
+            pollingSetupDone = true;
+            const chain = [
+              OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+              GROQ_API_KEY && "Groq",
+              DEEPGRAM_API_KEY && "Deepgram",
+              findWhisperBin() || null,
+            ].filter(Boolean);
+            process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+            if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+            // Check for messages that were lost during the restart gap
+            setTimeout(replayUnanswered, 3000);
+          },
+        });
+        return; // bot.stop() was called
+      } catch (err) {
+        // bot.stop() during setup rejects with "Aborted delay": expected.
+        if (err instanceof Error && err.message === "Aborted delay") return;
+        if (!ownsLock()) {
+          process.stderr.write("telegram channel: polling stopped and another instance owns the lock; not retrying\n");
+          return;
+        }
+        const is409 = err instanceof GrammyError && err.error_code === 409;
+        if (is409 && attempt >= 8 && !DAEMON_MODE) {
+          // Someone else keeps polling. Stay alive for the outbound tools.
+          process.stderr.write(`telegram channel: 409 Conflict after ${attempt} attempts; switching to MCP-only mode\n`);
+          releaseLock();
+          isSecondary = true;
+          return;
+        }
+        const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
+        const detail = is409 ? "409 Conflict (another getUpdates caller)" : String(err);
+        process.stderr.write(`telegram channel: polling failed: ${detail}, retrying in ${delay / 1000}s\n`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  })();
 } else {
   // Secondary: fetch bot info for username without starting polling
   bot.api.getMe().then((info) => {

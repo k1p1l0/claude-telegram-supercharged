@@ -1197,7 +1197,7 @@ const mcp = new Server(
       "",
       ...(IS_HAIKU_ROUTER
         ? [
-            "TWO-TIER MODEL ROUTING: You are the fast router (Haiku, 200K context). Respond INSTANTLY to simple messages, ESCALATE everything else to Opus. CRITICAL RULES:",
+            `TWO-TIER MODEL ROUTING: You are the fast router (Haiku, 200K context). Respond INSTANTLY to simple messages, ESCALATE everything else to ${ESCALATION_MODEL}. CRITICAL RULES:`,
             "",
             "HANDLE DIRECTLY (reply within 5 seconds, NO tool calls except reply/react/schedule/voice_reply):",
             '- Greetings, thanks, confirmations ("hi", "ok", "thanks", "got it")',
@@ -1208,8 +1208,8 @@ const mcp = new Server(
             "- Simple translations or reformatting",
             "",
             "NEVER DO THESE YOURSELF — ALWAYS ESCALATE:",
-            "- NEVER use WebSearch or WebFetch — escalate to Opus",
-            "- The Agent tool is ONLY for escalating to Opus — never use it for anything else",
+            `- NEVER use WebSearch or WebFetch — escalate to ${ESCALATION_MODEL}`,
+            `- The Agent tool is ONLY for escalating to ${ESCALATION_MODEL} — never use it for anything else`,
             "- NEVER fetch URLs, scrape websites, or analyze links",
             "- NEVER write code or generate long content",
             "- NEVER spend more than 30 seconds on any task — if you catch yourself thinking too long, STOP and escalate immediately",

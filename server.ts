@@ -10,7 +10,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   existsSync,
@@ -151,13 +151,26 @@ const MEMORY_MAX_CHARS = 10_000;
 // --- Single-instance lock ---
 const LOCK_FILE = join(DATA_DIR, "telegram.lock");
 let isSecondary = false; // true when another instance owns the bot polling
+// Set by supervisor.ts. The daemon always owns polling: if an interactive
+// `claude` session grabbed the lock first (e.g. during a daemon restart gap),
+// the daemon terminates that poller instead of going secondary. Otherwise
+// inbound messages land in the terminal session and the user gets the ack
+// emoji but no reply.
+const DAEMON_MODE = process.env.TELEGRAM_DAEMON_MODE === "1";
 
 function acquireLock(): void {
   if (existsSync(LOCK_FILE)) {
     const existingPid = Number.parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
-    if (!Number.isNaN(existingPid)) {
+    if (!Number.isNaN(existingPid) && existingPid !== process.pid) {
       try {
         process.kill(existingPid, 0); // signal 0 = check alive, don't kill
+        if (!isServerProcess(existingPid)) throw new Error("pid recycled");
+        if (DAEMON_MODE) {
+          process.stderr.write(`telegram channel: daemon taking over polling from pid=${existingPid}\n`);
+          process.kill(existingPid, "SIGTERM");
+          writeFileSync(LOCK_FILE, String(process.pid));
+          return;
+        }
         // Primary is alive — run in secondary (MCP-only) mode instead of crashing
         isSecondary = true;
         process.stderr.write(
@@ -172,6 +185,19 @@ function acquireLock(): void {
   }
   writeFileSync(LOCK_FILE, String(process.pid));
   process.stderr.write(`telegram channel: lock acquired (pid=${process.pid})\n`);
+}
+
+// PIDs get recycled: only SIGTERM the lock holder if it really is a server.ts.
+function isServerProcess(pid: number): boolean {
+  try {
+    const cmd = execFileSync("ps", ["-p", String(pid), "-o", "args="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return cmd.includes("server.ts");
+  } catch {
+    return false;
+  }
 }
 
 function releaseLock(): void {

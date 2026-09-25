@@ -27,10 +27,14 @@ import {
 	watchFile,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
-const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
+// Resolve paths from the account's real home, not $HOME. A launchd plist that
+// overrides HOME (e.g. to give the daemon a separate cwd) otherwise sends every
+// path below to the wrong place and the wrapper spawn fails with ENOENT forever.
+const REAL_HOME = userInfo().homedir || homedir();
+const STATE_DIR = join(REAL_HOME, ".claude", "channels", "telegram");
 const DATA_DIR = join(STATE_DIR, "data");
 const SIGNAL_FILE = join(DATA_DIR, "restart.signal");
 const CLAUDE_CMD = "claude";
@@ -38,6 +42,14 @@ const CLAUDE_CMD = "claude";
 // Options: "haiku" (fast, 200K context), "sonnet" (balanced, 1M context), "opus" (deep, 1M context)
 // Default: "sonnet" — best balance of speed and context window.
 const ROUTER_MODEL = process.env.TELEGRAM_ROUTER_MODEL || "sonnet";
+// NOTE (2026-07-30, Claude Code v2.1.220): the telegram channel MCP server is
+// silently skipped when a new claude session boots while the previous session
+// is still shutting down (plugin single-instance guard). Restarts must leave a
+// clean gap — kill the old claude and wait for it to fully exit before
+// spawning. Keep spawn args minimal: put behavior instructions for the daemon
+// in ~/.claude/CLAUDE.md, not in --append-system-prompt (its interaction with
+// --channels is untested; the failures seen correlated with restart overlap,
+// but the flag was never proven safe either).
 const BASE_ARGS = [
 	"--channels",
 	"plugin:telegram@claude-plugins-official",
@@ -57,14 +69,20 @@ const CONTEXT_CHECK_INTERVAL_MS = 30_000; // Check context every 30s
 const CONTEXT_THRESHOLD_PCT = 50; // Auto-restart when context exceeds 50% — keeps sessions fresh
 const MAX_SESSION_UPTIME_MS = 2 * 60 * 60 * 1000; // Force restart after 2 hours regardless of context
 const STDOUT_LOG = join(DATA_DIR, "supervisor-stdout.log");
+const PID_FILE = join(DATA_DIR, "supervisor.pid");
 // Delay before restart to let Claude finish sending Telegram replies
 const RESTART_DELAY_MS = 3_000;
+// Auth watchdog: detect 401 errors and notify via Telegram
+const AUTH_CHECK_INTERVAL_MS = 15_000; // Check every 15s
+const AUTH_RECOVERY_CHECK_MS = 30_000; // Check for token recovery every 30s
 
 let currentChild: ChildProcess | null = null;
 let restartCount = 0;
 let lastStartTime = 0;
 let shuttingDown = false;
 let pendingRestart = false;
+let authFailed = false; // Tracks whether we're in auth-failure state
+let lastAuthCheckOffset = 0; // Track where we last read in stdout log
 
 function log(msg: string): void {
 	process.stderr.write(
@@ -128,10 +146,10 @@ function startClaude(): void {
 	// Use `expect` wrapper to allocate a PTY and auto-accept the workspace trust dialog.
 	// expect spawns Claude with a pseudo-TTY (so it enters interactive mode under launchd)
 	// and auto-sends Enter when it sees the "trust this folder" prompt.
-	const EXPECT_WRAPPER = join(homedir(), ".claude", "scripts", "claude-daemon-wrapper.exp");
+	const EXPECT_WRAPPER = join(REAL_HOME, ".claude", "scripts", "claude-daemon-wrapper.exp");
 	const child = spawn(EXPECT_WRAPPER, args, {
 		stdio: "inherit",
-		env: { ...process.env },
+		env: { ...process.env, HOME: REAL_HOME, TELEGRAM_DAEMON_MODE: "1" },
 		detached: true, // Create a new process group so we can kill the entire tree
 	});
 	// Despite detached:true, we still want the child to die with the supervisor.
@@ -230,6 +248,7 @@ async function shutdown(sig: string): Promise<void> {
 	log(`received ${sig} — shutting down`);
 
 	unwatchFile(SIGNAL_FILE);
+	try { rmSync(PID_FILE, { force: true }); } catch {}
 
 	if (currentChild) {
 		await killChild(currentChild);
@@ -329,6 +348,170 @@ async function cleanupOrphans(): Promise<void> {
 	}
 }
 
+// ── Auth watchdog ────────────────────────────────────────────────
+// Monitors stdout log for authentication_error (401) responses.
+// When detected: stops the restart loop, notifies owner via Telegram,
+// and polls for token recovery (user runs /login).
+
+function loadBotToken(): string | null {
+	const envFile = join(STATE_DIR, ".env");
+	try {
+		for (const line of readFileSync(envFile, "utf-8").split("\n")) {
+			const m = line.match(/^TELEGRAM_BOT_TOKEN=(.+)$/);
+			if (m) return m[1].trim();
+		}
+	} catch {}
+	return process.env.TELEGRAM_BOT_TOKEN || null;
+}
+
+function getOwnerChatId(): string | null {
+	const accessFile = join(STATE_DIR, "access.json");
+	try {
+		const access = JSON.parse(readFileSync(accessFile, "utf-8"));
+		const allowed = access.allowFrom;
+		if (Array.isArray(allowed) && allowed.length > 0) return String(allowed[0]);
+	} catch {}
+	return null;
+}
+
+async function sendTelegramNotification(text: string): Promise<boolean> {
+	const token = loadBotToken();
+	const chatId = getOwnerChatId();
+	if (!token || !chatId) {
+		log("auth watchdog: cannot send notification — missing bot token or owner chat ID");
+		return false;
+	}
+	try {
+		const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+		});
+		if (!res.ok) {
+			log(`auth watchdog: Telegram API error: ${res.status}`);
+			return false;
+		}
+		return true;
+	} catch (err) {
+		log(`auth watchdog: failed to send notification: ${err}`);
+		return false;
+	}
+}
+
+async function checkAuthValid(): Promise<boolean> {
+	// Quick check: try to hit Claude API via the CLI
+	const { execSync } = await import("node:child_process");
+	try {
+		execSync('claude -p "ping" --max-turns 1 2>&1', {
+			encoding: "utf-8",
+			timeout: 15_000,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+let authWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+let authRecoveryTimer: ReturnType<typeof setInterval> | null = null;
+let authNotificationSent = false;
+
+function checkStdoutForAuthError(): boolean {
+	try {
+		const stat = statSync(STDOUT_LOG);
+		// Read the last 4KB to catch auth errors in recent output
+		const readSize = Math.min(stat.size, 4096);
+		const fd = openSync(STDOUT_LOG, "r");
+		const buf = Buffer.alloc(readSize);
+		readSync(fd, buf, 0, readSize, stat.size - readSize);
+		closeSync(fd);
+		const tail = buf.toString("utf-8");
+		return tail.includes("authentication_error") || tail.includes("Invalid authentication credentials");
+	} catch {
+		return false;
+	}
+}
+
+function startAuthWatchdog(): void {
+	if (authWatchdogTimer) return;
+	authWatchdogTimer = setInterval(async () => {
+		if (shuttingDown || authFailed) return;
+		if (!checkStdoutForAuthError()) return;
+
+		authFailed = true;
+		log("auth watchdog: 401 authentication error detected — entering recovery mode");
+
+		// Notify user via Telegram
+		if (!authNotificationSent) {
+			const sent = await sendTelegramNotification(
+				"⚠️ *Claude Telegram daemon: auth expired*\n\n" +
+				"The API session token is invalid (401). " +
+				"Messages are not being processed.\n\n" +
+				"Run `claude /login` in any terminal to refresh credentials. " +
+				"The daemon will auto-recover once auth is valid again."
+			);
+			if (sent) {
+				authNotificationSent = true;
+				log("auth watchdog: notification sent to owner via Telegram");
+			}
+		}
+
+		// Stop the context watchdog — no point checking context when auth is broken
+		if (contextWatchdogTimer) {
+			clearInterval(contextWatchdogTimer);
+			contextWatchdogTimer = null;
+		}
+
+		// Kill the current broken session
+		if (currentChild) {
+			log("auth watchdog: killing broken session");
+			pendingRestart = false; // prevent auto-restart
+			shuttingDown = true; // temporarily prevent restart
+			await killChild(currentChild);
+			shuttingDown = false;
+			currentChild = null;
+		}
+
+		// Start polling for auth recovery
+		startAuthRecoveryPoller();
+	}, AUTH_CHECK_INTERVAL_MS);
+}
+
+function startAuthRecoveryPoller(): void {
+	if (authRecoveryTimer) return;
+	log("auth watchdog: polling for auth recovery...");
+
+	authRecoveryTimer = setInterval(async () => {
+		log("auth watchdog: checking if auth is valid again...");
+		const valid = await checkAuthValid();
+		if (valid) {
+			log("auth watchdog: auth recovered! Restarting daemon...");
+			authFailed = false;
+			authNotificationSent = false;
+			lastAuthCheckOffset = 0;
+
+			// Stop recovery poller
+			if (authRecoveryTimer) {
+				clearInterval(authRecoveryTimer);
+				authRecoveryTimer = null;
+			}
+
+			// Truncate the stdout log so old auth errors don't re-trigger
+			try {
+				writeFileSync(STDOUT_LOG, "");
+			} catch {}
+
+			// Notify user
+			await sendTelegramNotification("✅ *Claude Telegram daemon: auth recovered*\n\nRestarting the daemon now.");
+
+			// Restart context watchdog and Claude
+			startContextWatchdog();
+			restartCount = 0;
+			startClaude();
+		}
+	}, AUTH_RECOVERY_CHECK_MS);
+}
+
 // ── Context watchdog ──────────────────────────────────────────────
 // Monitors the stdout log for context usage percentage.
 // When it exceeds CONTEXT_THRESHOLD_PCT, triggers a graceful restart
@@ -389,12 +572,17 @@ function startContextWatchdog(): void {
 }
 
 // Main
+// Write pidfile so MCP servers can detect daemon mode
+mkdirSync(DATA_DIR, { recursive: true });
+writeFileSync(PID_FILE, String(process.pid));
+
 log("telegram daemon supervisor starting");
 log(`router model: ${ROUTER_MODEL} (set TELEGRAM_ROUTER_MODEL to change)`);
 log(`signal file: ${SIGNAL_FILE}`);
 log(`claude args: ${[...BASE_ARGS, ...EXTRA_ARGS].join(" ")}`);
 startWatching();
 startContextWatchdog();
+startAuthWatchdog();
 void cleanupOrphans().then(() => {
 	startClaude();
 });

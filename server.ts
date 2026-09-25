@@ -13,14 +13,18 @@ import { Database } from "bun:sqlite";
 import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
   rmSync,
   statSync,
+  watchFile,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -1230,6 +1234,8 @@ const mcp = new Server(
     instructions: [
       "CRITICAL — READ THIS FIRST: Every user-visible output MUST go through the reply tool. Your terminal output is INVISIBLE to the user — they are on a phone reading Telegram. If you write a question, a list, a recommendation, or any text meant for the user WITHOUT calling reply, they will never see it and will think you are broken. This includes follow-up questions, clarifications, option menus, and decision prompts — ALL of them must be sent via reply.",
       "",
+      "PROGRESS NARRATION: before each tool call, write one short plain-text sentence about what you are about to do (e.g. \"Reading the README to see the install steps.\"). Telegram shows these live in a progress bubble. They are not answers: answers still go through the reply tool.",
+      "",
       "EXAMPLES: (a) WRONG: responding with 'Which voice do you want, A or B?' in your normal output. (b) RIGHT: calling reply({ chat_id, text: 'Which voice do you want, A or B?' }). (c) WRONG: printing a numbered list of decisions for the user to review. (d) RIGHT: calling reply with the same list as the text parameter. If you are asking the user anything, the question goes in a reply call, period.",
       "",
       "The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool. When a Telegram message asks you to do something (write a post, generate code, answer a question), ALWAYS send the full result back via the reply tool. Never just acknowledge the request — deliver the actual content to Telegram.",
@@ -1630,8 +1636,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const chunks = chunk(finalText, limit, mode);
         const sentIds: number[] = [];
 
+        // Agentic Mode: a single-message answer (no files, no quote, no thread)
+        // replaces the Working bubble in place instead of arriving as a new
+        // message. Telegram sends no push notification for edits.
+        const bubbleId =
+          chunks.length === 1 && files.length === 0 && reply_to == null && thread_id == null
+            ? await takeProgressBubble(chat_id)
+            : undefined;
+        if (bubbleId != null) {
+          try {
+            await bot.api.editMessageText(chat_id, bubbleId, chunks[0], {
+              ...(parseMode ? { parse_mode: parseMode } : {}),
+            });
+            sentIds.push(bubbleId);
+          } catch {
+            // Bubble gone or edit refused: remove it and send normally below.
+            void bot.api.deleteMessage(chat_id, bubbleId).catch(() => {});
+          }
+        }
+
         try {
-          for (let i = 0; i < chunks.length; i++) {
+          for (let i = sentIds.length; i < chunks.length; i++) {
             const shouldReplyTo = reply_to != null && replyMode !== "off" && (replyMode === "all" || i === 0);
             const sent = await bot.api.sendMessage(chat_id, chunks[i], {
               ...(parseMode ? { parse_mode: parseMode } : {}),
@@ -1683,6 +1708,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           });
         }
 
+        onBotMessageSent(chat_id);
         const result =
           sentIds.length === 1
             ? `sent (id: ${sentIds[0]})`
@@ -1744,6 +1770,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           keyboard.text(label, `ask:${callbackId}:${label}`);
         }
 
+        // The question becomes the newest message; no "typing" while we wait for the user.
+        onBotMessageSent(chat_id);
+        setProgressPaused(chat_id, true);
         const choice = await new Promise<string>((resolve) => {
           const timer = setTimeout(() => {
             pendingCallbacks.delete(callbackId);
@@ -1764,6 +1793,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             });
         });
 
+        setProgressPaused(chat_id, false);
         return { content: [{ type: "text", text: `user chose: ${choice}` }] };
       }
       case "get_history": {
@@ -2018,6 +2048,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         try {
           rmSync(audioPath);
         } catch {}
+        onBotMessageSent(chat_id);
         return { content: [{ type: "text", text: `voice reply sent (id: ${sent.message_id})` }] };
       }
       case "create_telegraph_page": {
@@ -2539,6 +2570,7 @@ bot.on("message", async (ctx, next) => {
 });
 
 bot.on("message:text", async (ctx) => {
+  if (await handleAgenticCommand(ctx)) return;
   await handleInbound(ctx, ctx.message.text, undefined);
 });
 
@@ -2999,6 +3031,416 @@ async function handleInbound(
   await deliverMessage(ctx, inboundText, downloadMedia, result.access);
 }
 
+// ── Agentic Mode: live tool progress ─────────────────────────────────
+// scripts/telegram-progress-hook.ts (installed by the supervisor as a
+// PreToolUse + Stop hook) appends every tool call to progress.jsonl. We tail
+// that file and keep one "Working... (Ns)" message per chat, edited as tools
+// run and deleted when Claude stops. Tool events carry no chat id, so they go
+// to the chat whose message was delivered most recently.
+
+const PROGRESS_FILE = join(DATA_DIR, "progress.jsonl");
+const PROGRESS_PREFS_FILE = join(DATA_DIR, "progress-prefs.json");
+const DEFAULT_VERBOSE = (() => {
+  const n = Number.parseInt(process.env.TELEGRAM_VERBOSE ?? "1", 10);
+  return n === 0 || n === 1 || n === 2 ? n : 1;
+})();
+const PROGRESS_MAX_LINES = 12;
+const PROGRESS_EDIT_MS = 1500; // Telegram rate-limits edits per chat
+const PROGRESS_STALE_MS = 30 * 60 * 1000; // drop turns that never got a Stop
+const VERBOSE_LABELS = ["quiet", "normal", "detailed"];
+const TOOL_ICONS: Record<string, string> = {
+  Read: "📖",
+  Write: "✏️",
+  Edit: "✏️",
+  MultiEdit: "✏️",
+  NotebookEdit: "✏️",
+  Bash: "💻",
+  Grep: "🔍",
+  Glob: "🔍",
+  LS: "📂",
+  WebFetch: "🌐",
+  WebSearch: "🌐",
+  Agent: "🤖",
+  Task: "🤖",
+  Skill: "🧩",
+  TodoWrite: "📝",
+};
+
+type ProgressTurn = {
+  chatId: string;
+  startedAt: number;
+  lines: string[]; // tool calls since the last message Claude sent
+  hidden: number; // lines scrolled out of the bubble
+  tools: number;
+  msgId?: number;
+  sending: boolean;
+  dirty: boolean;
+  lastEdit: number;
+  lastSentAt: number; // turn start, or when Claude last sent a message
+  lastTyping: number;
+  paused: boolean; // waiting for the user (ask_user)
+  // What Claude is doing right now: running a tool (the last line), thinking
+  // after a tool returned, writing output (thinking finished), or idle after
+  // it sent a message.
+  phase: "tool" | "thinking" | "writing" | "idle";
+  phaseAt: number;
+};
+
+// Internal plumbing, not work the user cares about.
+const HIDDEN_TOOLS = new Set(["ToolSearch"]);
+const PROGRESS_SHOW_AFTER_MS = 2500; // quick turns never get a bubble
+const TYPING_REFRESH_MS = 4000; // Telegram shows "typing" for ~5s per call
+
+const progressTurns = new Map<string, ProgressTurn>();
+let lastTurnChat: string | undefined;
+// The daemon session's transcript (from hook events). A completed thinking
+// block lands there when Claude starts writing output, which is how we tell
+// "thinking" from "writing" while no tool runs.
+let lastTranscript: string | undefined;
+const transcriptOffsets = new Map<string, number>();
+let progressOffset = 0;
+const serverStartedAt = Date.now();
+
+function readVerbosePrefs(): Record<string, number> {
+  try {
+    return JSON.parse(readFileSync(PROGRESS_PREFS_FILE, "utf-8")) as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
+function getVerbose(chatId: string): number {
+  const v = readVerbosePrefs()[chatId];
+  return v === 0 || v === 1 || v === 2 ? v : DEFAULT_VERBOSE;
+}
+
+function setVerbose(chatId: string, level: number): void {
+  const prefs = readVerbosePrefs();
+  prefs[chatId] = level;
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(PROGRESS_PREFS_FILE, JSON.stringify(prefs, null, 2));
+}
+
+// A turn is tracked at every verbosity level: level 0 still gets the typing
+// indicator, just no bubble.
+function startProgressTurn(chatId: string): void {
+  lastTurnChat = chatId;
+  const existing = progressTurns.get(chatId);
+  if (existing) {
+    // New message mid-turn: drop the bubble so it reappears below it (the
+    // answer takes over the bubble and must not land above the user's message).
+    deleteProgressBubble(existing);
+    return;
+  }
+  const now = Date.now();
+  progressTurns.set(chatId, {
+    chatId,
+    startedAt: now,
+    lines: [],
+    hidden: 0,
+    tools: 0,
+    sending: false,
+    dirty: false,
+    lastEdit: 0,
+    lastSentAt: now,
+    lastTyping: now, // deliverMessage just sent one
+    paused: false,
+    phase: "thinking",
+    phaseAt: now,
+  });
+}
+
+function deleteProgressBubble(t: ProgressTurn): void {
+  if (t.msgId != null) void bot.api.deleteMessage(t.chatId, t.msgId).catch(() => {});
+  t.msgId = undefined;
+}
+
+// Claude sent a message to this chat (reply, voice, question). The bubble must
+// stay the newest message, so drop it; a new one appears below if work goes on.
+function onBotMessageSent(chatId: string): void {
+  const t = progressTurns.get(chatId);
+  if (!t) return;
+  deleteProgressBubble(t);
+  t.lines = [];
+  t.hidden = 0;
+  t.dirty = false;
+  t.phase = "idle";
+  t.lastSentAt = Date.now();
+  t.lastTyping = Date.now(); // sending a message clears "typing"; resume on the next refresh
+}
+
+// The answer takes over the Working bubble: returns its message id and
+// detaches it from progress so no later "Working..." edit can overwrite it.
+async function takeProgressBubble(chatId: string): Promise<number | undefined> {
+  const t = progressTurns.get(chatId);
+  if (!t) return undefined;
+  for (let i = 0; i < 20 && t.sending; i++) await new Promise((r) => setTimeout(r, 100));
+  const id = t.msgId;
+  t.msgId = undefined;
+  t.lines = [];
+  t.hidden = 0;
+  t.dirty = false;
+  t.phase = "idle";
+  t.lastSentAt = Date.now();
+  t.lastTyping = Date.now();
+  return id;
+}
+
+function setProgressPaused(chatId: string, paused: boolean): void {
+  const t = progressTurns.get(chatId);
+  if (!t) return;
+  t.paused = paused;
+  if (!paused) t.lastSentAt = Date.now();
+}
+
+const PHASE_LINES: Partial<Record<ProgressTurn["phase"], string>> = {
+  thinking: "💭 Thinking…",
+  writing: "✍️ Writing…",
+};
+
+function hasProgressContent(t: ProgressTurn): boolean {
+  return t.lines.length > 0 || PHASE_LINES[t.phase] !== undefined;
+}
+
+function renderProgress(t: ProgressTurn): string {
+  const secs = Math.round((Date.now() - t.startedAt) / 1000);
+  const more = t.hidden > 0 ? [`… ${t.hidden} earlier`] : [];
+  const status = PHASE_LINES[t.phase];
+  return [`Working... (${secs}s)`, ...more, ...t.lines, ...(status ? [status] : [])].join("\n");
+}
+
+function pushProgressLine(t: ProgressTurn, line: string): void {
+  t.lines.push(line);
+  while (t.lines.length > PROGRESS_MAX_LINES) {
+    t.lines.shift();
+    t.hidden++;
+  }
+  t.dirty = true;
+}
+
+// Claude's short notes between tool calls ("Reading the README first.").
+function narrationLine(text: string, level: number): string | undefined {
+  const first = text.trim().split("\n").find((l) => l.trim()) ?? "";
+  const max = level === 2 ? 300 : 110;
+  const clipped = first.length > max ? `${first.slice(0, max - 1)}…` : first;
+  return clipped ? `💬 ${clipped}` : undefined;
+}
+
+// Reads new transcript entries: a completed thinking block means Claude is now
+// writing output (a tool call or the answer), and each text block is a note to
+// show. While idle (after Claude sent a message) the scan waits, so notes are
+// picked up when work resumes and the end-of-turn summary is skipped.
+function scanTranscript(t: ProgressTurn, includeIdle = false): void {
+  if (!lastTranscript || (t.phase === "idle" && !includeIdle)) return;
+  let size: number;
+  try {
+    size = statSync(lastTranscript).size;
+  } catch {
+    return;
+  }
+  let off = transcriptOffsets.get(lastTranscript);
+  if (off === undefined || off > size) off = Math.max(0, size - 262_144);
+  if (size === off) return;
+  const fd = openSync(lastTranscript, "r");
+  const buf = Buffer.alloc(size - off);
+  readSync(fd, buf, 0, buf.length, off);
+  closeSync(fd);
+  const text = buf.toString("utf-8");
+  const end = text.lastIndexOf("\n");
+  if (end < 0) return;
+  transcriptOffsets.set(lastTranscript, off + Buffer.byteLength(text.slice(0, end + 1)));
+  const level = getVerbose(t.chatId);
+  for (const line of text.slice(0, end).split("\n")) {
+    if (!line.includes('"assistant"')) continue;
+    try {
+      const e = JSON.parse(line) as {
+        type?: string;
+        timestamp?: string;
+        message?: { content?: { type?: string; text?: string }[] };
+      };
+      if (e.type !== "assistant") continue;
+      const ts = Date.parse(e.timestamp ?? "");
+      for (const c of e.message?.content ?? []) {
+        if (c.type === "thinking" && t.phase === "thinking" && ts >= t.phaseAt) {
+          t.phase = "writing";
+          t.phaseAt = ts;
+          t.dirty = true;
+        } else if (c.type === "text" && c.text && ts >= t.lastSentAt) {
+          const note = narrationLine(c.text, level);
+          if (note) pushProgressLine(t, note);
+        }
+      }
+    } catch {}
+  }
+}
+
+async function flushProgress(t: ProgressTurn): Promise<void> {
+  if (t.sending || !hasProgressContent(t)) return;
+  t.sending = true;
+  t.dirty = false;
+  t.lastEdit = Date.now();
+  try {
+    if (t.msgId == null) {
+      const sent = await bot.api.sendMessage(t.chatId, renderProgress(t), { disable_notification: true });
+      // The turn may have ended, or Claude may have replied, while we were sending.
+      if (progressTurns.get(t.chatId) === t && hasProgressContent(t)) t.msgId = sent.message_id;
+      else void bot.api.deleteMessage(t.chatId, sent.message_id).catch(() => {});
+    } else {
+      await bot.api.editMessageText(t.chatId, t.msgId, renderProgress(t));
+    }
+  } catch {
+    // "message is not modified", rate limits, deleted message: next tick retries.
+  } finally {
+    t.sending = false;
+  }
+}
+
+function onProgressEvent(ev: { t?: number; type?: string; tool?: string; short?: string; long?: string; tp?: string }): void {
+  if (ev.tp) lastTranscript = ev.tp;
+  if (ev.type === "stop") {
+    for (const t of progressTurns.values()) deleteProgressBubble(t);
+    progressTurns.clear();
+    return;
+  }
+  if (!ev.tool || HIDDEN_TOOLS.has(ev.tool) || !lastTurnChat) return;
+  const t = progressTurns.get(lastTurnChat);
+  if (!t) return;
+  if (ev.type === "tool_done") {
+    t.phase = "thinking";
+    t.phaseAt = ev.t ?? Date.now();
+    t.dirty = true;
+    if (t.msgId != null && getVerbose(t.chatId) > 0 && Date.now() - t.lastEdit >= PROGRESS_EDIT_MS) void flushProgress(t);
+    return;
+  }
+  if (ev.type !== "tool") return;
+  scanTranscript(t, true); // notes Claude wrote right before this tool call
+  t.phase = "tool";
+  t.phaseAt = ev.t ?? Date.now();
+  const level = getVerbose(t.chatId);
+  const detail = level === 2 ? ev.long : ev.short;
+  const name = ev.tool.startsWith("mcp__") ? ev.tool.split("__").slice(1).join(" ") : ev.tool;
+  pushProgressLine(t, `${TOOL_ICONS[ev.tool] ?? "🔧"} ${name}${detail ? `: ${detail}` : ""}`);
+  t.tools++;
+  // Existing bubble: show the new line right away (throttled). A new bubble
+  // waits for the ticker so quick turns stay bubble-free.
+  if (t.msgId != null && level > 0 && Date.now() - t.lastEdit >= PROGRESS_EDIT_MS) void flushProgress(t);
+}
+
+function readProgressFile(): void {
+  let size: number;
+  try {
+    size = statSync(PROGRESS_FILE).size;
+  } catch {
+    return;
+  }
+  if (size < progressOffset) progressOffset = 0; // truncated
+  if (size === progressOffset) return;
+  const fd = openSync(PROGRESS_FILE, "r");
+  const buf = Buffer.alloc(size - progressOffset);
+  readSync(fd, buf, 0, buf.length, progressOffset);
+  closeSync(fd);
+  const text = buf.toString("utf-8");
+  const end = text.lastIndexOf("\n");
+  if (end < 0) return; // partial line, wait for the rest
+  progressOffset += Buffer.byteLength(text.slice(0, end + 1));
+  for (const line of text.slice(0, end).split("\n")) {
+    try {
+      onProgressEvent(JSON.parse(line));
+    } catch {}
+  }
+  // Keep the file small: truncate when idle.
+  if (progressTurns.size === 0 && progressOffset > 1_000_000) {
+    try {
+      writeFileSync(PROGRESS_FILE, "");
+      progressOffset = 0;
+    } catch {}
+  }
+}
+
+function startProgressWatcher(): void {
+  try {
+    progressOffset = statSync(PROGRESS_FILE).size; // skip events from before this server started
+  } catch {
+    progressOffset = 0;
+  }
+  watchFile(PROGRESS_FILE, { interval: 400 }, readProgressFile);
+  // Every second: keep "typing..." alive, create the bubble once a turn has run
+  // long enough, and tick the elapsed counter (throttled edits).
+  setInterval(() => {
+    const now = Date.now();
+    for (const t of progressTurns.values()) {
+      if (now - t.startedAt > PROGRESS_STALE_MS) {
+        deleteProgressBubble(t);
+        progressTurns.delete(t.chatId);
+        continue;
+      }
+      if (t.paused) continue;
+      if (now - t.lastTyping >= TYPING_REFRESH_MS) {
+        t.lastTyping = now;
+        void bot.api.sendChatAction(t.chatId, "typing").catch(() => {});
+      }
+      if (t.chatId === lastTurnChat) scanTranscript(t);
+      if (!hasProgressContent(t) || getVerbose(t.chatId) === 0) continue;
+      if (t.msgId == null) {
+        if (now - t.lastSentAt >= PROGRESS_SHOW_AFTER_MS) void flushProgress(t);
+        continue;
+      }
+      if (now - t.lastEdit < PROGRESS_EDIT_MS) continue;
+      if (t.dirty || now - t.lastEdit >= 3000) void flushProgress(t);
+    }
+  }, 1000);
+}
+
+// /verbose, /status, /new. DM-only and allowlisted senders only; everything
+// else falls through to Claude. Returns true when the message was handled.
+async function handleAgenticCommand(ctx: Context): Promise<boolean> {
+  const m = /^\/(verbose|status|new)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
+  if (!m || ctx.chat?.type !== "private") return false;
+  if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return false;
+  if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return false;
+  const chatId = String(ctx.chat.id);
+  const cmd = m[1].toLowerCase();
+  const arg = (m[3] ?? "").trim();
+
+  if (cmd === "verbose") {
+    if (arg === "0" || arg === "1" || arg === "2") {
+      const level = Number(arg);
+      setVerbose(chatId, level);
+      if (level === 0) {
+        const t = progressTurns.get(chatId);
+        if (t) deleteProgressBubble(t);
+      }
+      await ctx.reply(`Verbosity set to ${level} (${VERBOSE_LABELS[level]})`);
+    } else {
+      const cur = getVerbose(chatId);
+      await ctx.reply(
+        `Verbosity: ${cur} (${VERBOSE_LABELS[cur]})\n\n/verbose 0 - final answer only\n/verbose 1 - tool names\n/verbose 2 - tool names with inputs`,
+      );
+    }
+    return true;
+  }
+
+  if (cmd === "status") {
+    const t = progressTurns.get(chatId);
+    const up = Math.round((Date.now() - serverStartedAt) / 60000);
+    const work = t ? `working (${Math.round((Date.now() - t.startedAt) / 1000)}s, ${t.tools} tools)` : "idle";
+    await ctx.reply(
+      [`Status: ${work}`, `Uptime: ${up} min`, `Router model: ${ROUTER_MODEL}`, `Verbosity: ${getVerbose(chatId)} (${VERBOSE_LABELS[getVerbose(chatId)]})`].join("\n"),
+    );
+    return true;
+  }
+
+  // /new: fresh Claude session via the supervisor. Memory and message history are kept.
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(join(DATA_DIR, "restart.signal"), `${Date.now() + 1000}\n`);
+    await ctx.reply("Starting a fresh session. Memory is kept. Back in a minute.");
+  } catch (err) {
+    await ctx.reply(`Could not signal a restart: ${err}`);
+  }
+  return true;
+}
+
 // ── Post-gate delivery: download media, build context, add to batch ──
 
 async function deliverMessage(
@@ -3015,6 +3457,8 @@ async function deliverMessage(
 
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void bot.api.sendChatAction(chat_id, "typing").catch(() => {});
+  // DMs only: tool lines can show file paths and commands.
+  if (ctx.chat?.type === "private") startProgressTurn(chat_id);
 
   // Ack reaction — only for single messages (not during a burst).
   // During batching, skip individual ack reactions to avoid spamming.
@@ -3272,6 +3716,17 @@ if (!isSecondary) {
             process.stderr.write(`telegram channel: polling as @${info.username}\n`);
             if (pollingSetupDone) return;
             pollingSetupDone = true;
+            startProgressWatcher();
+            void bot.api
+              .setMyCommands(
+                [
+                  { command: "status", description: "Is Claude working, uptime, model" },
+                  { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
+                  { command: "new", description: "Fresh session (memory kept)" },
+                ],
+                { scope: { type: "all_private_chats" } },
+              )
+              .catch(() => {});
             const chain = [
               OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
               GROQ_API_KEY && "Groq",

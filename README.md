@@ -16,6 +16,8 @@
 <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
 <a href="#features">Features</a>
 <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
+<a href="#agentic-mode">Agentic Mode</a>
+<span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
 <a href="#tools-exposed-to-the-assistant">Tools Reference</a>
 <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
 <a href="#contributing">Contributing</a>
@@ -68,6 +70,7 @@ Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.co
 | Feature | What it does |
 | --- | --- |
 | **⚡ Two-Tier Model Routing** | Configurable router: Haiku (fast, 200K), Sonnet (balanced, 1M), or Opus (deep, 1M). Set via `TELEGRAM_ROUTER_MODEL`. Complex tasks auto-escalate to Opus via subagents (change the target with `TELEGRAM_ESCALATION_MODEL`). |
+| **🛠 Agentic Mode** | Watch Claude work: "typing…" the whole time, plus a live "Working… (Ns)" message with Claude's notes and each tool call as it runs. The answer replaces it in place. `/verbose 0\|1\|2`, `/status`, `/new`. [Details](#agentic-mode) |
 | **🔄 Daemon Mode** | Supervisor auto-restarts Claude on crash or context reset. Memory preserved, zero downtime. |
 | **🛡 Context Watchdog** | Auto-restarts when context exceeds 70% to prevent unresponsive sessions. SQLite history and memory survive restarts. |
 | **🔒 Single-Instance Lock** | PID-based lock file prevents duplicate bot instances competing for Telegram updates. |
@@ -115,6 +118,7 @@ mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 cp claude-telegram-supercharged/scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
 chmod +x ~/.claude/scripts/claude-daemon-wrapper.exp
+cp claude-telegram-supercharged/scripts/telegram-progress-hook.ts ~/.claude/scripts/telegram-progress-hook.ts
 ```
 
 ### 4. Give the server the token
@@ -173,6 +177,7 @@ cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 cp -r skills/* ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/skills/
 # Copy scripts
 cp scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
+cp scripts/telegram-progress-hook.ts ~/.claude/scripts/telegram-progress-hook.ts
 ```
 
 Then restart your daemon or Claude Code session.
@@ -303,6 +308,41 @@ bun supervisor.ts --effort high
 ```
 
 The supervisor spawns Claude with `--channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions` by default.
+
+### Agentic Mode
+
+In daemon mode you can watch Claude work, the way you would in the terminal:
+
+```
+You: Read the README and check package.json for the scripts
+Bot: Working... (14s)
+     💬 Reading the README to see the install steps.
+     💻 Bash: Read README intro
+     💬 Now checking package.json for the scripts.
+     📖 Read: package.json
+     ✍️ Writing…
+Bot: [the answer replaces the Working message]
+```
+
+- **Typing indicator** for the whole time Claude works, at every verbosity level. It pauses while an `ask_user` question waits for your answer.
+- **Working message** once a turn runs longer than 2.5 seconds, so quick replies never get one. It shows Claude's short notes (💬), each tool call as it starts (Read, Edit, Bash, Grep, WebFetch, Agent, Skill, MCP tools and so on), and what Claude is doing right now: `💭 Thinking…` after a tool returns, `✍️ Writing…` once it is producing output.
+- **The answer replaces the Working message** in place. Telegram sends no push notification for edits, so these answers arrive silently. Quick answers, multi-part answers, files and quote-replies arrive as normal messages.
+- The Working message is always the newest message. If you write while Claude works, it moves below your message. Telegram's own tools (reply, react and so on) and `ToolSearch` aren't listed.
+- DMs only, because tool lines can show file paths and commands.
+
+| Command | What it does |
+| --- | --- |
+| `/verbose 0` | No Working message: typing indicator and the answer only |
+| `/verbose 1` | Notes and tool names with a short target (default) |
+| `/verbose 2` | Longer notes and full tool inputs (commands, paths, URLs) |
+| `/status` | Working or idle, elapsed time, tool count, uptime, router model |
+| `/new` | Fresh Claude session through the supervisor. Memory and history are kept. |
+
+Commands answer allowlisted users in DMs. `/verbose` is stored per chat.
+
+**How it works.** The supervisor passes `scripts/telegram-progress-hook.ts` to Claude as a `PreToolUse`, `PostToolUse` and `Stop` hook via `--settings`, so it never runs in your interactive sessions. The hook appends each event to `~/.claude/channels/telegram/data/progress.jsonl`, and the server tails that file and edits the Working message (at most one edit per 1.5 seconds). Claude's notes and the thinking/writing phase come from the session transcript. The server's instructions ask Claude to write one short sentence before each tool call.
+
+**Config** (supervisor environment): `TELEGRAM_VERBOSE` sets the default level (1). `TELEGRAM_AGENTIC_MODE=off` turns the hook off.
 
 ### How context reset works
 
@@ -594,6 +634,7 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Daemon mode supervisor (auto-restart + context reset from Telegram)
 - [x] Telegraph Instant View for long-form content
 - [x] OpenAI Whisper API with local fallback
+- [x] Agentic Mode: live progress, typing indicator, in-place answers
 
 ### Planned
 - [ ] **Remote permission approval** -- Approve Claude Code permission prompts via Telegram inline buttons

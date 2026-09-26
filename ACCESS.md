@@ -147,6 +147,9 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
   "chunkMode": "newline",
 
   // Auto-transcribe all voice/audio in history middleware. Default: true.
-  "autoTranscribe": true
+  "autoTranscribe": true,
+
+  // Tools whose permission requests are allowed without asking in Telegram.
+  "autoApproveTools": ["Read", "Grep", "Glob"]
 }
 ```

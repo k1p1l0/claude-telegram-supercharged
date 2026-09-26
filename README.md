@@ -42,6 +42,8 @@ curl -fsSL https://raw.githubusercontent.com/k1p1l0/claude-telegram-supercharged
 
 Run it again any time to update. The full walkthrough is in [Getting Started](#getting-started).
 
+> **Security:** the only official source is [github.com/k1p1l0/claude-telegram-supercharged](https://github.com/k1p1l0/claude-telegram-supercharged). This project never ships zip or exe downloads. Copies elsewhere that offer a zip file are malware; please don't run them, and report them to GitHub.
+
 ### Official vs Supercharged
 
 | | Official plugin | Supercharged |

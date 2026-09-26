@@ -12,8 +12,9 @@ Pull the latest version from GitHub and apply it to the installed plugin.
 ### Step 1: Check current state
 
 ```bash
-# Get local file hash
-LOCAL_FILE="$HOME/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram/server.ts"
+# Get local file hash (Claude Code runs the newest version directory in the cache)
+CACHE="$HOME/.claude/plugins/cache/claude-plugins-official/telegram"
+LOCAL_FILE="$CACHE/$(ls "$CACHE" | sort -V | tail -1)/server.ts"
 LOCAL_HASH=$(shasum -a 256 "$LOCAL_FILE" 2>/dev/null | cut -c1-12)
 echo "Local hash: $LOCAL_HASH"
 ```
@@ -59,26 +60,13 @@ Show the user the recent commits and ask for confirmation before updating.
 
 ### Step 6: Apply update
 
-After user confirms:
+After user confirms, run the installer from the checkout. It copies `server.ts` and the skills into the cache directory Claude Code actually runs, keeps the official `package.json` (its start script keeps `bun install` output off the MCP channel), and installs the supervisor, the daemon wrapper and the Agentic Mode hook:
 
 ```bash
-PLUGIN_DIR="$HOME/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/telegram"
-
-# Copy core files
-cp /tmp/claude-telegram-supercharged/server.ts "$PLUGIN_DIR/server.ts"
-cp /tmp/claude-telegram-supercharged/package.json "$PLUGIN_DIR/package.json"
-cp /tmp/claude-telegram-supercharged/bun.lock "$PLUGIN_DIR/bun.lock"
-
-# Copy skills
-cp -r /tmp/claude-telegram-supercharged/skills/* "$PLUGIN_DIR/skills/"
-
-# Copy supervisor
-mkdir -p "$HOME/.claude/scripts"
-cp /tmp/claude-telegram-supercharged/supervisor.ts "$HOME/.claude/scripts/telegram-supervisor.ts"
-
-# Install dependencies
-cd "$PLUGIN_DIR" && bun install --no-summary
+TELEGRAM_SUPERCHARGED_DIR=/tmp/claude-telegram-supercharged bash /tmp/claude-telegram-supercharged/install.sh
 ```
+
+Then restart: a new Claude Code session, or for the daemon `launchctl bootout` + `launchctl bootstrap` (a soft restart doesn't reload the supervisor).
 
 ### Step 7: Clear update cache
 

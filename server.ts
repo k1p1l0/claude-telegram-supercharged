@@ -2934,12 +2934,17 @@ function flushBatch(chatId: string): void {
     const senderStr = senders.length > 0 ? ` from ${senders.join(", ")}` : "";
     const summary = `Got ${msgs.length} messages${senderStr} (${parts.join(", ")}). Processing...`;
 
-    // Send the summary instantly — fire and forget
-    void bot.api
-      .sendMessage(chatId, summary, {
-        ...(last.msgId != null ? { reply_parameters: { message_id: last.msgId } } : {}),
-      })
-      .catch(() => {});
+    // Send the summary instantly (fire and forget), DMs only. In groups the ack
+    // is noise, and because it replies to the last message it counts as a
+    // mention for other bots in the group: each bot's ack wakes the next one,
+    // an endless "Got N messages..." loop. Fix from #18 by @vasparshin.
+    if (!first.isGroup) {
+      void bot.api
+        .sendMessage(chatId, summary, {
+          ...(last.msgId != null ? { reply_parameters: { message_id: last.msgId } } : {}),
+        })
+        .catch(() => {});
+    }
   }
 
   // Combine all message texts

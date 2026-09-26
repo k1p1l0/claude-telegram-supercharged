@@ -34,6 +34,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { ReactionTypeEmoji } from "grammy/types";
+import { z } from "zod";
 
 const ALLOWED_REACTIONS = new Set([
   "👍",
@@ -1230,7 +1231,15 @@ const PHOTO_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
 const mcp = new Server(
   { name: "telegram", version: "1.0.0" },
   {
-    capabilities: { tools: {}, experimental: { "claude/channel": {} } },
+    capabilities: {
+      tools: {},
+      experimental: {
+        "claude/channel": {},
+        // Permission relay. Declaring this asserts we authenticate whoever
+        // answers: only allowlisted DM senders can approve (see below).
+        "claude/channel/permission": {},
+      },
+    },
     instructions: [
       "CRITICAL — READ THIS FIRST: Every user-visible output MUST go through the reply tool. Your terminal output is INVISIBLE to the user — they are on a phone reading Telegram. If you write a question, a list, a recommendation, or any text meant for the user WITHOUT calling reply, they will never see it and will think you are broken. This includes follow-up questions, clarifications, option menus, and decision prompts — ALL of them must be sent via reply.",
       "",
@@ -1324,6 +1333,127 @@ const mcp = new Server(
     ].join("\n"),
   },
 );
+
+// ── Permission relay ─────────────────────────────────────────────────
+// When the session doesn't skip permissions, Claude Code asks for tool
+// approval over the channel. Each request goes to every allowlisted DM with
+// See more / Allow / Deny buttons; replying "yes <id>" or "no <id>" works too.
+// Tools listed in access.json autoApproveTools are allowed without asking.
+// Same protocol as the official plugin (claude/channel/permission).
+
+// 5 lowercase letters a-z minus 'l', case-insensitive (phone autocorrect).
+const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
+
+type PendingPermission = {
+  tool_name: string;
+  description: string;
+  input_preview: string;
+  messages: { chatId: string; messageId: number }[];
+};
+const pendingPermissions = new Map<string, PendingPermission>();
+
+function sendPermissionDecision(request_id: string, behavior: "allow" | "deny"): void {
+  void mcp.notification({ method: "notifications/claude/channel/permission", params: { request_id, behavior } });
+}
+
+// Answers a pending request once. Returns false if it isn't pending (already
+// answered, or not ours).
+function resolvePermission(request_id: string, behavior: "allow" | "deny"): boolean {
+  const pending = pendingPermissions.get(request_id);
+  if (!pending) return false;
+  pendingPermissions.delete(request_id);
+  sendPermissionDecision(request_id, behavior);
+  const label = behavior === "allow" ? "✅ Allowed" : "❌ Denied";
+  // Replace the buttons on every copy of the prompt with the outcome.
+  for (const { chatId, messageId } of pending.messages) {
+    void bot.api
+      .editMessageText(chatId, messageId, `🔐 Permission: ${pending.tool_name}\n${pending.description}\n\n${label}`)
+      .catch(() => {});
+    setProgressPaused(chatId, false);
+  }
+  return true;
+}
+
+async function handlePermissionRequest(params: {
+  request_id: string;
+  tool_name: string;
+  description: string;
+  input_preview: string;
+}): Promise<void> {
+  const { request_id, tool_name, description, input_preview } = params;
+  const access = loadAccess();
+  if (access.autoApproveTools?.includes(tool_name)) {
+    sendPermissionDecision(request_id, "allow");
+    process.stderr.write(`telegram channel: auto-approved ${tool_name} (autoApproveTools)\n`);
+    return;
+  }
+  const pending: PendingPermission = { tool_name, description, input_preview, messages: [] };
+  pendingPermissions.set(request_id, pending);
+  const keyboard = new InlineKeyboard()
+    .text("See more", `perm:more:${request_id}`)
+    .text("✅ Allow", `perm:allow:${request_id}`)
+    .text("❌ Deny", `perm:deny:${request_id}`);
+  const text = `🔐 Permission: ${tool_name}\n${description}\n\nTap a button, or reply "yes ${request_id}" or "no ${request_id}".`;
+  // DMs only: everyone in allowFrom passed explicit pairing; group members haven't.
+  for (const chatId of access.allowFrom) {
+    onBotMessageSent(chatId); // the prompt becomes the newest message
+    setProgressPaused(chatId, true); // no "typing..." while we wait for an answer
+    try {
+      const sent = await bot.api.sendMessage(chatId, text, { reply_markup: keyboard });
+      pending.messages.push({ chatId, messageId: sent.message_id });
+    } catch (err) {
+      process.stderr.write(`telegram channel: permission_request send to ${chatId} failed: ${err}\n`);
+    }
+  }
+}
+
+mcp.setNotificationHandler(
+  z.object({
+    method: z.literal("notifications/claude/channel/permission_request"),
+    params: z.object({
+      request_id: z.string(),
+      tool_name: z.string(),
+      description: z.string(),
+      input_preview: z.string(),
+    }),
+  }),
+  async ({ params }) => handlePermissionRequest(params),
+);
+
+// Buttons: perm:allow:<id>, perm:deny:<id>, perm:more:<id>. Only allowlisted
+// senders can answer, same as the text-reply path.
+async function handlePermissionCallback(ctx: Context, data: string): Promise<void> {
+  const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data);
+  if (!m) {
+    await ctx.answerCallbackQuery().catch(() => {});
+    return;
+  }
+  if (!loadAccess().allowFrom.includes(String(ctx.from?.id ?? ""))) {
+    await ctx.answerCallbackQuery({ text: "Not authorized." }).catch(() => {});
+    return;
+  }
+  const [, action, request_id] = m;
+  const pending = pendingPermissions.get(request_id);
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: "This request was already answered." }).catch(() => {});
+    return;
+  }
+  if (action === "more") {
+    let input = pending.input_preview;
+    try {
+      input = JSON.stringify(JSON.parse(pending.input_preview), null, 2);
+    } catch {}
+    const keyboard = new InlineKeyboard()
+      .text("✅ Allow", `perm:allow:${request_id}`)
+      .text("❌ Deny", `perm:deny:${request_id}`);
+    const expanded = `🔐 Permission: ${pending.tool_name}\n${pending.description}\n\n${input}`;
+    await ctx.editMessageText(expanded.slice(0, 4000), { reply_markup: keyboard }).catch(() => {});
+    await ctx.answerCallbackQuery().catch(() => {});
+    return;
+  }
+  resolvePermission(request_id, action as "allow" | "deny");
+  await ctx.answerCallbackQuery({ text: action === "allow" ? "✅ Allowed" : "❌ Denied" }).catch(() => {});
+}
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -2770,6 +2900,10 @@ bot.on("message:document", async (ctx) => {
 // Handle inline keyboard button taps (ask_user responses).
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
+  if (data.startsWith("perm:")) {
+    await handlePermissionCallback(ctx, data);
+    return;
+  }
   if (!data.startsWith("ask:")) return;
 
   const parts = data.split(":");
@@ -3007,6 +3141,27 @@ async function handleInbound(
     const lead = result.isResend ? "Still pending" : "Pairing required";
     await ctx.reply(`${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`);
     return;
+  }
+
+  // "yes abcde" / "no abcde" from an allowlisted DM answers a pending
+  // permission request instead of reaching Claude as chat. Only ids that are
+  // actually pending count, so a message like "no thank" stays normal chat.
+  if (result.action === "deliver" && ctx.chat?.type === "private") {
+    const pm = PERMISSION_REPLY_RE.exec(inboundText);
+    const id = pm?.[2].toLowerCase();
+    if (pm && id && pendingPermissions.has(id) && loadAccess().allowFrom.includes(String(ctx.from?.id ?? ""))) {
+      const behavior = pm[1].toLowerCase().startsWith("y") ? "allow" : "deny";
+      resolvePermission(id, behavior);
+      const msgId = ctx.message?.message_id;
+      if (msgId != null) {
+        void bot.api
+          .setMessageReaction(String(ctx.chat.id), msgId, [
+            { type: "emoji", emoji: (behavior === "allow" ? "👍" : "👎") as ReactionTypeEmoji["emoji"] },
+          ])
+          .catch(() => {});
+      }
+      return;
+    }
   }
 
   if (result.action === "buffer") {

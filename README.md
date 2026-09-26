@@ -61,7 +61,7 @@ Run it again any time to update. The full walkthrough is in [Getting Started](#g
 | 24/7 daemon with auto-restart | ❌ | ✅ launchd supervisor |
 | Model routing (Haiku / Sonnet / Opus) | ❌ | ✅ |
 | Long answers as Telegraph articles | ❌ | ✅ |
-| Approve permission prompts from Telegram | ✅ | Planned |
+| Approve permission prompts from Telegram | ✅ | ✅ Buttons or "yes <id>", plus an auto-approve list |
 
 ## Features
 
@@ -598,6 +598,18 @@ Full access control docs in [ACCESS.md](./ACCESS.md) -- DM policies, groups, men
 
 Quick reference: Default policy is `pairing` -- DMs and groups both use the pairing flow. For DMs, message the bot to get a code. For groups, add the bot and mention it to get a code. Then `/telegram:access pair <code>` approves either. `ackReaction` only accepts Telegram's fixed emoji whitelist.
 
+### Permission Approvals
+
+If your session doesn't skip permissions, Claude Code sends each approval request to Telegram. Every allowlisted DM gets a message like `🔐 Permission: Bash` with **See more**, **✅ Allow** and **❌ Deny** buttons. You can also reply `yes <id>` or `no <id>` with the five-letter id from the message. Only allowlisted users can answer, and a request can be answered once; every copy of the prompt then shows the outcome. Group members can't approve.
+
+To skip the round-trip for tools you always allow, list them in `access.json`:
+
+```json
+{ "autoApproveTools": ["Read", "Grep", "Glob"] }
+```
+
+The daemon runs with `--dangerously-skip-permissions`, so it never asks. This is for sessions you start without that flag.
+
 ### Acknowledgment Reactions
 
 The bot can react to incoming messages with an emoji to signal it received and is processing them. This is controlled by the `ackReaction` field in `access.json`:
@@ -668,9 +680,9 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Telegraph Instant View for long-form content
 - [x] OpenAI Whisper API with local fallback
 - [x] Agentic Mode: live progress, typing indicator, in-place answers
+- [x] Remote permission approval (inline buttons, text replies, auto-approve list)
 
 ### Planned
-- [ ] **Remote permission approval** -- Approve Claude Code permission prompts via Telegram inline buttons
 - [ ] **Scheduled messages** -- Send messages at a specific time
 - [ ] **Multi-bot support** -- Run multiple bots from one server instance
 - [ ] **Rate limiting & usage stats** -- Track token usage and set limits per user

@@ -6,9 +6,9 @@
 
 <br />
 
-<a href="https://github.com/k1p1l0/claude-telegram-supercharged/blob/main/LICENSE"><img src="https://img.shields.io/github/license/k1p1l0/claude-telegram-supercharged?style=flat" alt="License" /></a>
+<a href="https://github.com/k1p1l0/claude-telegram-supercharged/blob/master/LICENSE"><img src="https://img.shields.io/github/license/k1p1l0/claude-telegram-supercharged?style=flat" alt="License" /></a>
 <a href="https://github.com/k1p1l0/claude-telegram-supercharged/stargazers"><img src="https://img.shields.io/github/stars/k1p1l0/claude-telegram-supercharged?style=flat" alt="GitHub Stars" /></a>
-<a href="https://github.com/k1p1l0/claude-telegram-supercharged/commits/main"><img src="https://img.shields.io/github/last-commit/k1p1l0/claude-telegram-supercharged?style=flat" alt="Last Commit" /></a>
+<a href="https://github.com/k1p1l0/claude-telegram-supercharged/commits/master"><img src="https://img.shields.io/github/last-commit/k1p1l0/claude-telegram-supercharged?style=flat" alt="Last Commit" /></a>
 
 <br />
 
@@ -31,6 +31,35 @@
 Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram). Install once, get 15+ features the official plugin doesn't have. Built on top of the [official plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) -- everything works, just better.
 
 2 minutes to install. Zero config. Your existing bot and pairing keep working.
+
+### Install in one line
+
+Install the official plugin first (in Claude Code: `/plugin install telegram@claude-plugins-official`), then:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/k1p1l0/claude-telegram-supercharged/master/install.sh | bash
+```
+
+Run it again any time to update. The full walkthrough is in [Getting Started](#getting-started).
+
+### Official vs Supercharged
+
+| | Official plugin | Supercharged |
+| --- | --- | --- |
+| Text, photos, files, stickers | ✅ | ✅ |
+| Formatted replies, long-message splitting | ✅ | ✅ |
+| Voice messages | Raw audio file | ✅ Transcribed (OpenAI, Groq, Deepgram or local Whisper) |
+| Voice replies | ❌ | ✅ ElevenLabs |
+| Live progress while Claude works | ❌ | ✅ [Agentic Mode](#agentic-mode) |
+| History and memory that survive restarts | ❌ | ✅ SQLite + memory file |
+| Knows which message you replied to | ❌ | ✅ Reply context, quotes, forwards |
+| Questions with inline buttons | ❌ | ✅ `ask_user` |
+| Scheduled messages and reminders | ❌ | ✅ Also syncs to Apple Reminders |
+| Google Calendar | ❌ | ✅ |
+| 24/7 daemon with auto-restart | ❌ | ✅ launchd supervisor |
+| Model routing (Haiku / Sonnet / Opus) | ❌ | ✅ |
+| Long answers as Telegraph articles | ❌ | ✅ |
+| Approve permission prompts from Telegram | ✅ | Planned |
 
 ## Features
 
@@ -162,6 +191,8 @@ Pairing is for capturing IDs. Once you're in, switch to `allowlist` so strangers
 ### Updating
 
 > **Important:** The official plugin auto-updates and will overwrite your supercharged `server.ts`. When the bot suddenly stops working after an update, this is why.
+
+The quickest way to update (also after an official plugin update) is to re-run the [one-line installer](#install-in-one-line). To do it by hand:
 
 When the official plugin updates (check for new version directories in `~/.claude/plugins/cache/claude-plugins-official/telegram/`):
 

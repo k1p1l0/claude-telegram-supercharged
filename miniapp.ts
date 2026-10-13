@@ -4,6 +4,7 @@
  * server.ts calls startMiniApp() in the instance that owns the bot. The HTTP
  * server binds to 127.0.0.1 only; put it behind HTTPS (Tailscale Serve or
  * Funnel, Cloudflare Tunnel) and set TELEGRAM_MINIAPP_URL to that address.
+ * With TELEGRAM_MINIAPP_URL=auto the bot runs a Cloudflare quick tunnel itself.
  * Every API call must carry Telegram initData signed for this bot by a user on
  * the allowlist, so the public URL shows nothing to anyone else.
  *
@@ -13,8 +14,8 @@
  * keeps byte offsets, and only polls while someone has the app open.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir, hostname, userInfo } from "node:os";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir, hostname, tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 
 // ── Shared types (the page in miniapp/index.html renders these) ───────
@@ -87,11 +88,97 @@ const DAY = 24 * HOUR;
 
 // ── Main thread: HTTP server, auth, /agents button ────────────────────
 
+// TELEGRAM_MINIAPP_URL=auto: the address of the quick tunnel that startQuickTunnel() keeps running.
+const tunnel: { url: string; state: "off" | "starting" | "up" | "missing" } = { url: "", state: "off" };
+
+const isAuto = () => (process.env.TELEGRAM_MINIAPP_URL ?? "").trim() === "auto";
+
 /** The public HTTPS address of the Mini App, or "" when it is not set up. */
 export function miniAppUrl(): string {
   // Keep a trailing slash: the page loads the relative `api/state`, which must stay under any path prefix.
-  const url = (process.env.TELEGRAM_MINIAPP_URL ?? "").trim();
+  const url = isAuto() ? tunnel.url : (process.env.TELEGRAM_MINIAPP_URL ?? "").trim();
   return url && !url.endsWith("/") ? `${url}/` : url;
+}
+
+/** The /agents reply when there is no HTTPS address yet. */
+export function miniAppSetupHint(): string {
+  const port = Number(process.env.TELEGRAM_MINIAPP_PORT) || 8790;
+  if (process.env.TELEGRAM_MINIAPP === "off") return "The agents board is turned off (TELEGRAM_MINIAPP=off).";
+  if (isAuto()) {
+    return tunnel.state === "missing"
+      ? "TELEGRAM_MINIAPP_URL=auto needs cloudflared. Install it (brew install cloudflared) and restart the bot."
+      : "The tunnel for the agents board is starting. Send /agents again in a few seconds.";
+  }
+  return `The agents board needs an HTTPS address. The easiest way: install cloudflared and set TELEGRAM_MINIAPP_URL=auto in ~/.claude/channels/telegram/.env. Or expose 127.0.0.1:${port} yourself, for example with tailscale serve --bg ${port}, and set TELEGRAM_MINIAPP_URL=https://… there. Then restart.`;
+}
+
+// A process killed with SIGKILL cannot stop its tunnel. Stop the one it left behind.
+function stopStaleTunnel(pidFile: string, port: number): void {
+  try {
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    if (!pid) return;
+    const cmd = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="]).stdout.toString();
+    if (cmd.includes("cloudflared") && cmd.includes(`127.0.0.1:${port}`)) process.kill(pid, "SIGTERM");
+  } catch {}
+}
+
+// Runs `cloudflared tunnel --url` and restarts it when it exits. The address is random and changes
+// on every start, so /agents reads the current one.
+function startQuickTunnel(port: number, log: (msg: string) => void): void {
+  const pidFile = join(tmpdir(), `claude-telegram-miniapp-tunnel-${port}.pid`);
+  stopStaleTunnel(pidFile, port);
+  let proc: ReturnType<typeof Bun.spawn> | null = null;
+  let delay = 5_000;
+  process.on("exit", () => proc?.kill());
+
+  // The launchd PATH of the daemon often lacks the Homebrew folders.
+  const bin =
+    Bun.which("cloudflared") ??
+    ["/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared"].find((p) => existsSync(p)) ??
+    "cloudflared";
+
+  const run = () => {
+    try {
+      proc = Bun.spawn([bin, "tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`], {
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+    } catch {
+      tunnel.state = "missing";
+      log("mini app: TELEGRAM_MINIAPP_URL=auto needs cloudflared on PATH (brew install cloudflared)");
+      return;
+    }
+    const current = proc;
+    tunnel.state = "starting";
+    try {
+      writeFileSync(pidFile, String(current.pid));
+    } catch {}
+    void (async () => {
+      // cloudflared prints the address to stderr, then a line for each connection to the edge.
+      // Use the address after the first connection. Keep reading after that, so the pipe never fills.
+      const decoder = new TextDecoder();
+      let text = "";
+      for await (const chunk of current.stderr as ReadableStream<Uint8Array>) {
+        if (tunnel.state === "up") continue;
+        text += decoder.decode(chunk, { stream: true });
+        const m = /https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/.exec(text);
+        if (m && text.includes("Registered tunnel connection")) {
+          tunnel.url = m[0];
+          tunnel.state = "up";
+          delay = 5_000;
+          log(`mini app: quick tunnel ${m[0]}`);
+        } else if (text.length > 64_000) text = `${m ? m[0] : ""}\n${text.slice(-4_000)}`;
+      }
+    })();
+    void current.exited.then((code) => {
+      tunnel.url = "";
+      tunnel.state = "starting";
+      log(`mini app: quick tunnel exited (code ${code}), restarting in ${delay / 1000} s`);
+      setTimeout(run, delay);
+      delay = Math.min(delay * 2, 300_000);
+    });
+  };
+  run();
 }
 
 /**
@@ -192,6 +279,7 @@ export function startMiniApp(opts: {
     try {
       Bun.serve({ hostname: "127.0.0.1", port, fetch });
       opts.log(`mini app: listening on 127.0.0.1:${port}${miniAppUrl() ? `, public URL ${miniAppUrl()}` : ""}`);
+      if (isAuto()) startQuickTunnel(port, opts.log);
     } catch (err) {
       if (attempt === 20) opts.log(`mini app: cannot listen on 127.0.0.1:${port}: ${err}. Trying again every 15 s.`);
       setTimeout(() => listen(attempt + 1), attempt < 20 ? 1500 : 15_000);

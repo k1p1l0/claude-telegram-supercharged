@@ -3713,9 +3713,7 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
     }
     const url = miniapp.miniAppUrl();
     if (!url.startsWith("https://")) {
-      await ctx.reply(
-        `The agents board needs an HTTPS address. Expose the local Mini App server on 127.0.0.1:${process.env.TELEGRAM_MINIAPP_PORT || 8790}, for example with: tailscale serve --bg ${process.env.TELEGRAM_MINIAPP_PORT || 8790}\nThen set TELEGRAM_MINIAPP_URL=https://… in ~/.claude/channels/telegram/.env and restart.`,
-      );
+      await ctx.reply(miniapp.miniAppSetupHint());
       return true;
     }
     await ctx.reply("Live board of your Claude Code sessions, subagents and tokens.", {

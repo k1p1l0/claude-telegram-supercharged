@@ -46,6 +46,12 @@ Run it again any time to update. The full walkthrough is in [Getting Started](#g
 
 > **Security:** the only official source is [github.com/k1p1l0/claude-telegram-supercharged](https://github.com/k1p1l0/claude-telegram-supercharged). This project never ships zip or exe downloads. Copies elsewhere that offer a zip file are malware; please don't run them, and report them to GitHub.
 
+### Live demo
+
+One take in a real chat on a Mac, 52 seconds. A voice message goes in and local whisper transcribes it. Agentic Mode shows each tool call while Claude checks GitHub, and the answer comes back as an ElevenLabs voice message. Then `/agents` opens the Agents Board. Waits and typing are sped up, and the video shows by how much.
+
+https://github.com/user-attachments/assets/4c5a5968-b5cc-43f1-a756-4282d3eedae9
+
 ### Official vs Supercharged
 
 | | Official plugin | Supercharged |

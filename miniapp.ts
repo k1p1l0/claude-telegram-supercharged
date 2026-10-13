@@ -186,14 +186,15 @@ export function startMiniApp(opts: {
     return new Response("Not found", { status: 404 });
   };
 
-  // After a restart or a lock takeover the old process can hold the port for a few seconds.
+  // After a restart or a lock takeover the old process can hold the port for a few seconds. A process
+  // that dropped to MCP-only mode can hold it until it exits, so keep trying, less often after 30 s.
   const listen = (attempt: number) => {
     try {
       Bun.serve({ hostname: "127.0.0.1", port, fetch });
       opts.log(`mini app: listening on 127.0.0.1:${port}${miniAppUrl() ? `, public URL ${miniAppUrl()}` : ""}`);
     } catch (err) {
-      if (attempt < 20) setTimeout(() => listen(attempt + 1), 1500);
-      else opts.log(`mini app: cannot listen on 127.0.0.1:${port}: ${err}`);
+      if (attempt === 20) opts.log(`mini app: cannot listen on 127.0.0.1:${port}: ${err}. Trying again every 15 s.`);
+      setTimeout(() => listen(attempt + 1), attempt < 20 ? 1500 : 15_000);
     }
   };
   listen(1);
@@ -261,7 +262,8 @@ function clip(s: unknown, n: number): string {
 
 // Short target for a tool call, the same idea as scripts/telegram-progress-hook.ts.
 function describe(tool: string, input: Record<string, unknown>): string {
-  const file = (input.file_path ?? input.notebook_path ?? input.path) as string | undefined;
+  const path = input.file_path ?? input.notebook_path ?? input.path;
+  const file = typeof path === "string" ? path : undefined;
   switch (tool) {
     case "Read":
     case "Edit":
@@ -304,8 +306,11 @@ function projectName(cwd: string): string {
   return cwd === (userInfo().homedir || homedir()) ? "~" : basename(cwd) || "~";
 }
 
+// Claude 5 models have a 1M window by default. Haiku and older models (claude-3-*, claude-opus-4-*)
+// have 200K, unless the session already used more, which means it runs with the 1M option.
 function contextWindow(model: string | null, used: number): number {
-  return /haiku/i.test(model ?? "") && used <= 200_000 ? 200_000 : 1_000_000;
+  const small = /haiku|^claude-(?:\d|[a-z]+-[1-4](?:-|$))/i.test(model ?? "");
+  return small && used <= 200_000 ? 200_000 : 1_000_000;
 }
 
 function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => void): void {
@@ -332,7 +337,11 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
     running = true;
     try {
       while (Date.now() < activeUntil) {
-        await tick();
+        try {
+          await tick();
+        } catch {
+          // A failed tick must not stop the loop. The next tick starts again from the saved offsets.
+        }
         await Bun.sleep(TICK_MS);
       }
     } finally {
@@ -343,8 +352,16 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
   async function listSessions(): Promise<LiveSession[] | null> {
     try {
       const proc = Bun.spawn(["claude", "agents", "--json"], { stdout: "pipe", stderr: "ignore" });
-      const timer = setTimeout(() => proc.kill(), 10_000);
-      const out = await new Response(proc.stdout).text().finally(() => clearTimeout(timer));
+      // Limit the read itself: a child that ignores SIGTERM or leaves the pipe open must not hang the tick.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          proc.kill("SIGKILL");
+          resolve(null);
+        }, 10_000);
+      });
+      const out = await Promise.race([new Response(proc.stdout).text(), timeout]).finally(() => clearTimeout(timer));
+      if (out === null) return null;
       const list = JSON.parse(out);
       return Array.isArray(list) ? list.filter((s) => typeof s?.sessionId === "string") : null;
     } catch {
@@ -536,9 +553,15 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         f.rest = buf;
         continue;
       }
-      f.rest = buf.slice(nl + 1);
+      // Copy the tail. Buffer.slice returns a view, which keeps the whole read buffer in memory.
+      f.rest = new Uint8Array(buf.subarray(nl + 1));
       for (const line of decoder.decode(buf.subarray(0, nl)).split("\n")) {
-        if (line.startsWith("{")) ingest(path, f, line, now);
+        if (!line.startsWith("{")) continue;
+        try {
+          ingest(path, f, line, now);
+        } catch {
+          // Skip a record with an unexpected shape, so one bad line cannot stop the board.
+        }
       }
       if (!ready) await Bun.sleep(0);
     }
@@ -684,7 +707,11 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
 
     let lastPost = 0;
     for (const path of order) {
-      await readNew(path, now);
+      try {
+        await readNew(path, now);
+      } catch {
+        // The file was deleted or cannot be read. Skip it for this tick.
+      }
       if (!ready && Date.now() - lastPost > 1500) {
         post({ type: "snapshot", snapshot: build(Date.now(), live, idx) });
         lastPost = Date.now();

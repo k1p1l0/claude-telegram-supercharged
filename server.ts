@@ -35,7 +35,12 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
-import { miniAppUrl, startMiniApp } from "./miniapp";
+
+// The Agents Board is optional. If miniapp.ts is missing next to this file, only /agents stops working.
+const miniapp = await import("./miniapp").catch((err) => {
+  process.stderr.write(`telegram channel: mini app disabled: ${err}\n`);
+  return null;
+});
 
 const ALLOWED_REACTIONS = new Set([
   "👍",
@@ -3702,7 +3707,11 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
   }
 
   if (cmd === "agents") {
-    const url = miniAppUrl();
+    if (!miniapp) {
+      await ctx.reply("The agents board is not installed. Copy miniapp.ts and the miniapp folder next to server.ts and restart.");
+      return true;
+    }
+    const url = miniapp.miniAppUrl();
     if (!url.startsWith("https://")) {
       await ctx.reply(
         `The agents board needs an HTTPS address. Expose the local Mini App server on 127.0.0.1:${process.env.TELEGRAM_MINIAPP_PORT || 8790}, for example with: tailscale serve --bg ${process.env.TELEGRAM_MINIAPP_PORT || 8790}\nThen set TELEGRAM_MINIAPP_URL=https://… in ~/.claude/channels/telegram/.env and restart.`,
@@ -3983,7 +3992,7 @@ function ownsLock(): boolean {
 // server and left the daemon deaf until its next restart.
 let pollingSetupDone = false;
 if (!isSecondary) {
-  startMiniApp({
+  miniapp?.startMiniApp({
     token: TOKEN,
     isAllowed: (userId) => loadAccess().allowFrom.includes(userId),
     log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),

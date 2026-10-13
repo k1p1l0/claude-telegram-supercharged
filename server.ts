@@ -32,7 +32,7 @@ import { extname, join, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
+import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 
@@ -3984,57 +3984,215 @@ function ownsLock(): boolean {
   }
 }
 
+// The same update types in polling and webhook mode.
+const ALLOWED_UPDATES = [
+  "message",
+  "edited_message",
+  "channel_post",
+  "edited_channel_post",
+  "callback_query",
+  "message_reaction",
+] as const;
+
+// Runs each time polling starts and when webhook mode starts. The setup after the log line runs once.
+let startupDone = false;
+function botStarted(username: string, mode: string): void {
+  botUsername = username;
+  process.stderr.write(`telegram channel: ${mode} as @${username}\n`);
+  if (startupDone) return;
+  startupDone = true;
+  startProgressWatcher();
+  void bot.api
+    .setMyCommands(
+      [
+        { command: "status", description: "Is Claude working, uptime, model" },
+        { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
+        { command: "new", description: "Fresh session (memory kept)" },
+        { command: "agents", description: "Live board of sessions, subagents, tokens" },
+      ],
+      { scope: { type: "all_private_chats" } },
+    )
+    .catch(() => {});
+  const chain = [
+    OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+    GROQ_API_KEY && "Groq",
+    DEEPGRAM_API_KEY && "Deepgram",
+    findWhisperBin() || null,
+  ].filter(Boolean);
+  process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+  if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+  // Check for messages that were lost during the restart gap
+  setTimeout(replayUnanswered, 3000);
+}
+
+// ── Webhook mode ─────────────────────────────────────────────────────
+// TELEGRAM_WEBHOOK=on: Telegram POSTs updates to /telegram/webhook on the local server in miniapp.ts
+// instead of the bot calling getUpdates. The public address is TELEGRAM_WEBHOOK_URL, else the Agents
+// Board address. Only the lock owner sets the webhook. It stays set on exit: the next owner replaces it,
+// and bot.start() deletes it before the first getUpdates, so going back to polling needs no cleanup.
+
+const WEBHOOK_MODE = process.env.TELEGRAM_WEBHOOK === "on";
+// New on every start. Telegram sends it in X-Telegram-Bot-Api-Secret-Token; other requests get 401.
+const webhookSecret = randomBytes(32).toString("hex");
+let webhookHandler: ((req: Request) => Promise<Response>) | null = null;
+let webhookTarget = ""; // the URL Telegram should post to; "" while polling
+let webhookErrorAt = 0; // last_error_date (ms) of the newest Telegram error already logged
+
+const logWebhook = (msg: string) => process.stderr.write(`telegram channel: webhook: ${msg}\n`);
+const errText = (err: unknown) => (err instanceof GrammyError ? err.description : String(err));
+// Also accepts a TELEGRAM_WEBHOOK_URL that already ends with the path.
+const webhookUrl = (base: string) => `${base.replace(/\/+$/, "").replace(/\/telegram\/webhook$/, "")}/telegram/webhook`;
+
+// The public HTTPS address, or "" after logging why there is none. With TELEGRAM_MINIAPP_URL=auto it
+// waits up to 60 s for the quick tunnel, which miniapp.ts starts once its server listens.
+async function webhookBase(): Promise<string> {
+  const own = (process.env.TELEGRAM_WEBHOOK_URL ?? "").trim();
+  let base = own || miniapp?.miniAppUrl() || "";
+  const tunnel = !base && process.env.TELEGRAM_MINIAPP !== "off" && process.env.TELEGRAM_MINIAPP_URL?.trim() === "auto";
+  if (tunnel && miniapp) {
+    base = await new Promise<string>((resolve) => {
+      setTimeout(() => resolve(""), 60_000);
+      miniapp.onMiniAppUrlChange(resolve);
+    });
+  }
+  if (base.startsWith("https://")) return base;
+  const port = Number(process.env.TELEGRAM_MINIAPP_PORT) || 8790;
+  const why = own
+    ? "TELEGRAM_WEBHOOK_URL must start with https://"
+    : tunnel
+      ? "the quick tunnel has no address after 60 s"
+      : `set TELEGRAM_WEBHOOK_URL to an HTTPS address that reaches 127.0.0.1:${port}`;
+  logWebhook(`no HTTPS address (${why}), falling back to polling`);
+  return "";
+}
+
+// Points Telegram at url. Retries network and server errors with backoff. Returns false when a newer
+// address replaced url or another instance owns the lock. Throws when Telegram rejects the address.
+async function pointWebhook(url: string): Promise<boolean> {
+  webhookTarget = url;
+  for (let attempt = 1; webhookTarget === url && ownsLock(); attempt++) {
+    try {
+      const since = Date.now();
+      await bot.api.setWebhook(url, { secret_token: webhookSecret, allowed_updates: ALLOWED_UPDATES });
+      logWebhook(`Telegram posts updates to ${url}`);
+      // Report only errors from this address. 5 s of slack for clock skew.
+      webhookErrorAt = Math.max(webhookErrorAt, since - 5_000);
+      setTimeout(() => void checkWebhook(), 15_000);
+      return true;
+    } catch (err) {
+      if (err instanceof GrammyError && err.error_code < 500 && err.error_code !== 429) throw err;
+      const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
+      logWebhook(`setWebhook failed: ${err}, retrying in ${delay / 1000}s`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  return false;
+}
+
+// Telegram reports failed deliveries only through getWebhookInfo. Log each new one.
+async function checkWebhook(): Promise<void> {
+  try {
+    const info = await bot.api.getWebhookInfo();
+    const at = (info.last_error_date ?? 0) * 1000;
+    if (!info.last_error_message || at <= webhookErrorAt) return;
+    webhookErrorAt = at;
+    logWebhook(`Telegram reports "${info.last_error_message}" (${info.pending_update_count} updates waiting)`);
+  } catch {}
+}
+
+// Returns false, after logging why, when webhook mode cannot start. The caller then polls.
+async function startWebhook(): Promise<boolean> {
+  if (!miniapp) {
+    logWebhook("needs miniapp.ts next to server.ts for the local HTTP server, falling back to polling");
+    return false;
+  }
+  try {
+    await bot.init();
+  } catch (err) {
+    logWebhook(`getMe failed: ${errText(err)}, falling back to polling`);
+    return false;
+  }
+  const base = await webhookBase();
+  if (!base) return false;
+  const url = webhookUrl(base);
+  if (!process.env.TELEGRAM_WEBHOOK_URL?.trim()) {
+    // A quick tunnel gets a new address each time it restarts. Listen from before the first setWebhook,
+    // so a restart while it runs is not missed. Ignored once this process falls back to polling.
+    miniapp.onMiniAppUrlChange((next) => {
+      if (!webhookTarget) return;
+      const nextUrl = webhookUrl(next);
+      void pointWebhook(nextUrl).catch((err) => logWebhook(`setWebhook ${nextUrl}: ${errText(err)}`));
+    });
+  }
+  try {
+    await pointWebhook(url);
+  } catch (err) {
+    webhookTarget = "";
+    logWebhook(`setWebhook ${url}: ${errText(err)}, falling back to polling`);
+    return false;
+  }
+  if (!ownsLock()) {
+    logWebhook("another instance owns the lock; not receiving updates");
+    return true;
+  }
+
+  // grammY's polling handles one update at a time. Keep that order here: an update that is still running
+  // when its request gets answered (a long voice note) finishes before the next one starts.
+  const handleUpdate = bot.handleUpdate.bind(bot);
+  let queue: Promise<unknown> = Promise.resolve();
+  bot.handleUpdate = (update, reply) => {
+    const run = queue
+      .then(() => handleUpdate(update, reply))
+      .catch(async (err) => {
+        // As in polling: log through bot.catch and answer 200, so Telegram does not send the update again.
+        if (!(err instanceof BotError)) throw err;
+        await bot.errorHandler(err);
+      });
+    queue = run.catch(() => {});
+    return run;
+  };
+  // Bun.serve drops a request after 10 s without a response, and Telegram then sends the update again.
+  // So answer after 8 s at most and let a slow update finish in the background.
+  const callback = webhookCallback(bot, "bun", {
+    secretToken: webhookSecret,
+    onTimeout: "return",
+    timeoutMilliseconds: 8_000,
+  });
+  webhookHandler = async (req) => {
+    try {
+      return await callback(req);
+    } catch (err) {
+      // A plain 500, never Bun's error page with a stack trace: this route is public.
+      logWebhook(`request failed: ${err}`);
+      return new Response("Internal error", { status: 500 });
+    }
+  };
+  botStarted(bot.botInfo.username, "webhook mode");
+  setInterval(() => void checkWebhook(), 5 * 60_000);
+  return true;
+}
+
 // Retry polling with backoff on any error. grammY rejects bot.start() on a 409
 // Conflict (any other getUpdates call: a restart overlap, a second poller, even
 // a manual curl) and on errors thrown by middleware. Unhandled, that killed the
 // server and left the daemon deaf until its next restart.
-let pollingSetupDone = false;
 if (!isSecondary) {
   miniapp?.startMiniApp({
     token: TOKEN,
     isAllowed: (userId) => loadAccess().allowFrom.includes(userId),
     log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
+    webhook: WEBHOOK_MODE ? (req) => webhookHandler?.(req) ?? new Response("Not ready", { status: 503 }) : undefined,
   });
   void (async () => {
+    if (WEBHOOK_MODE && (await startWebhook())) return;
+    // bot.start() deletes the webhook before its first getUpdates, so one left by webhook mode does not block polling.
     for (let attempt = 1; ; attempt++) {
       try {
         await bot.start({
-          allowed_updates: [
-            "message",
-            "edited_message",
-            "channel_post",
-            "edited_channel_post",
-            "callback_query",
-            "message_reaction",
-          ],
+          allowed_updates: ALLOWED_UPDATES,
           onStart: (info) => {
             attempt = 0;
-            botUsername = info.username;
-            process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-            if (pollingSetupDone) return;
-            pollingSetupDone = true;
-            startProgressWatcher();
-            void bot.api
-              .setMyCommands(
-                [
-                  { command: "status", description: "Is Claude working, uptime, model" },
-                  { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
-                  { command: "new", description: "Fresh session (memory kept)" },
-                  { command: "agents", description: "Live board of sessions, subagents, tokens" },
-                ],
-                { scope: { type: "all_private_chats" } },
-              )
-              .catch(() => {});
-            const chain = [
-              OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-              GROQ_API_KEY && "Groq",
-              DEEPGRAM_API_KEY && "Deepgram",
-              findWhisperBin() || null,
-            ].filter(Boolean);
-            process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-            if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-            // Check for messages that were lost during the restart gap
-            setTimeout(replayUnanswered, 3000);
+            botStarted(info.username, "polling");
           },
         });
         return; // bot.stop() was called

@@ -7,6 +7,8 @@
  * With TELEGRAM_MINIAPP_URL=auto the bot runs a Cloudflare quick tunnel itself.
  * Every API call must carry Telegram initData signed for this bot by a user on
  * the allowlist, so the public URL shows nothing to anyone else.
+ * With TELEGRAM_WEBHOOK=on the same server also takes Telegram's updates at
+ * POST /telegram/webhook (server.ts checks the secret token).
  *
  * Data comes from `claude agents --json` (live sessions, busy or idle) and the
  * transcripts in ~/.claude/projects (tokens, model, tool calls, subagents).
@@ -93,6 +95,13 @@ const tunnel: { url: string; state: "off" | "starting" | "up" | "missing" } = { 
 
 const isAuto = () => (process.env.TELEGRAM_MINIAPP_URL ?? "").trim() === "auto";
 
+const urlListeners: Array<(url: string) => void> = [];
+
+/** Calls fn with the new public address each time the quick tunnel gets one (webhook mode sets it again). */
+export function onMiniAppUrlChange(fn: (url: string) => void): void {
+  urlListeners.push(fn);
+}
+
 /** The public HTTPS address of the Mini App, or "" when it is not set up. */
 export function miniAppUrl(): string {
   // Keep a trailing slash: the page loads the relative `api/state`, which must stay under any path prefix.
@@ -167,6 +176,12 @@ function startQuickTunnel(port: number, log: (msg: string) => void): void {
           tunnel.state = "up";
           delay = 5_000;
           log(`mini app: quick tunnel ${m[0]}`);
+          // A listener that throws must not stop this loop: the pipe would fill and block cloudflared.
+          for (const fn of urlListeners) {
+            try {
+              fn(miniAppUrl());
+            } catch {}
+          }
         } else if (text.length > 64_000) text = `${m ? m[0] : ""}\n${text.slice(-4_000)}`;
       }
     })();
@@ -225,8 +240,11 @@ export function startMiniApp(opts: {
   token: string;
   isAllowed: (userId: string) => boolean;
   log: (msg: string) => void;
+  /** TELEGRAM_WEBHOOK=on: handles POST /telegram/webhook. With TELEGRAM_MINIAPP=off the server runs for this route only. */
+  webhook?: (req: Request) => Response | Promise<Response>;
 }): void {
-  if (process.env.TELEGRAM_MINIAPP === "off") return;
+  const board = process.env.TELEGRAM_MINIAPP !== "off";
+  if (!board && !opts.webhook) return;
   const port = Number(process.env.TELEGRAM_MINIAPP_PORT) || 8790;
   const htmlPath = join(import.meta.dir, "miniapp", "index.html");
   let worker: Worker | null = null;
@@ -253,8 +271,12 @@ export function startMiniApp(opts: {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
 
-  const fetch = (req: Request): Response => {
+  const fetch = (req: Request): Response | Promise<Response> => {
     const { pathname } = new URL(req.url);
+    if (opts.webhook && pathname === "/telegram/webhook") {
+      return req.method === "POST" ? opts.webhook(req) : new Response("Method not allowed", { status: 405 });
+    }
+    if (!board) return new Response("Not found", { status: 404 });
     if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
     if (pathname === "/" || pathname === "/index.html") {
       try {
@@ -278,6 +300,10 @@ export function startMiniApp(opts: {
   const listen = (attempt: number) => {
     try {
       Bun.serve({ hostname: "127.0.0.1", port, fetch });
+      if (!board) {
+        opts.log(`webhook: listening on 127.0.0.1:${port} (agents board off)`);
+        return;
+      }
       opts.log(`mini app: listening on 127.0.0.1:${port}${miniAppUrl() ? `, public URL ${miniAppUrl()}` : ""}`);
       if (isAuto()) startQuickTunnel(port, opts.log);
     } catch (err) {

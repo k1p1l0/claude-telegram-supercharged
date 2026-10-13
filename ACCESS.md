@@ -94,6 +94,32 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`autoTranscribe`** controls whether voice/audio messages are automatically transcribed in the history middleware, even when the bot isn't mentioned. When `true` (default), all voice messages in group chats are downloaded and transcribed so that `get_history` shows the spoken text (prefixed with 🎤) instead of `[voice]`. Set to `false` to disable and reduce CPU usage on busy groups.
 
+## Per-bot overrides
+
+With `TELEGRAM_EXTRA_BOT_TOKENS` set (see [Multiple bots](./README.md#multiple-bots)), every bot reads this same file. An extra bot follows the top-level `dmPolicy`, `allowFrom` and `groups` unless it has an entry under `bots`, keyed by its username. A key you set there replaces the top-level value for that bot; a key you leave out falls back to the top level.
+
+```jsonc
+{
+  "dmPolicy": "pairing",
+  "allowFrom": ["412587349"],
+  "groups": {},
+  "bots": {
+    // Team bot: its own DM allowlist and its own group, no pairing codes.
+    "team_bot": {
+      "dmPolicy": "allowlist",
+      "allowFrom": ["412587349", "628194073"],
+      "groups": { "-1001654782309": { "requireMention": true, "allowFrom": [] } }
+    }
+  }
+}
+```
+
+Here `628194073` can talk to `@team_bot` but not to the primary bot. The outbound tools check the same lists, so Claude can't send through `@team_bot` to a chat that only the primary bot allows, or the other way round.
+
+The primary bot always uses the top-level settings. The `pending` map, `mentionPatterns`, `ackReaction` and the other delivery settings stay at the top level for all bots. Usernames match without regard to case, and a leading `@` is ignored.
+
+**Pairing through an extra bot.** A code issued by an extra bot records it in the pending entry (`"bot": "team_bot"`). `/telegram:access pair <code>` then adds the person (or group) to that bot's own `allowFrom` (or `groups`) when its entry defines one, and to the top-level list otherwise. Approving a code from a bot without its own list gives the person access to every bot that shares the top-level list. The "Paired!" confirmation comes from the bot the person wrote to.
+
 ## Skill reference
 
 | Command | Effect |
@@ -150,6 +176,12 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
   "autoTranscribe": true,
 
   // Tools whose permission requests are allowed without asking in Telegram.
-  "autoApproveTools": ["Read", "Grep", "Glob"]
+  "autoApproveTools": ["Read", "Grep", "Glob"],
+
+  // Extra bots only (TELEGRAM_EXTRA_BOT_TOKENS): per-bot dmPolicy, allowFrom
+  // and groups, keyed by bot username. Missing keys use the values above.
+  "bots": {
+    "team_bot": { "allowFrom": ["412587349", "628194073"] }
+  }
 }
 ```

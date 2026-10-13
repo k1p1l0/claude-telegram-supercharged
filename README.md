@@ -109,8 +109,7 @@ Run it again any time to update. The full walkthrough is in [Getting Started](#g
 | **📊 Agents Board** | `/agents` opens a Mini App in Telegram: every Claude Code session on the Mac, its subagents, context use, tokens per hour and the latest tool calls. [Details](#agents-board-mini-app) |
 | **🔄 Daemon Mode** | Supervisor auto-restarts Claude on crash or context reset. Memory preserved, zero downtime. |
 | **🛡 Context Watchdog** | Auto-restarts when context exceeds 50%, or after 2 hours of uptime, to keep sessions responsive. SQLite history and memory survive restarts. |
-| **🔒 Single-Instance Lock** | PID-based lock file prevents duplicate bot instances competing for Telegram updates. |
-| **🖥 Daemon Management** | `/telegram:daemon start\|stop\|restart\|status\|logs` -- full lifecycle. `/telegram:monitor` for health dashboard with remote control URL. |
+| **🔒 Single-Instance Lock** | PID-based lock file prevents duplicate bot instances competing for Telegram updates. || **🖥 Daemon Management** | `/telegram:daemon start\|stop\|restart\|status\|logs` -- full lifecycle. `/telegram:monitor` for health dashboard with remote control URL. |
 | **⏰ Scheduled Messages** | `schedule` tool for reminders and recurring tasks. "at" (one-shot) and "every" (interval) types. Persists across restarts. |
 | **📅 Google Calendar** | Check schedule, create events, daily briefings from Telegram. Multi-account support. Proactive — Claude uses calendar context when answering. |
 | **📸 Headless Screenshots** | Playwright-based page capture -- works in daemon mode where Chrome isn't available. |
@@ -584,6 +583,42 @@ launchd (OS-level)
 
 > **Note:** `caffeinate -s` prevents sleep only when connected to power. On battery with the lid closed, macOS will eventually sleep regardless. For true 24/7 uptime on battery, consider running on a server instead.
 
+## Multiple bots
+
+One session can run several bots, for example a personal bot and a team bot. Each bot keeps its own chats and history, and Claude answers through the bot that got the message.
+
+Add the extra tokens to `~/.claude/channels/telegram/.env`, separated by commas:
+
+```sh
+TELEGRAM_BOT_TOKEN=123456789:AAH...           # primary bot
+TELEGRAM_EXTRA_BOT_TOKENS=987654321:AAF...,555555555:AAE...
+```
+
+Restart the daemon or the session. The log shows one `polling as @...` line per bot. Without `TELEGRAM_EXTRA_BOT_TOKENS`, the server behaves exactly as before.
+
+**How it works.** Every inbound message reaches Claude with a `bot` attribute: the username of the bot that received it. Claude passes it back as the `bot` parameter of `reply`, `react`, `edit_message`, `ask_user`, `voice_reply`, `create_telegraph_page`, `get_history`, `search_messages` and `clear_history`. When a call has no `bot`, the server uses the bot that last received a message from that chat, or the primary bot if there is none. This matters for DMs, because a private chat has the same `chat_id` (the user's id) on every bot.
+
+History is stored per bot, so `get_history` for one bot never shows another bot's conversation with the same person. Messages from before the upgrade belong to the primary bot. Each bot polls under its own lock in `~/.claude/channels/telegram/data/`: the primary keeps `telegram.lock`, and each extra bot gets `telegram-<hash>.lock`. A second session runs MCP-only for every bot that another session already polls.
+
+**Access.** All bots read the same `access.json`. An extra bot uses the primary's allowlist, groups and DM policy unless you give it its own under `bots`, keyed by its username:
+
+```json
+{
+  "allowFrom": ["412587349"],
+  "bots": {
+    "team_bot": { "allowFrom": ["412587349", "628194073"], "dmPolicy": "allowlist" }
+  }
+}
+```
+
+[ACCESS.md](./ACCESS.md#per-bot-overrides) has the details, including how pairing works for an extra bot.
+
+**Primary bot only.** A few features stay on the primary bot: Agentic Mode progress (the Working message and the typing refresh), permission prompts and `yes <id>` / `no <id>` answers, the `/status`, `/verbose`, `/new` and `/agents` commands with the Mini App, and scheduled jobs. On an extra bot, `/new` and the other commands reach Claude as ordinary text.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `TELEGRAM_EXTRA_BOT_TOKENS` | not set | Comma-separated tokens of more bots for this session. `TELEGRAM_BOT_TOKEN` stays the primary bot. |
+
 ## Group Chats & Conversation Threading
 
 The plugin supports group chats with smart conversation threading -- Claude can follow reply chains, see who said what, and respond in the correct thread.
@@ -729,10 +764,10 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Agentic Mode: live progress, typing indicator, in-place answers
 - [x] Remote permission approval (inline buttons, text replies, auto-approve list)
 - [x] Agents Board Mini App (`/agents`): live sessions, subagents, context use and tokens per hour
+- [x] Multi-bot support: several bots from one server instance, with per-bot history and optional per-bot access
 
 ### Planned
 - [ ] **Scheduled messages** -- Send messages at a specific time
-- [ ] **Multi-bot support** -- Run multiple bots from one server instance
 - [ ] **Rate limiting & usage stats** -- Track token usage and set limits per user
 - [ ] **Webhook mode** -- Alternative to polling for production deployments
 - [ ] **Custom commands** -- Define bot commands that map to Claude Code skills

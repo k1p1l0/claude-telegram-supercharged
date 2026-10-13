@@ -11,7 +11,7 @@
 
 import { Database } from "bun:sqlite";
 import { execFileSync, execSync, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -134,6 +134,11 @@ try {
 } catch {}
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// More bots served by this same instance, comma-separated. See "Multiple bots" in the README.
+const EXTRA_TOKENS = [...new Set((process.env.TELEGRAM_EXTRA_BOT_TOKENS ?? "").split(",").map((t) => t.trim()))].filter(
+  (t) => t && t !== TOKEN,
+);
+const MULTI_BOT = EXTRA_TOKENS.length > 0;
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === "static";
 const TELEGRAPH_ENABLED = process.env.TELEGRAPH_ENABLED === "true"; // default false — opt-in
 
@@ -171,35 +176,45 @@ let isSecondary = false; // true when another instance owns the bot polling
 // emoji but no reply.
 const DAEMON_MODE = process.env.TELEGRAM_DAEMON_MODE === "1";
 
-function acquireLock(): void {
+// One lock per bot token, so two processes never poll the same bot. The
+// primary keeps telegram.lock (existing installs and the docs expect it);
+// extra bots use a short hash of their token.
+function lockFileFor(token: string): string {
+  if (token === TOKEN) return LOCK_FILE;
+  return join(DATA_DIR, `telegram-${createHash("sha256").update(token).digest("hex").slice(0, 12)}.lock`);
+}
+
+// Returns false when another live instance owns the lock: that bot then runs
+// MCP-only here. `label` names an extra bot in the logs.
+function acquireLock(lockFile = LOCK_FILE, label = ""): boolean {
   // A fresh install has no data dir yet, and writing the lock would throw.
   mkdirSync(DATA_DIR, { recursive: true });
-  if (existsSync(LOCK_FILE)) {
-    const existingPid = Number.parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
+  if (existsSync(lockFile)) {
+    const existingPid = Number.parseInt(readFileSync(lockFile, "utf-8").trim(), 10);
     if (!Number.isNaN(existingPid) && existingPid !== process.pid) {
       try {
         process.kill(existingPid, 0); // signal 0 = check alive, don't kill
         if (!isServerProcess(existingPid)) throw new Error("pid recycled");
         if (DAEMON_MODE) {
-          process.stderr.write(`telegram channel: daemon taking over polling from pid=${existingPid}\n`);
+          process.stderr.write(`telegram channel: daemon taking over polling${label} from pid=${existingPid}\n`);
           process.kill(existingPid, "SIGTERM");
-          writeFileSync(LOCK_FILE, String(process.pid));
-          return;
+          writeFileSync(lockFile, String(process.pid));
+          return true;
         }
         // Primary is alive — run in secondary (MCP-only) mode instead of crashing
-        isSecondary = true;
         process.stderr.write(
-          `telegram channel: primary instance running (pid=${existingPid}) — starting in MCP-only mode (tools available, bot polling skipped)\n`,
+          `telegram channel: primary instance running (pid=${existingPid})${label} — starting in MCP-only mode (tools available, bot polling skipped)\n`,
         );
-        return;
+        return false;
       } catch {
         // PID is dead — stale lock, safe to overwrite
-        process.stderr.write(`telegram channel: removing stale lock (pid=${existingPid} is dead)\n`);
+        process.stderr.write(`telegram channel: removing stale lock${label} (pid=${existingPid} is dead)\n`);
       }
     }
   }
-  writeFileSync(LOCK_FILE, String(process.pid));
-  process.stderr.write(`telegram channel: lock acquired (pid=${process.pid})\n`);
+  writeFileSync(lockFile, String(process.pid));
+  process.stderr.write(`telegram channel: lock acquired${label} (pid=${process.pid})\n`);
+  return true;
 }
 
 // PIDs get recycled: only SIGTERM the lock holder if it really is a server.ts.
@@ -215,26 +230,32 @@ function isServerProcess(pid: number): boolean {
   }
 }
 
-function releaseLock(): void {
+function releaseLock(lockFile = LOCK_FILE): void {
   try {
-    if (existsSync(LOCK_FILE)) {
-      const content = readFileSync(LOCK_FILE, "utf-8").trim();
-      if (content === String(process.pid)) rmSync(LOCK_FILE, { force: true });
+    if (existsSync(lockFile)) {
+      const content = readFileSync(lockFile, "utf-8").trim();
+      if (content === String(process.pid)) rmSync(lockFile, { force: true });
     }
   } catch {}
 }
 
-process.on("exit", () => { if (!isSecondary) releaseLock(); });
-process.on("SIGINT", () => {
+// releaseLock only removes a lock that holds our pid, so trying every extra bot's lock is safe.
+function releaseLocks(): void {
   if (!isSecondary) releaseLock();
+  for (const token of EXTRA_TOKENS) releaseLock(lockFileFor(token));
+}
+
+process.on("exit", releaseLocks);
+process.on("SIGINT", () => {
+  releaseLocks();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
-  if (!isSecondary) releaseLock();
+  releaseLocks();
   process.exit(0);
 });
 
-acquireLock();
+isSecondary = !acquireLock();
 
 // ── Telegraph integration ─────────────────────────────────────────────
 // Publishes long-form content to telegra.ph for Instant View in Telegram.
@@ -267,9 +288,9 @@ async function ensureTelegraphToken(authorName: string): Promise<string> {
 /**
  * Upload a local image to Telegram and return a public URL.
  * Uses the bot's own chat to send the photo, gets the file_id,
- * then constructs a public URL via getFile.
+ * then constructs a public URL via getFile. `token` is the bot that sends it.
  */
-async function uploadImageForTelegraph(localPath: string, chatId: string): Promise<string | undefined> {
+async function uploadImageForTelegraph(localPath: string, chatId: string, token: string): Promise<string | undefined> {
   try {
     const imgData = readFileSync(localPath);
     const ext = extname(localPath).slice(1) || "jpg";
@@ -279,7 +300,7 @@ async function uploadImageForTelegraph(localPath: string, chatId: string): Promi
     // Send photo silently (disable_notification) to avoid spamming the chat
     formData.append("disable_notification", "true");
 
-    const sendRes = await fetch(`https://api.telegram.org/bot${TOKEN}/sendPhoto`, {
+    const sendRes = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
       method: "POST",
       body: formData,
     });
@@ -293,12 +314,12 @@ async function uploadImageForTelegraph(localPath: string, chatId: string): Promi
     // Largest photo is the last element
     const fileId = photos[photos.length - 1].file_id;
 
-    const fileRes = await fetch(`https://api.telegram.org/bot${TOKEN}/getFile?file_id=${fileId}`);
+    const fileRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`);
     if (!fileRes.ok) return undefined;
     const fileData = (await fileRes.json()) as { ok: boolean; result?: { file_path: string } };
     if (!fileData.result?.file_path) return undefined;
 
-    return `https://api.telegram.org/file/bot${TOKEN}/${fileData.result.file_path}`;
+    return `https://api.telegram.org/file/bot${token}/${fileData.result.file_path}`;
   } catch (err) {
     process.stderr.write(`telegram channel: image upload for Telegraph failed: ${err}\n`);
     return undefined;
@@ -637,8 +658,11 @@ class MessageStore {
       PRAGMA foreign_keys = ON;
       PRAGMA auto_vacuum = INCREMENTAL;
     `);
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS messages (
+    // bot: "" for the primary bot, else the extra bot's username. Two bots can
+    // see the same chat_id and message_id (a private chat's id is the user id
+    // on every bot), so bot is part of the unique key.
+    const schema = (table: string) => `
+      CREATE TABLE IF NOT EXISTS ${table} (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         message_id      INTEGER NOT NULL,
         chat_id         TEXT NOT NULL,
@@ -653,13 +677,36 @@ class MessageStore {
         edit_date       INTEGER,
         is_outgoing     INTEGER DEFAULT 0,
         thread_id       INTEGER,
-        UNIQUE(chat_id, message_id)
+        bot             TEXT NOT NULL DEFAULT '',
+        UNIQUE(chat_id, message_id, bot)
       );
-    `);
+    `;
+    this.db.exec(schema("messages"));
     // Migrate: add thread_id column to existing databases (must run BEFORE index creation).
     const cols = this.db.query("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === "thread_id")) {
       this.db.exec("ALTER TABLE messages ADD COLUMN thread_id INTEGER");
+    }
+    // Migrate: add bot. SQLite can't change a UNIQUE constraint in place, so the
+    // table is rebuilt once; existing rows become the primary bot's (""). The
+    // IMMEDIATE transaction re-checks, so two servers starting together migrate once.
+    if (!cols.some((c) => c.name === "bot")) {
+      this.db
+        .transaction(() => {
+          const old = this.db.query("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+          if (old.some((c) => c.name === "bot")) return;
+          this.db.exec("DROP TABLE IF EXISTS messages_new");
+          this.db.exec(schema("messages_new"));
+          const fresh = this.db.query("PRAGMA table_info(messages_new)").all() as Array<{ name: string }>;
+          const copy = old
+            .filter((c) => fresh.some((f) => f.name === c.name))
+            .map((c) => c.name)
+            .join(", ");
+          this.db.exec(`INSERT INTO messages_new (${copy}) SELECT ${copy} FROM messages`);
+          this.db.exec("DROP TABLE messages");
+          this.db.exec("ALTER TABLE messages_new RENAME TO messages");
+        })
+        .immediate();
     }
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_messages_chat_date ON messages(chat_id, date DESC);
@@ -682,11 +729,12 @@ class MessageStore {
     date: number;
     is_outgoing?: boolean;
     thread_id?: number;
+    bot?: string;
   }): void {
     this.db.run(
       `INSERT OR REPLACE INTO messages
-       (message_id, chat_id, user_id, username, first_name, text, media_type, caption, reply_to_msg_id, date, is_outgoing, thread_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (message_id, chat_id, user_id, username, first_name, text, media_type, caption, reply_to_msg_id, date, is_outgoing, thread_id, bot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         msg.message_id,
         msg.chat_id,
@@ -700,36 +748,47 @@ class MessageStore {
         msg.date,
         msg.is_outgoing ? 1 : 0,
         msg.thread_id ?? null,
+        msg.bot ?? "",
       ],
     );
     this.insertCount++;
     if (this.insertCount % 100 === 0) this.prune();
   }
 
-  /** Get last N messages from a chat, newest first. */
-  getHistory(chatId: string, limit = 50, before?: number): Array<Record<string, unknown>> {
+  /** Get last N messages from a chat, newest first. `bot` is the history key ("" = primary). */
+  getHistory(chatId: string, limit = 50, before?: number, bot = ""): Array<Record<string, unknown>> {
     if (before) {
       return this.db
-        .query("SELECT * FROM messages WHERE chat_id = ? AND date < ? ORDER BY date DESC LIMIT ?")
-        .all(chatId, before, limit) as Array<Record<string, unknown>>;
+        .query("SELECT * FROM messages WHERE chat_id = ? AND bot = ? AND date < ? ORDER BY date DESC LIMIT ?")
+        .all(chatId, bot, before, limit) as Array<Record<string, unknown>>;
     }
     return this.db
-      .query("SELECT * FROM messages WHERE chat_id = ? ORDER BY date DESC LIMIT ?")
-      .all(chatId, limit) as Array<Record<string, unknown>>;
+      .query("SELECT * FROM messages WHERE chat_id = ? AND bot = ? ORDER BY date DESC LIMIT ?")
+      .all(chatId, bot, limit) as Array<Record<string, unknown>>;
   }
 
   /** Search messages by text pattern (LIKE %query%). */
-  search(chatId: string, query: string, limit = 20): Array<Record<string, unknown>> {
+  search(chatId: string, query: string, limit = 20, bot = ""): Array<Record<string, unknown>> {
     // Escape LIKE wildcards so literal % and _ in the query match themselves.
     const escaped = query.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
     return this.db
-      .query(`SELECT * FROM messages WHERE chat_id = ? AND text LIKE ? ESCAPE '\\' ORDER BY date DESC LIMIT ?`)
-      .all(chatId, `%${escaped}%`, limit) as Array<Record<string, unknown>>;
+      .query(
+        `SELECT * FROM messages WHERE chat_id = ? AND bot = ? AND text LIKE ? ESCAPE '\\' ORDER BY date DESC LIMIT ?`,
+      )
+      .all(chatId, bot, `%${escaped}%`, limit) as Array<Record<string, unknown>>;
+  }
+
+  /** Bot key of the newest inbound message in a chat: routing fallback after a restart. */
+  lastInboundBot(chatId: string): string | undefined {
+    const row = this.db
+      .query("SELECT bot FROM messages WHERE chat_id = ? AND is_outgoing = 0 ORDER BY date DESC, id DESC LIMIT 1")
+      .get(chatId) as { bot: string } | null;
+    return row?.bot;
   }
 
   /** Format last N messages for injection into Claude's context. */
-  formatRecent(chatId: string, count = 5): string {
-    const msgs = this.getHistory(chatId, count);
+  formatRecent(chatId: string, count = 5, bot = ""): string {
+    const msgs = this.getHistory(chatId, count, undefined, bot);
     if (msgs.length === 0) return "";
     // Reverse to chronological order (oldest first)
     msgs.reverse();
@@ -745,20 +804,20 @@ class MessageStore {
   }
 
   /** Look up a message's text by its message_id and chat_id. Used as fallback when reply_to_message.text is empty. */
-  getByMessageId(chatId: string, messageId: number): string | undefined {
+  getByMessageId(chatId: string, messageId: number, bot = ""): string | undefined {
     const row = this.db
-      .query("SELECT text FROM messages WHERE chat_id = ? AND message_id = ? LIMIT 1")
-      .get(chatId, messageId) as { text: string | null } | null;
+      .query("SELECT text FROM messages WHERE chat_id = ? AND message_id = ? AND bot = ? LIMIT 1")
+      .get(chatId, messageId, bot) as { text: string | null } | null;
     return row?.text ?? undefined;
   }
 
-  /** Delete all messages for a chat. Returns the number of rows deleted. */
-  clearHistory(chatId: string): number {
-    const result = this.db.run("DELETE FROM messages WHERE chat_id = ?", [chatId]);
+  /** Delete all messages for a chat (one bot's view of it). Returns the number of rows deleted. */
+  clearHistory(chatId: string, bot = ""): number {
+    const result = this.db.run("DELETE FROM messages WHERE chat_id = ? AND bot = ?", [chatId, bot]);
     return result.changes;
   }
 
-  /** Prune old messages: 500/chat cap + 14-day TTL. */
+  /** Prune old messages: 500/chat cap (per bot) + 14-day TTL. */
   private prune(): void {
     const cutoff = Math.floor(Date.now() / 1000) - 14 * 86400;
     this.db.run("DELETE FROM messages WHERE date < ?", [cutoff]);
@@ -766,7 +825,7 @@ class MessageStore {
     this.db.run(`
       DELETE FROM messages WHERE id IN (
         SELECT m.id FROM messages m
-        WHERE (SELECT COUNT(*) FROM messages m2 WHERE m2.chat_id = m.chat_id AND m2.date >= m.date) > 500
+        WHERE (SELECT COUNT(*) FROM messages m2 WHERE m2.chat_id = m.chat_id AND m2.bot = m.bot AND m2.date >= m.date) > 500
       )
     `);
     // Size check — if over 50MB, aggressively trim to 200/chat
@@ -776,7 +835,7 @@ class MessageStore {
       this.db.run(`
         DELETE FROM messages WHERE id IN (
           SELECT m.id FROM messages m
-          WHERE (SELECT COUNT(*) FROM messages m2 WHERE m2.chat_id = m.chat_id AND m2.date >= m.date) > 200
+          WHERE (SELECT COUNT(*) FROM messages m2 WHERE m2.chat_id = m.chat_id AND m2.bot = m.bot AND m2.date >= m.date) > 200
         )
       `);
       this.db.exec("PRAGMA incremental_vacuum(100)");
@@ -907,7 +966,62 @@ process.on("SIGTERM", () => {
 });
 
 const bot = new Bot(TOKEN);
-let botUsername = "";
+
+// ── Multiple bots ────────────────────────────────────────────────────
+// TELEGRAM_EXTRA_BOT_TOKENS adds bots to this instance. They run the handlers
+// registered on `bot` below (ctx tells which bot got the update), each polls
+// under its own lock, and usernames come from getMe at startup. Agentic Mode
+// progress, permission prompts, /agents and scheduled jobs stay on the primary.
+type BotEntry = { bot: Bot; username: string; primary: boolean; lockFile: string };
+const bots: BotEntry[] = [TOKEN, ...EXTRA_TOKENS].map((token, i) => ({
+  bot: i === 0 ? bot : new Bot(token),
+  username: "",
+  primary: i === 0,
+  lockFile: lockFileFor(token),
+}));
+// The bot that last delivered a message from each chat. Replies go back through it.
+const lastBotByChat = new Map<string, BotEntry>();
+
+function botOf(ctx: Context): BotEntry {
+  return bots.find((b) => b.bot.token === ctx.api.token) ?? bots[0];
+}
+
+// History key: "" for the primary (and rows from before multi-bot), else the username.
+function botKey(b: BotEntry): string {
+  return b.primary ? "" : b.username;
+}
+
+// Extra bots are named by bot id in the logs: the username may not be known yet.
+function botLabel(b: BotEntry): string {
+  return b.primary ? "" : ` for bot ${b.bot.token.split(":")[0]}`;
+}
+
+// Outbound routing: an explicit `bot` username wins, then the bot that last got
+// a message from this chat (in memory, then history), then the primary.
+function pickBot(chat_id: string | undefined, name?: unknown): BotEntry {
+  if (!MULTI_BOT) return bots[0];
+  if (typeof name === "string" && name.trim()) {
+    const want = name.trim().replace(/^@/, "").toLowerCase();
+    const found = bots.find((b) => b.username.toLowerCase() === want);
+    if (!found) {
+      throw new Error(
+        `unknown bot "${name}" (this server runs ${bots.map((b) => `@${b.username || "?"}`).join(", ")})`,
+      );
+    }
+    return found;
+  }
+  if (!chat_id) return bots[0];
+  const recent = lastBotByChat.get(chat_id);
+  if (recent) return recent;
+  const key = messageStore.lastInboundBot(chat_id);
+  return bots.find((b) => key && !b.primary && b.username === key) ?? bots[0];
+}
+
+// Batches and pre-gate buffers are per bot, because two bots can share a
+// chat_id. The primary keeps the bare chat_id as its key.
+function chatKey(b: BotEntry, chatId: string): string {
+  return b.primary ? chatId : `${b.username}:${chatId}`;
+}
 
 // Pending ask_user callbacks — keyed by a unique ID, resolved when the user taps a button.
 type PendingCallback = {
@@ -926,11 +1040,20 @@ type PendingEntry = {
   type?: "dm" | "group";
   /** Group chat title, stored for display purposes. */
   groupTitle?: string;
+  /** Extra bot (username) that issued the code. Absent = the primary bot. */
+  bot?: string;
 };
 
 type GroupPolicy = {
   requireMention: boolean;
   allowFrom: string[];
+};
+
+/** An extra bot's own access rules. Fields left out use the top-level value. */
+type BotPolicy = {
+  dmPolicy?: "pairing" | "allowlist" | "disabled";
+  allowFrom?: string[];
+  groups?: Record<string, GroupPolicy>;
 };
 
 /** Missing or 0 = no limit. */
@@ -966,6 +1089,8 @@ type Access = {
   userLimits?: Record<string, UsageLimits>;
   /** User ids exempt from limits. /usage shows them everyone's usage. */
   admins?: string[];
+  /** Per-bot overrides for extra bots, keyed by bot username. The primary always uses the top level. */
+  bots?: Record<string, BotPolicy>;
 };
 
 function defaultAccess(): Access {
@@ -1077,6 +1202,7 @@ function readAccessFile(): Access {
       limits: parsed.limits,
       userLimits: parsed.userLimits,
       admins: parsed.admins,
+      bots: parsed.bots,
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return defaultAccess();
@@ -1098,6 +1224,7 @@ const BOOT_ACCESS: Access | null = STATIC
         process.stderr.write('telegram channel: static mode — dmPolicy "pairing" downgraded to "allowlist"\n');
         a.dmPolicy = "allowlist";
       }
+      for (const o of Object.values(a.bots ?? {})) if (o.dmPolicy === "pairing") o.dmPolicy = "allowlist";
       a.pending = {};
       return a;
     })()
@@ -1107,10 +1234,25 @@ function loadAccess(): Access {
   return BOOT_ACCESS ?? readAccessFile();
 }
 
+// The rules a bot enforces. An extra bot's entry under access.bots (keyed by
+// username, case-insensitive) replaces dmPolicy, allowFrom and groups.
+// Pending codes and delivery settings stay shared.
+function botAccess(access: Access, b: BotEntry): Required<BotPolicy> {
+  const name = b.username.toLowerCase();
+  const o = b.primary
+    ? undefined
+    : Object.entries(access.bots ?? {}).find(([k]) => k.replace(/^@/, "").toLowerCase() === name)?.[1];
+  return {
+    dmPolicy: o?.dmPolicy ?? access.dmPolicy,
+    allowFrom: o?.allowFrom ?? access.allowFrom,
+    groups: o?.groups ?? access.groups,
+  };
+}
+
 // Outbound gate — reply/react/edit can only target chats the inbound gate
 // would deliver from. Telegram DM chat_id == user_id, so allowFrom covers DMs.
-function assertAllowedChat(chat_id: string): void {
-  const access = loadAccess();
+function assertAllowedChat(chat_id: string, b = pickBot(chat_id)): void {
+  const access = botAccess(loadAccess(), b);
   if (access.allowFrom.includes(chat_id)) return;
   if (chat_id in access.groups) return;
   throw new Error(`chat ${chat_id} is not allowlisted — add via /telegram:access`);
@@ -1146,8 +1288,13 @@ function gate(ctx: Context): GateResult {
   const access = loadAccess();
   const pruned = pruneExpired(access);
   if (pruned) saveAccess(access);
+  // Decisions use this bot's rules; `access` itself is what gets saved.
+  const b = botOf(ctx);
+  const rules = botAccess(access, b);
+  // A code from an extra bot records it, so approval lands in that bot's lists.
+  const pairBot = b.primary ? undefined : b.username;
 
-  if (access.dmPolicy === "disabled") return { action: "drop" };
+  if (rules.dmPolicy === "disabled") return { action: "drop" };
 
   const from = ctx.from;
   if (!from) return { action: "drop" };
@@ -1155,12 +1302,12 @@ function gate(ctx: Context): GateResult {
   const chatType = ctx.chat?.type;
 
   if (chatType === "private") {
-    if (access.allowFrom.includes(senderId)) return { action: "deliver", access };
-    if (access.dmPolicy === "allowlist") return { action: "drop" };
+    if (rules.allowFrom.includes(senderId)) return { action: "deliver", access };
+    if (rules.dmPolicy === "allowlist") return { action: "drop" };
 
     // pairing mode — check for existing non-expired code for this sender
     for (const [code, p] of Object.entries(access.pending)) {
-      if (p.senderId === senderId) {
+      if (p.senderId === senderId && p.bot === pairBot) {
         // Reply twice max (initial + one reminder), then go silent.
         if ((p.replies ?? 1) >= 2) return { action: "drop" };
         p.replies = (p.replies ?? 1) + 1;
@@ -1179,6 +1326,7 @@ function gate(ctx: Context): GateResult {
       createdAt: now,
       expiresAt: now + 60 * 60 * 1000, // 1h
       replies: 1,
+      ...(pairBot ? { bot: pairBot } : {}),
     };
     saveAccess(access);
     return { action: "pair", code, isResend: false };
@@ -1186,7 +1334,7 @@ function gate(ctx: Context): GateResult {
 
   if (chatType === "group" || chatType === "supergroup") {
     const groupId = String(ctx.chat!.id);
-    const policy = access.groups[groupId];
+    const policy = rules.groups[groupId];
     if (!policy) {
       const title = (ctx.chat as any)?.title ?? "unknown";
       process.stderr.write(`telegram channel: unregistered group "${title}" (chat_id=${groupId})\n`);
@@ -1194,7 +1342,7 @@ function gate(ctx: Context): GateResult {
       // Group pairing — same flow as DM pairing.
       // Check for existing pending code for this group.
       for (const [code, p] of Object.entries(access.pending)) {
-        if (p.chatId === groupId && p.type === "group") {
+        if (p.chatId === groupId && p.type === "group" && p.bot === pairBot) {
           if ((p.replies ?? 1) >= 2) return { action: "drop" };
           p.replies = (p.replies ?? 1) + 1;
           saveAccess(access);
@@ -1213,6 +1361,7 @@ function gate(ctx: Context): GateResult {
         replies: 1,
         type: "group",
         groupTitle: title,
+        ...(pairBot ? { bot: pairBot } : {}),
       };
       saveAccess(access);
       return { action: "pair", code, isResend: false };
@@ -1240,15 +1389,15 @@ function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
   for (const e of entities) {
     if (e.type === "mention") {
       const mentioned = text.slice(e.offset, e.offset + e.length);
-      if (mentioned.toLowerCase() === `@${botUsername}`.toLowerCase()) return true;
+      if (mentioned.toLowerCase() === `@${ctx.me.username}`.toLowerCase()) return true;
     }
-    if (e.type === "text_mention" && e.user?.is_bot && e.user.username === botUsername) {
+    if (e.type === "text_mention" && e.user?.is_bot && e.user.username === ctx.me.username) {
       return true;
     }
   }
 
   // Reply to one of our messages counts as an implicit mention.
-  if (ctx.message?.reply_to_message?.from?.username === botUsername) return true;
+  if (ctx.message?.reply_to_message?.from?.username === ctx.me.username) return true;
 
   for (const pat of extraPatterns ?? []) {
     try {
@@ -1264,6 +1413,9 @@ function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
 // someone. Poll for it, send confirmation, clean up. For Telegram DMs,
 // chatId == senderId, so we can send directly without stashing chatId.
 
+// Chat that asked to pair → the bot it asked, so "Paired!" comes from that bot.
+const pairedVia = new Map<string, BotEntry>();
+
 function checkApprovals(): void {
   let files: string[];
   try {
@@ -1275,7 +1427,9 @@ function checkApprovals(): void {
 
   for (const senderId of files) {
     const file = join(APPROVED_DIR, senderId);
-    void bot.api.sendMessage(senderId, "Paired! Say hi to Claude.").then(
+    const via = pairedVia.get(senderId) ?? bots[0];
+    pairedVia.delete(senderId);
+    void via.bot.api.sendMessage(senderId, "Paired! Say hi to Claude.").then(
       () => rmSync(file, { force: true }),
       (err) => {
         process.stderr.write(`telegram channel: failed to send approval confirm: ${err}\n`);
@@ -1411,6 +1565,12 @@ const mcp = new Server(
           ]),
       "",
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has an audio_path attribute, that is a voice message or audio file the sender recorded. Voice messages and audio files are automatically transcribed by the server if whisper-cli (whisper.cpp) or whisper (openai-whisper) is installed locally. When transcription succeeds, you receive the transcription text directly in the notification content instead of just "(voice message)". The original audio file is still available at the audio_path for further processing if needed. If no transcriber is available, you receive the audio_path and can tell the user to install whisper-cpp (`brew install whisper-cpp`) for automatic transcription. Always reply with the transcription result or status via the reply tool. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      ...(MULTI_BOT
+        ? [
+            "",
+            "MULTIPLE BOTS: This server runs several Telegram bots. The tag's bot attribute is the username of the bot that received the message. Pass it back as the bot parameter on reply, react, edit_message, ask_user, voice_reply, create_telegraph_page, get_history, search_messages and clear_history, so the answer comes from the bot the person wrote to. One chat_id can exist on several bots (a private chat's id is the user's id on every bot), and each bot has its own history. Without bot, the server uses the bot that last received a message from that chat.",
+          ]
+        : []),
       "",
       "VOICE TRANSCRIPTION CAUTION: Voice transcriptions can be inaccurate — whisper may mishear words, invent context, or confuse languages. NEVER auto-trigger skills, start heavy tasks, or assume intent based solely on a voice transcription. Instead: (1) briefly confirm what you understood from the voice message, (2) ask the user if that's correct before proceeding, (3) only then take action. Example: 'I heard you asking about X — is that right?' This prevents wasting time on misheard requests. For simple greetings or short clear messages, confirmation is not needed.",
       "",
@@ -1587,6 +1747,17 @@ async function handlePermissionCallback(ctx: Context, data: string): Promise<voi
   await ctx.answerCallbackQuery({ text: action === "allow" ? "✅ Allowed" : "❌ Denied" }).catch(() => {});
 }
 
+// Only with extra bots, so a single-bot install keeps its exact tool schemas.
+const BOT_PARAM = MULTI_BOT
+  ? {
+      bot: {
+        type: "string",
+        description:
+          "Username of the bot to act through: pass bot from the inbound message. Default: the bot that last received a message from this chat, else the primary bot.",
+      },
+    }
+  : {};
+
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -1618,6 +1789,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               "Telegram Forum topic thread ID. Pass thread_id from the inbound notification to reply within the same topic.",
           },
+          ...BOT_PARAM,
         },
         required: ["chat_id", "text"],
       },
@@ -1632,6 +1804,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           chat_id: { type: "string" },
           message_id: { type: "string" },
           emoji: { type: "string" },
+          ...BOT_PARAM,
         },
         required: ["chat_id", "message_id", "emoji"],
       },
@@ -1651,6 +1824,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             enum: ["MarkdownV2", "HTML", "plain"],
             description: 'Telegram parse mode. Default: MarkdownV2. Use "plain" to send without formatting.',
           },
+          ...BOT_PARAM,
         },
         required: ["chat_id", "message_id", "text"],
       },
@@ -1682,6 +1856,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               'Timeout in seconds. Default: 120. If the user doesn\'t tap a button in time, returns "timeout".',
           },
+          ...BOT_PARAM,
         },
         required: ["chat_id", "text", "buttons"],
       },
@@ -1705,6 +1880,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "Unix timestamp — only return messages before this time. For pagination.",
           },
+          ...BOT_PARAM,
         },
         required: ["chat_id"],
       },
@@ -1728,6 +1904,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "Max results to return (default 20, max 100).",
           },
+          ...BOT_PARAM,
         },
         required: ["chat_id", "query"],
       },
@@ -1748,6 +1925,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               "If true, signal the supervisor daemon to restart Claude for a full context reset. Send your Telegram reply BEFORE calling clear_history with this flag — the process will be killed ~3 seconds after.",
           },
+          ...BOT_PARAM,
         },
         required: ["chat_id"],
       },
@@ -1820,6 +1998,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
                   description: "Text to convert to speech and send as voice message. Keep under 500 chars.",
                 },
                 reply_to: { type: "string", description: "Message ID to thread under (optional)." },
+                ...BOT_PARAM,
               },
               required: ["chat_id", "text"],
             },
@@ -1857,6 +2036,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
                   type: "string",
                   description: "Optional URL linked from the author name.",
                 },
+                ...BOT_PARAM,
               },
               required: ["title", "content"],
             },
@@ -1878,8 +2058,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const files = (args.files as string[] | undefined) ?? [];
         const rawParseMode = (args.parse_mode as string | undefined) ?? "MarkdownV2";
         const parseMode = rawParseMode === "plain" ? undefined : (rawParseMode as "MarkdownV2" | "HTML");
+        const b = pickBot(chat_id, args.bot);
 
-        assertAllowedChat(chat_id);
+        assertAllowedChat(chat_id, b);
 
         for (const f of files) {
           assertSendable(f);
@@ -1900,27 +2081,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
         // Agentic Mode: a single-message answer (no files, no quote, no thread)
         // replaces the Working bubble in place instead of arriving as a new
-        // message. Telegram sends no push notification for edits.
+        // message. Telegram sends no push notification for edits. Primary bot only.
         const bubbleId =
-          chunks.length === 1 && files.length === 0 && reply_to == null && thread_id == null
+          b.primary && chunks.length === 1 && files.length === 0 && reply_to == null && thread_id == null
             ? await takeProgressBubble(chat_id)
             : undefined;
         if (bubbleId != null) {
           try {
-            await bot.api.editMessageText(chat_id, bubbleId, chunks[0], {
+            await b.bot.api.editMessageText(chat_id, bubbleId, chunks[0], {
               ...(parseMode ? { parse_mode: parseMode } : {}),
             });
             sentIds.push(bubbleId);
           } catch {
             // Bubble gone or edit refused: remove it and send normally below.
-            void bot.api.deleteMessage(chat_id, bubbleId).catch(() => {});
+            void b.bot.api.deleteMessage(chat_id, bubbleId).catch(() => {});
           }
         }
 
         try {
           for (let i = sentIds.length; i < chunks.length; i++) {
             const shouldReplyTo = reply_to != null && replyMode !== "off" && (replyMode === "all" || i === 0);
-            const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+            const sent = await b.bot.api.sendMessage(chat_id, chunks[i], {
               ...(parseMode ? { parse_mode: parseMode } : {}),
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(thread_id != null ? { message_thread_id: thread_id } : {}),
@@ -1942,10 +2123,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ...(thread_id != null ? { message_thread_id: thread_id } : {}),
           };
           if (PHOTO_EXTS.has(ext)) {
-            const sent = await bot.api.sendPhoto(chat_id, input, Object.keys(opts).length > 0 ? opts : undefined);
+            const sent = await b.bot.api.sendPhoto(chat_id, input, Object.keys(opts).length > 0 ? opts : undefined);
             sentIds.push(sent.message_id);
           } else {
-            const sent = await bot.api.sendDocument(chat_id, input, Object.keys(opts).length > 0 ? opts : undefined);
+            const sent = await b.bot.api.sendDocument(chat_id, input, Object.keys(opts).length > 0 ? opts : undefined);
             sentIds.push(sent.message_id);
           }
         }
@@ -1953,7 +2134,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         // Track bot's own messages for thread context + history.
         for (const sid of sentIds) {
           trackMessage(chat_id, sid, {
-            sender: botUsername ?? "bot",
+            sender: b.username ?? "bot",
             text: text.slice(0, 200),
             ts: Date.now(),
             replyTo: reply_to,
@@ -1961,16 +2142,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           messageStore.store({
             message_id: sid,
             chat_id,
-            username: botUsername ?? "bot",
+            username: b.username ?? "bot",
             text: text.slice(0, 2000),
             reply_to_msg_id: reply_to,
             date: Math.floor(Date.now() / 1000),
             is_outgoing: true,
             thread_id,
+            bot: botKey(b),
           });
         }
 
-        onBotMessageSent(chat_id);
+        if (b.primary) onBotMessageSent(chat_id);
         const result =
           sentIds.length === 1
             ? `sent (id: ${sentIds[0]})`
@@ -1978,7 +2160,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         return { content: [{ type: "text", text: result }] };
       }
       case "react": {
-        assertAllowedChat(args.chat_id as string);
+        const b = pickBot(args.chat_id as string, args.bot);
+        assertAllowedChat(args.chat_id as string, b);
         const emoji = args.emoji as string;
         if (!ALLOWED_REACTIONS.has(emoji)) {
           const suggestions = [...ALLOWED_REACTIONS].slice(0, 20).join(" ");
@@ -1991,18 +2174,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ],
           };
         }
-        await bot.api.setMessageReaction(args.chat_id as string, Number(args.message_id), [
+        await b.bot.api.setMessageReaction(args.chat_id as string, Number(args.message_id), [
           { type: "emoji", emoji: emoji as ReactionTypeEmoji["emoji"] },
         ]);
         return { content: [{ type: "text", text: "reacted" }] };
       }
       case "edit_message": {
-        assertAllowedChat(args.chat_id as string);
+        const b = pickBot(args.chat_id as string, args.bot);
+        assertAllowedChat(args.chat_id as string, b);
         const editParseMode = (args.parse_mode as string | undefined) ?? "MarkdownV2";
         const editParseModeOpt = editParseMode === "plain" ? undefined : (editParseMode as "MarkdownV2" | "HTML");
         const editText =
           editParseModeOpt === "MarkdownV2" ? escapeMarkdownV2(args.text as string) : (args.text as string);
-        const edited = await bot.api.editMessageText(
+        const edited = await b.bot.api.editMessageText(
           args.chat_id as string,
           Number(args.message_id),
           editText,
@@ -2019,8 +2203,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const parseMode = rawParseMode === "plain" ? undefined : (rawParseMode as "MarkdownV2" | "HTML");
         const text = parseMode === "MarkdownV2" ? escapeMarkdownV2(rawAskText) : rawAskText;
         const timeoutSecs = (args.timeout as number | undefined) ?? 120;
+        const b = pickBot(chat_id, args.bot);
 
-        assertAllowedChat(chat_id);
+        assertAllowedChat(chat_id, b);
 
         if (!buttons.length || buttons.length > 10) {
           throw new Error("buttons must have 1-10 items");
@@ -2033,8 +2218,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
 
         // The question becomes the newest message; no "typing" while we wait for the user.
-        onBotMessageSent(chat_id);
-        setProgressPaused(chat_id, true);
+        if (b.primary) {
+          onBotMessageSent(chat_id);
+          setProgressPaused(chat_id, true);
+        }
         const choice = await new Promise<string>((resolve) => {
           const timer = setTimeout(() => {
             pendingCallbacks.delete(callbackId);
@@ -2043,7 +2230,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
           pendingCallbacks.set(callbackId, { resolve, timer });
 
-          bot.api
+          b.bot.api
             .sendMessage(chat_id, text, {
               ...(parseMode ? { parse_mode: parseMode } : {}),
               reply_markup: keyboard,
@@ -2055,15 +2242,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             });
         });
 
-        setProgressPaused(chat_id, false);
+        if (b.primary) setProgressPaused(chat_id, false);
         return { content: [{ type: "text", text: `user chose: ${choice}` }] };
       }
       case "get_history": {
         const chat_id = args.chat_id as string;
-        assertAllowedChat(chat_id);
+        const b = pickBot(chat_id, args.bot);
+        assertAllowedChat(chat_id, b);
         const limit = Math.min(Math.max(1, (args.limit as number | undefined) ?? 50), 200);
         const before = args.before as number | undefined;
-        const msgs = messageStore.getHistory(chat_id, limit, before);
+        const msgs = messageStore.getHistory(chat_id, limit, before, botKey(b));
         if (msgs.length === 0) {
           return { content: [{ type: "text", text: "No messages found in history for this chat." }] };
         }
@@ -2083,10 +2271,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "search_messages": {
         const chat_id = args.chat_id as string;
-        assertAllowedChat(chat_id);
+        const b = pickBot(chat_id, args.bot);
+        assertAllowedChat(chat_id, b);
         const query = args.query as string;
         const limit = Math.min(Math.max(1, (args.limit as number | undefined) ?? 20), 100);
-        const msgs = messageStore.search(chat_id, query, limit);
+        const msgs = messageStore.search(chat_id, query, limit, botKey(b));
         if (msgs.length === 0) {
           return { content: [{ type: "text", text: `No messages matching "${query}" found.` }] };
         }
@@ -2104,8 +2293,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "clear_history": {
         const chat_id = args.chat_id as string;
         const restartContext = args.restart_context === true;
-        assertAllowedChat(chat_id);
-        const deleted = messageStore.clearHistory(chat_id);
+        const b = pickBot(chat_id, args.bot);
+        assertAllowedChat(chat_id, b);
+        const deleted = messageStore.clearHistory(chat_id, botKey(b));
 
         if (restartContext) {
           // Write restart signal for the supervisor daemon.
@@ -2271,7 +2461,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const chat_id = args.chat_id as string;
         const text = args.text as string;
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined;
-        assertAllowedChat(chat_id);
+        const b = pickBot(chat_id, args.bot);
+        assertAllowedChat(chat_id, b);
         if (!ELEVENLABS_API_KEY) {
           return {
             content: [{ type: "text", text: "voice_reply unavailable: ELEVENLABS_API_KEY not set." }],
@@ -2285,7 +2476,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         // ElevenLabs returns OGG/Opus directly — no ffmpeg conversion needed
         let sent: { message_id: number };
         try {
-          sent = await bot.api.sendVoice(chat_id, new InputFile(audioPath), {
+          sent = await b.bot.api.sendVoice(chat_id, new InputFile(audioPath), {
             ...(reply_to != null ? { reply_parameters: { message_id: reply_to } } : {}),
           });
         } catch (voiceErr) {
@@ -2293,7 +2484,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           process.stderr.write(`telegram channel: sendVoice failed, trying sendAudio: ${voiceErr}\n`);
           const errMsg = voiceErr instanceof Error ? voiceErr.message : String(voiceErr);
           if (errMsg.includes("VOICE_MESSAGES_FORBIDDEN")) {
-            void bot.api
+            void b.bot.api
               .sendMessage(
                 chat_id,
                 "Tip: I tried to send a voice reply but your Telegram privacy settings block voice messages from bots. " +
@@ -2302,7 +2493,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
               )
               .catch(() => {});
           }
-          sent = await bot.api.sendAudio(chat_id, new InputFile(audioPath), {
+          sent = await b.bot.api.sendAudio(chat_id, new InputFile(audioPath), {
             title: "Voice reply",
             ...(reply_to != null ? { reply_parameters: { message_id: reply_to } } : {}),
           });
@@ -2310,7 +2501,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         try {
           rmSync(audioPath);
         } catch {}
-        onBotMessageSent(chat_id);
+        if (b.primary) onBotMessageSent(chat_id);
         return { content: [{ type: "text", text: `voice reply sent (id: ${sent.message_id})` }] };
       }
       case "create_telegraph_page": {
@@ -2335,7 +2526,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           if (imgPath.startsWith("http://") || imgPath.startsWith("https://")) continue;
           // Local file — upload via Telegram
           if (chatId && existsSync(imgPath)) {
-            const publicUrl = await uploadImageForTelegraph(imgPath, chatId);
+            const publicUrl = await uploadImageForTelegraph(imgPath, chatId, pickBot(chatId, args.bot).bot.token);
             if (publicUrl) {
               content = content.replace(match[0], `![${match[1]}](${publicUrl})`);
             }
@@ -2902,7 +3093,7 @@ bot.on("message", async (ctx, next) => {
         const fileObj = msg.voice ?? msg.audio;
         const file = await ctx.api.getFile(fileObj!.file_id);
         if (file.file_path) {
-          const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+          const url = `https://api.telegram.org/file/bot${ctx.api.token}/${file.file_path}`;
           const res = await fetch(url);
           if (!res.ok) throw new Error(`Telegram file download failed: ${res.status} ${res.statusText}`);
           const buf = Buffer.from(await res.arrayBuffer());
@@ -2936,6 +3127,7 @@ bot.on("message", async (ctx, next) => {
       date: msg.date,
       is_outgoing: false,
       thread_id: (msg as any).message_thread_id ?? undefined,
+      bot: botKey(botOf(ctx)),
     });
   }
   await next();
@@ -2958,7 +3150,7 @@ bot.on("message:photo", async (ctx) => {
     try {
       const file = await ctx.api.getFile(best.file_id);
       if (!file.file_path) return undefined;
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+      const url = `https://api.telegram.org/file/bot${ctx.api.token}/${file.file_path}`;
       const res = await fetch(url);
       const buf = Buffer.from(await res.arrayBuffer());
       const ext = file.file_path.split(".").pop() ?? "jpg";
@@ -2981,7 +3173,7 @@ bot.on("message:voice", async (ctx) => {
   if (isDM) {
     const chatId = String(ctx.chat!.id);
     const msgId = ctx.message.message_id;
-    void bot.api
+    void ctx.api
       .setMessageReaction(chatId, msgId, [{ type: "emoji", emoji: "✍" as ReactionTypeEmoji["emoji"] }])
       .catch(() => {});
   }
@@ -2996,7 +3188,7 @@ bot.on("message:voice", async (ctx) => {
     try {
       const file = await ctx.api.getFile(voice.file_id);
       if (!file.file_path) return undefined;
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+      const url = `https://api.telegram.org/file/bot${ctx.api.token}/${file.file_path}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`download failed: ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
@@ -3030,7 +3222,7 @@ bot.on("message:audio", async (ctx) => {
     try {
       const file = await ctx.api.getFile(audio.file_id);
       if (!file.file_path) return undefined;
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+      const url = `https://api.telegram.org/file/bot${ctx.api.token}/${file.file_path}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`download failed: ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
@@ -3059,7 +3251,7 @@ bot.on("message:sticker", async (ctx) => {
     try {
       const file = await ctx.api.getFile(sticker.file_id);
       if (!file.file_path) return undefined;
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+      const url = `https://api.telegram.org/file/bot${ctx.api.token}/${file.file_path}`;
       const res = await fetch(url);
       const buf = Buffer.from(await res.arrayBuffer());
       const ext = file.file_path.split(".").pop() ?? "webp";
@@ -3089,7 +3281,7 @@ bot.on("message:animation", async (ctx) => {
     try {
       const file = await ctx.api.getFile(anim.file_id);
       if (!file.file_path) return undefined;
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+      const url = `https://api.telegram.org/file/bot${ctx.api.token}/${file.file_path}`;
       const res = await fetch(url);
       const buf = Buffer.from(await res.arrayBuffer());
       const ext = file.file_path.split(".").pop() ?? "mp4";
@@ -3122,7 +3314,7 @@ bot.on("message:document", async (ctx) => {
       }
       const file = await ctx.api.getFile(doc.file_id);
       if (!file.file_path) return undefined;
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+      const url = `https://api.telegram.org/file/bot${ctx.api.token}/${file.file_path}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`download failed: ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
@@ -3167,7 +3359,7 @@ bot.on("callback_query:data", async (ctx) => {
   try {
     const msg = ctx.callbackQuery.message;
     if (msg && "text" in msg) {
-      await bot.api.editMessageText(String(msg.chat.id), msg.message_id, `${msg.text}\n\n✅ ${label}`);
+      await ctx.api.editMessageText(String(msg.chat.id), msg.message_id, `${msg.text}\n\n✅ ${label}`);
     }
   } catch {
     // Non-critical — the answer was already captured.
@@ -3180,11 +3372,12 @@ bot.on("message_reaction", async (ctx) => {
   if (!reaction) return;
 
   const chat_id = String(reaction.chat.id);
+  const b = botOf(ctx);
   const access = loadAccess();
   const senderId = reaction.user ? String(reaction.user.id) : undefined;
 
   // Only forward reactions from allowlisted users.
-  if (!senderId || !access.allowFrom.includes(senderId)) return;
+  if (!senderId || !botAccess(access, b).allowFrom.includes(senderId)) return;
   // A reaction starts a turn too, so it counts like a message and is dropped over a limit.
   if (overLimit(access, senderId)) return;
 
@@ -3206,6 +3399,7 @@ bot.on("message_reaction", async (ctx) => {
   const user = reaction.user;
   const username = user && "username" in user ? (user.username ?? String(user.id)) : senderId;
 
+  lastBotByChat.set(chat_id, b);
   usageStore.recordMessage(senderId, Date.now());
   lastDeliveredUser = senderId;
   void mcp.notification({
@@ -3219,6 +3413,7 @@ bot.on("message_reaction", async (ctx) => {
         user_id: senderId,
         ts: new Date(reaction.date * 1000).toISOString(),
         event_type: "reaction",
+        ...(MULTI_BOT ? { bot: b.username } : {}),
       },
     },
   });
@@ -3244,23 +3439,24 @@ interface BufferedCtx {
   command?: CustomCommandMatch;
 }
 
+// Keyed by chatKey(): one buffer per bot and chat.
 const pregateBuffers = new Map<string, { messages: BufferedCtx[]; timer: ReturnType<typeof setTimeout> }>();
 const MAX_PREGATE_BUFFER = 20;
 
-function discardPregateBuffer(chatId: string): void {
-  const buf = pregateBuffers.get(chatId);
+function discardPregateBuffer(key: string): void {
+  const buf = pregateBuffers.get(key);
   if (buf) {
-    process.stderr.write(`telegram channel: discarded ${buf.messages.length} unbuffered message(s) from chat ${chatId}\n`);
+    process.stderr.write(`telegram channel: discarded ${buf.messages.length} unbuffered message(s) from chat ${key}\n`);
     clearTimeout(buf.timer);
-    pregateBuffers.delete(chatId);
+    pregateBuffers.delete(key);
   }
 }
 
-async function promotePregateBuffer(chatId: string): Promise<void> {
-  const buf = pregateBuffers.get(chatId);
+async function promotePregateBuffer(key: string): Promise<void> {
+  const buf = pregateBuffers.get(key);
   if (!buf) return;
   clearTimeout(buf.timer);
-  pregateBuffers.delete(chatId);
+  pregateBuffers.delete(key);
   // Deliver each buffered message through the normal post-gate path.
   for (const entry of buf.messages) {
     // These never addressed the bot, so a sender over a limit is skipped without a notice.
@@ -3291,19 +3487,22 @@ interface BatchedMessage {
   replyContext: Record<string, string>;
   isGroup: boolean;
   chatId: string;
+  via: BotEntry; // the bot that received it
   command?: CustomCommandMatch;
 }
 
+// Keyed by chatKey(): one batch per bot and chat.
 const pendingBatches = new Map<string, { messages: BatchedMessage[]; timer: ReturnType<typeof setTimeout> }>();
 
-function flushBatch(chatId: string): void {
-  const batch = pendingBatches.get(chatId);
+function flushBatch(key: string): void {
+  const batch = pendingBatches.get(key);
   if (!batch || batch.messages.length === 0) return;
-  pendingBatches.delete(chatId);
+  pendingBatches.delete(key);
 
   const msgs = batch.messages;
   const first = msgs[0];
   const last = msgs[msgs.length - 1];
+  const chatId = first.chatId;
 
   // ── Instant auto-summary for batches (no AI, pure logic) ──────────
   if (msgs.length > 1) {
@@ -3327,7 +3526,7 @@ function flushBatch(chatId: string): void {
     // mention for other bots in the group: each bot's ack wakes the next one,
     // an endless "Got N messages..." loop. Fix from #18 by @vasparshin.
     if (!first.isGroup) {
-      void bot.api
+      void first.via.bot.api
         .sendMessage(chatId, summary, {
           ...(last.msgId != null ? { reply_parameters: { message_id: last.msgId } } : {}),
         })
@@ -3347,7 +3546,7 @@ function flushBatch(chatId: string): void {
   const command = msgs.findLast((m) => m.command)?.command;
 
   // Use the last message's context for thread tracking
-  const recentHistory = messageStore.formatRecent(chatId, 5);
+  const recentHistory = messageStore.formatRecent(chatId, 5, botKey(first.via));
   const content = recentHistory ? `${combinedText}\n\n${recentHistory}` : combinedText;
 
   // For group messages, include thread chain from the last message.
@@ -3369,6 +3568,7 @@ function flushBatch(chatId: string): void {
         user: last.username,
         user_id: last.userId,
         ts: last.timestamp.toISOString(),
+        ...(MULTI_BOT ? { bot: first.via.username } : {}),
         ...(msgs.length > 1 ? { batch_size: String(msgs.length) } : {}),
         ...(imagePaths.length > 0 ? { image_path: imagePaths[0] } : {}),
         ...(imagePaths.length > 1 ? { image_paths: imagePaths.join(",") } : {}),
@@ -3393,12 +3593,14 @@ async function handleInbound(
   command?: CustomCommandMatch,
 ): Promise<void> {
   let result = gate(ctx);
+  const b = botOf(ctx);
   // "/standup@this_bot" in a group addresses the bot the way a mention does.
   if (result.action === "buffer" && command?.addressed) result = { action: "deliver", access: result.access };
 
   if (result.action === "drop") return;
 
   if (result.action === "pair") {
+    pairedVia.set(String(ctx.chat!.id), b);
     const lead = result.isResend ? "Still pending" : "Pairing required";
     await ctx.reply(`${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`);
     return;
@@ -3407,7 +3609,8 @@ async function handleInbound(
   // "yes abcde" / "no abcde" from an allowlisted DM answers a pending
   // permission request instead of reaching Claude as chat. Only ids that are
   // actually pending count, so a message like "no thank" stays normal chat.
-  if (result.action === "deliver" && ctx.chat?.type === "private") {
+  // Primary bot only, like the prompts themselves.
+  if (result.action === "deliver" && ctx.chat?.type === "private" && b.primary) {
     const pm = PERMISSION_REPLY_RE.exec(inboundText);
     const id = pm?.[2].toLowerCase();
     if (pm && id && pendingPermissions.has(id) && loadAccess().allowFrom.includes(String(ctx.from?.id ?? ""))) {
@@ -3415,7 +3618,7 @@ async function handleInbound(
       resolvePermission(id, behavior);
       const msgId = ctx.message?.message_id;
       if (msgId != null) {
-        void bot.api
+        void ctx.api
           .setMessageReaction(String(ctx.chat.id), msgId, [
             { type: "emoji", emoji: (behavior === "allow" ? "👍" : "👎") as ReactionTypeEmoji["emoji"] },
           ])
@@ -3429,17 +3632,17 @@ async function handleInbound(
     // Message passed all checks except requireMention. Hold it in the
     // pre-gate buffer — if a mention arrives within BATCH_WINDOW_MS from
     // the same chat, promotePregateBuffer() will deliver everything.
-    const chat_id = String(ctx.chat!.id);
-    const buf = pregateBuffers.get(chat_id);
+    const key = chatKey(b, String(ctx.chat!.id));
+    const buf = pregateBuffers.get(key);
     if (buf) {
       if (buf.messages.length >= MAX_PREGATE_BUFFER) return; // safety cap
       clearTimeout(buf.timer);
       buf.messages.push({ ctx, inboundText, downloadMedia, access: result.access, command });
-      buf.timer = setTimeout(() => discardPregateBuffer(chat_id), BATCH_WINDOW_MS);
+      buf.timer = setTimeout(() => discardPregateBuffer(key), BATCH_WINDOW_MS);
     } else {
-      pregateBuffers.set(chat_id, {
+      pregateBuffers.set(key, {
         messages: [{ ctx, inboundText, downloadMedia, access: result.access, command }],
-        timer: setTimeout(() => discardPregateBuffer(chat_id), BATCH_WINDOW_MS),
+        timer: setTimeout(() => discardPregateBuffer(key), BATCH_WINDOW_MS),
       });
     }
     return;
@@ -3448,9 +3651,9 @@ async function handleInbound(
   if (await enforceLimits(ctx, result.access)) return;
 
   // action === "deliver" — first promote any buffered messages from this chat
-  const chat_id = String(ctx.chat!.id);
-  const buffered = pregateBuffers.has(chat_id);
-  await promotePregateBuffer(chat_id);
+  const key = chatKey(b, String(ctx.chat!.id));
+  const buffered = pregateBuffers.has(key);
+  await promotePregateBuffer(key);
   // The sender's own buffered messages may have used up their last slots.
   if (buffered && (await enforceLimits(ctx, result.access))) return;
 
@@ -4169,10 +4372,11 @@ function usageReport(access: Access, userId: string, adminView: boolean): string
 // their own numbers. The admin table stays in DMs.
 async function handleGroupUsage(ctx: Context): Promise<boolean> {
   const access = loadAccess();
-  const policy = access.groups[String(ctx.chat?.id)];
+  const rules = botAccess(access, botOf(ctx)); // limits stay top-level, groups are per bot
+  const policy = rules.groups[String(ctx.chat?.id)];
   const userId = String(ctx.from?.id ?? "");
   const allowed = policy?.allowFrom ?? [];
-  if (access.dmPolicy === "disabled" || !policy || !userId) return false;
+  if (rules.dmPolicy === "disabled" || !policy || !userId) return false;
   if (allowed.length > 0 && !allowed.includes(userId)) return false;
   const msgId = ctx.message?.message_id;
   await ctx
@@ -4251,16 +4455,21 @@ function refreshCustomCommands(): void {
   customCommands = mtime ? readCommandsFile() : new Map();
   if (mtime) process.stderr.write(`telegram channel: ${customCommands.size} custom command(s) from commands.json\n`);
   const custom = [...customCommands].map(([command, c]) => ({ command, description: c.description }));
-  void bot.api
-    .setMyCommands([...BUILTIN_COMMANDS, ...custom], { scope: { type: "all_private_chats" } })
-    .catch((err) => process.stderr.write(`telegram channel: setMyCommands failed: ${err}\n`));
+  // Every bot gets the custom commands. Of the built-ins, extra bots answer only /usage.
+  for (const b of bots) {
+    const builtin = b.primary ? BUILTIN_COMMANDS : BUILTIN_COMMANDS.filter((c) => c.command === "usage");
+    void b.bot.api
+      .setMyCommands([...builtin, ...custom], { scope: { type: "all_private_chats" } })
+      .catch((err) => process.stderr.write(`telegram channel: setMyCommands${botLabel(b)} failed: ${err}\n`));
+  }
 }
 
 // "/standup [args]" or "/standup@this_bot [args]" for a command in commands.json.
-function parseCustomCommand(text: string): CustomCommandMatch | undefined {
+// `username` is the bot that received it: "/standup@other_bot" is not for us.
+function parseCustomCommand(text: string, username: string): CustomCommandMatch | undefined {
   const m = /^\/([a-z0-9_]{1,32})(?:@(\w+))?(?:\s+([\s\S]*))?$/i.exec(text.trim());
   if (!m) return undefined;
-  if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return undefined;
+  if (m[2] && username && m[2].toLowerCase() !== username.toLowerCase()) return undefined;
   const name = m[1].toLowerCase();
   const cmd = customCommands.get(name);
   if (!cmd) return undefined;
@@ -4271,7 +4480,7 @@ function parseCustomCommand(text: string): CustomCommandMatch | undefined {
 function matchCustomCommand(ctx: Context): CustomCommandMatch | undefined {
   refreshCustomCommands();
   if (customCommands.size === 0 || ctx.message?.forward_origin) return undefined;
-  return parseCustomCommand(ctx.message?.text ?? "");
+  return parseCustomCommand(ctx.message?.text ?? "", ctx.me.username);
 }
 
 function customCommandPrompt(c: CustomCommandMatch): string {
@@ -4281,13 +4490,16 @@ function customCommandPrompt(c: CustomCommandMatch): string {
 
 // /verbose, /status, /new, /agents, /usage. DM-only and allowlisted senders only
 // (/usage also works in groups); everything else falls through to Claude.
+// /usage answers on every bot, the others on the primary only.
 // Returns true when the message was handled.
 async function handleAgenticCommand(ctx: Context): Promise<boolean> {
   const m = /^\/(verbose|status|new|agents|usage)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
   if (!m) return false;
-  if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return false;
+  if (m[2] && m[2].toLowerCase() !== ctx.me.username.toLowerCase()) return false;
+  const b = botOf(ctx);
+  if (!b.primary && m[1].toLowerCase() !== "usage") return false;
   if (ctx.chat?.type !== "private") return m[1].toLowerCase() === "usage" && (await handleGroupUsage(ctx));
-  if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return false;
+  if (!botAccess(loadAccess(), b).allowFrom.includes(String(ctx.from?.id))) return false;
   const chatId = String(ctx.chat.id);
   const cmd = m[1].toLowerCase();
   const arg = (m[3] ?? "").trim();
@@ -4366,21 +4578,24 @@ async function deliverMessage(
   const from = ctx.from!;
   const chat_id = String(ctx.chat!.id);
   const msgId = ctx.message?.message_id;
+  const b = botOf(ctx);
+  const key = chatKey(b, chat_id);
+  lastBotByChat.set(chat_id, b);
 
   // Counts for the sender's stats and message limits.
   usageStore.recordMessage(String(from.id), Date.now());
   lastDeliveredUser = String(from.id);
 
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
-  void bot.api.sendChatAction(chat_id, "typing").catch(() => {});
-  // DMs only: tool lines can show file paths and commands.
-  if (ctx.chat?.type === "private") startProgressTurn(chat_id);
+  void ctx.api.sendChatAction(chat_id, "typing").catch(() => {});
+  // DMs only: tool lines can show file paths and commands. Primary bot only.
+  if (ctx.chat?.type === "private" && b.primary) startProgressTurn(chat_id);
 
   // Ack reaction — only for single messages (not during a burst).
   // During batching, skip individual ack reactions to avoid spamming.
-  const existingBatch = pendingBatches.get(chat_id);
+  const existingBatch = pendingBatches.get(key);
   if (!existingBatch && access.ackReaction && msgId != null) {
-    void bot.api
+    void ctx.api
       .setMessageReaction(chat_id, msgId, [{ type: "emoji", emoji: access.ackReaction as ReactionTypeEmoji["emoji"] }])
       .catch(() => {});
   }
@@ -4469,7 +4684,7 @@ async function deliverMessage(
 
     // Fallback: check SQLite history for the original message
     if (!replyText && replyToMsg.message_id) {
-      const stored = messageStore.getByMessageId(chat_id, replyToMsg.message_id);
+      const stored = messageStore.getByMessageId(chat_id, replyToMsg.message_id, botKey(b));
       if (stored) {
         replyText = stored;
         process.stderr.write("telegram channel: reply_to text recovered from SQLite history\n");
@@ -4511,20 +4726,21 @@ async function deliverMessage(
     replyContext,
     isGroup,
     chatId: chat_id,
+    via: b,
     command,
   };
 
-  const batch = pendingBatches.get(chat_id);
+  const batch = pendingBatches.get(key);
   if (batch) {
     // Extend existing batch — reset the timer
     clearTimeout(batch.timer);
     batch.messages.push(batchedMsg);
-    batch.timer = setTimeout(() => flushBatch(chat_id), BATCH_WINDOW_MS);
+    batch.timer = setTimeout(() => flushBatch(key), BATCH_WINDOW_MS);
   } else {
     // Start a new batch
-    pendingBatches.set(chat_id, {
+    pendingBatches.set(key, {
       messages: [batchedMsg],
-      timer: setTimeout(() => flushBatch(chat_id), BATCH_WINDOW_MS),
+      timer: setTimeout(() => flushBatch(key), BATCH_WINDOW_MS),
     });
   }
 }
@@ -4533,18 +4749,20 @@ async function deliverMessage(
 // After a watchdog restart, messages that were ACK'd (got 👀) but never
 // replied to are lost. This function checks SQLite for recent inbound DM
 // messages with no subsequent outbound reply and re-delivers them.
-function replayUnanswered(): void {
+// Runs once per bot that this instance polls, over that bot's history.
+function replayUnanswered(b: BotEntry): void {
+  if (!ownsLock(b.lockFile) || !(b.primary || b.username)) return;
   try {
     const cutoff = Math.floor(Date.now() / 1000) - 300; // last 5 minutes
     const access = loadAccess();
-    const allowedChats = access.allowFrom;
+    const allowedChats = botAccess(access, b).allowFrom;
     if (allowedChats.length === 0) return;
 
     for (const chatId of allowedChats) {
       // Blocked messages are in the history too: don't replay them past a limit.
       if (overLimit(access, chatId)) continue;
       // Get last 10 messages from this chat, newest first
-      const recent = messageStore.getHistory(chatId, 10);
+      const recent = messageStore.getHistory(chatId, 10, undefined, botKey(b));
       if (recent.length === 0) continue;
 
       // Find the last outbound (bot) message timestamp
@@ -4562,16 +4780,17 @@ function replayUnanswered(): void {
       const lines = unanswered
         .reverse() // chronological order
         .map((m) => {
-          const command = m.text ? parseCustomCommand(m.text as string) : undefined;
+          const command = m.text ? parseCustomCommand(m.text as string, b.username) : undefined;
           return command ? customCommandPrompt(command) : ((m.text as string) ?? "[media]");
         })
         .join("\n");
 
       const last = unanswered[unanswered.length - 1];
       process.stderr.write(
-        `telegram channel: replaying ${unanswered.length} unanswered message(s) in chat ${chatId}\n`,
+        `telegram channel: replaying ${unanswered.length} unanswered message(s) in chat ${chatId}${botLabel(b)}\n`,
       );
 
+      lastBotByChat.set(chatId, b);
       void mcp.notification({
         method: "notifications/claude/channel",
         params: {
@@ -4584,6 +4803,7 @@ function replayUnanswered(): void {
             user: (last.username as string) ?? String(last.user_id),
             user_id: last.user_id != null ? String(last.user_id) : undefined,
             ts: new Date((last.date as number) * 1000).toISOString(),
+            ...(MULTI_BOT ? { bot: b.username } : {}),
           },
         },
       });
@@ -4595,9 +4815,11 @@ function replayUnanswered(): void {
 
 // Without this, any throw in a message handler stops polling permanently
 // (grammY's default error handler calls bot.stop() and rethrows).
-bot.catch((err) => {
-  process.stderr.write(`telegram channel: handler error (polling continues): ${err.error}\n`);
-});
+for (const b of bots) {
+  b.bot.catch((err) => {
+    process.stderr.write(`telegram channel: handler error (polling continues): ${err.error}\n`);
+  });
+}
 
 // Last-resort safety net: log instead of dying on a stray rejection.
 process.on("unhandledRejection", (err) => {
@@ -4607,9 +4829,9 @@ process.on("uncaughtException", (err) => {
   process.stderr.write(`telegram channel: uncaught exception: ${err}\n`);
 });
 
-function ownsLock(): boolean {
+function ownsLock(lockFile = LOCK_FILE): boolean {
   try {
-    return readFileSync(LOCK_FILE, "utf-8").trim() === String(process.pid);
+    return readFileSync(lockFile, "utf-8").trim() === String(process.pid);
   } catch {
     return false;
   }
@@ -4625,12 +4847,13 @@ const ALLOWED_UPDATES = [
   "message_reaction",
 ] as const;
 
-// Runs each time polling starts and when webhook mode starts. The setup after the log line runs once.
+// Runs each time a bot starts polling and when webhook mode starts. The setup after the log line
+// runs once, for the primary bot.
 let startupDone = false;
-function botStarted(username: string, mode: string): void {
-  botUsername = username;
+function botStarted(b: BotEntry, username: string, mode: string): void {
+  b.username = username;
   process.stderr.write(`telegram channel: ${mode} as @${username}\n`);
-  if (startupDone) return;
+  if (!b.primary || startupDone) return;
   startupDone = true;
   startProgressWatcher();
   setInterval(scanUsage, USAGE_SCAN_MS);
@@ -4645,8 +4868,10 @@ function botStarted(username: string, mode: string): void {
   ].filter(Boolean);
   process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
   if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-  // Check for messages that were lost during the restart gap
-  setTimeout(replayUnanswered, 3000);
+  // Check for messages that were lost during the restart gap (every bot polled here)
+  setTimeout(() => {
+    for (const x of bots) replayUnanswered(x);
+  }, 3000);
 }
 
 // ── Webhook mode ─────────────────────────────────────────────────────
@@ -4791,7 +5016,7 @@ async function startWebhook(): Promise<boolean> {
       return new Response("Internal error", { status: 500 });
     }
   };
-  botStarted(bot.botInfo.username, "webhook mode");
+  botStarted(bots[0], bot.botInfo.username, "webhook mode");
   setInterval(() => void checkWebhook(), 5 * 60_000);
   return true;
 }
@@ -4799,7 +5024,68 @@ async function startWebhook(): Promise<boolean> {
 // Retry polling with backoff on any error. grammY rejects bot.start() on a 409
 // Conflict (any other getUpdates call: a restart overlap, a second poller, even
 // a manual curl) and on errors thrown by middleware. Unhandled, that killed the
-// server and left the daemon deaf until its next restart.
+// server and left the daemon deaf until its next restart. One loop per bot.
+function startPolling(b: BotEntry): void {
+  void (async () => {
+    // Webhook mode is for the primary bot only. Extra bots always poll.
+    if (b.primary && WEBHOOK_MODE && (await startWebhook())) return;
+    // bot.start() deletes the webhook before its first getUpdates, so one left by webhook mode does not block polling.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await b.bot.start({
+          allowed_updates: ALLOWED_UPDATES,
+          onStart: (info) => {
+            attempt = 0;
+            botStarted(b, info.username, "polling");
+          },
+        });
+        return; // bot.stop() was called
+      } catch (err) {
+        // bot.stop() during setup rejects with "Aborted delay": expected.
+        if (err instanceof Error && err.message === "Aborted delay") return;
+        if (!ownsLock(b.lockFile)) {
+          process.stderr.write(
+            `telegram channel: polling${botLabel(b)} stopped and another instance owns the lock; not retrying\n`,
+          );
+          return;
+        }
+        const is409 = err instanceof GrammyError && err.error_code === 409;
+        if (is409 && attempt >= 8 && !DAEMON_MODE) {
+          // Someone else keeps polling. Stay alive for the outbound tools.
+          process.stderr.write(
+            `telegram channel: 409 Conflict${botLabel(b)} after ${attempt} attempts; switching to MCP-only mode\n`,
+          );
+          releaseLock(b.lockFile);
+          if (b.primary) isSecondary = true;
+          return;
+        }
+        const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
+        const detail = is409 ? "409 Conflict (another getUpdates caller)" : String(err);
+        process.stderr.write(
+          `telegram channel: polling${botLabel(b)} failed: ${detail}, retrying in ${delay / 1000}s\n`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  })();
+}
+
+// Secondary: fetch bot info for username without starting polling
+function fetchBotInfo(b: BotEntry): void {
+  b.bot.api
+    .getMe()
+    .then((info) => {
+      b.username = info.username;
+      process.stderr.write(`telegram channel: MCP-only mode — tools ready for @${info.username}\n`);
+    })
+    .catch(() => {
+      process.stderr.write(`telegram channel: MCP-only mode — could not fetch bot info${botLabel(b)}\n`);
+    });
+}
+
+// Extra bots run the handlers registered on the primary; ctx carries their own api and username.
+for (const b of bots.slice(1)) b.bot.use(bot.middleware());
+
 if (!isSecondary) {
   miniapp?.startMiniApp({
     token: TOKEN,
@@ -4807,47 +5093,11 @@ if (!isSecondary) {
     log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
     webhook: WEBHOOK_MODE ? (req) => webhookHandler?.(req) ?? new Response("Not ready", { status: 503 }) : undefined,
   });
-  void (async () => {
-    if (WEBHOOK_MODE && (await startWebhook())) return;
-    // bot.start() deletes the webhook before its first getUpdates, so one left by webhook mode does not block polling.
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await bot.start({
-          allowed_updates: ALLOWED_UPDATES,
-          onStart: (info) => {
-            attempt = 0;
-            botStarted(info.username, "polling");
-          },
-        });
-        return; // bot.stop() was called
-      } catch (err) {
-        // bot.stop() during setup rejects with "Aborted delay": expected.
-        if (err instanceof Error && err.message === "Aborted delay") return;
-        if (!ownsLock()) {
-          process.stderr.write("telegram channel: polling stopped and another instance owns the lock; not retrying\n");
-          return;
-        }
-        const is409 = err instanceof GrammyError && err.error_code === 409;
-        if (is409 && attempt >= 8 && !DAEMON_MODE) {
-          // Someone else keeps polling. Stay alive for the outbound tools.
-          process.stderr.write(`telegram channel: 409 Conflict after ${attempt} attempts; switching to MCP-only mode\n`);
-          releaseLock();
-          isSecondary = true;
-          return;
-        }
-        const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
-        const detail = is409 ? "409 Conflict (another getUpdates caller)" : String(err);
-        process.stderr.write(`telegram channel: polling failed: ${detail}, retrying in ${delay / 1000}s\n`);
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
-  })();
+  startPolling(bots[0]);
 } else {
-  // Secondary: fetch bot info for username without starting polling
-  bot.api.getMe().then((info) => {
-    botUsername = info.username;
-    process.stderr.write(`telegram channel: MCP-only mode — tools ready for @${info.username}\n`);
-  }).catch(() => {
-    process.stderr.write(`telegram channel: MCP-only mode — could not fetch bot info\n`);
-  });
+  fetchBotInfo(bots[0]);
+}
+for (const b of bots.slice(1)) {
+  if (acquireLock(b.lockFile, botLabel(b))) startPolling(b);
+  else fetchBotInfo(b);
 }

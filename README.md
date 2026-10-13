@@ -728,6 +728,7 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] OpenAI Whisper API with local fallback
 - [x] Agentic Mode: live progress, typing indicator, in-place answers
 - [x] Remote permission approval (inline buttons, text replies, auto-approve list)
+- [x] Agents Board Mini App (`/agents`): live sessions, subagents, context use and tokens per hour
 
 ### Planned
 - [ ] **Scheduled messages** -- Send messages at a specific time

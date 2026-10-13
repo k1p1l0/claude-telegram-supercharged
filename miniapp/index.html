@@ -165,6 +165,7 @@ html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--
 .tone-done .dot { background: var(--done); }
 .tone-idle { color: var(--hint); background: var(--fill); }
 .tone-idle .dot { background: var(--hint); }
+.dot.sq { border-radius: 1.5px; }
 .tone-bad { color: var(--bad-fg); background: rgb(239 68 68 / .13); }
 .tone-bad .dot { background: var(--bad); }
 .tone-wait { color: var(--hint); background: var(--fill); }
@@ -496,6 +497,11 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
 .send.busy { opacity: 1; }
 .send:focus-visible { border-radius: 19px; }
 .cmp-foot { display: flex; justify-content: space-between; gap: 10px; margin: 8px 4px 0; font-size: 12px; line-height: 1.4; color: var(--hint); }
+.cmp-msg { display: grid; min-width: 0; }
+.cmp-msg > span { grid-area: 1 / 1; }
+.cmp-wait { visibility: hidden; font-weight: 500; color: var(--link); }
+.cmp-msg.busy #d-send-hint { visibility: hidden; }
+.cmp-msg.busy .cmp-wait { visibility: visible; }
 .cmp-count { flex: none; }
 .cmp-count.over { color: var(--bad-fg); font-weight: 600; }
 
@@ -511,7 +517,12 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
 .ctl[aria-disabled="true"]:not(.busy) .ctl-ico, .ctl[aria-disabled="true"]:not(.busy) .ctl-txt { opacity: .45; }
 .ctl-ico { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 9px; background: var(--fill); color: var(--text); }
 .ctl-ico .ico { width: 18px; height: 18px; }
-.ctl-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+/* The description and "Working…" share one cell, so a busy row keeps its height */
+.ctl-txt { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 1px; }
+.ctl-desc, .ctl-wait { grid-area: 2 / 1; }
+.ctl-wait { visibility: hidden; font-size: 12.5px; line-height: 1.35; font-weight: 500; color: var(--link); }
+.ctl.busy .ctl-desc { visibility: hidden; }
+.ctl.busy .ctl-wait { visibility: visible; }
 .ctl-name { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
 .ctl-desc { font-size: 12.5px; line-height: 1.35; color: var(--hint); }
 .ctl-end { flex: none; width: 16px; display: grid; place-items: center; color: var(--hint); }
@@ -596,7 +607,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
 .done-acts .btn-primary { margin: 0; }
 .logs { margin: 0; padding: 12px 13px; min-height: 180px; border-radius: 12px; background: var(--fill); color: var(--text); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .logs:focus-visible { outline-offset: 2px; border-radius: 12px; }
-.logs-wait { display: grid; place-items: center; min-height: 180px; color: var(--hint); }
+.logs-wait { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 180px; color: var(--hint); font: 500 13px/1.4 var(--font); }
 
 .cfm {
   position: fixed; z-index: 61; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -1171,11 +1182,17 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
 
   /* ================= Session cards ================= */
   function statusPill(st) {
-    const map = { busy: ['ok', 'Busy', 1], running: ['ok', 'Running', 1], idle: ['idle', 'Idle', 0], done: ['done', 'Done', 0], ended: ['idle', 'Ended', 0] };
+    const map = { busy: ['ok', 'Busy', 1], running: ['ok', 'Running', 1], idle: ['idle', 'Idle', 0], done: ['done', 'Done', 0], ended: ['idle', 'Ended', 0], stopped: ['idle', 'Stopped', 0] };
     const [tone, label, pulse] = map[st] || ['idle', st || 'Unknown', 0];
-    return `<span class="pill tone-${tone}"><span class="dot${pulse ? ' pulse' : ''}"></span>${esc(label)}</span>`;
+    return `<span class="pill tone-${tone}"><span class="dot${pulse ? ' pulse' : ''}${st === 'stopped' ? ' sq' : ''}"></span>${esc(label)}</span>`;
   }
+  // A stopped background session is still listed (no pid): it can be read or removed, not stopped again.
+  const isStopped = s => !!s && s.status !== 'busy' && (s.status === 'stopped' ||
+    (s.kind === 'background' && Array.isArray(s.actions) && s.actions.includes('rm') && !s.actions.includes('stop')));
+  const shownStatus = s => (isStopped(s) ? 'stopped' : s.status);
+  const stoppedLine = s => `<span class="idle-line">${svg('stop')}<span class="tgt">Stopped · last active <span data-ago="${n0(s.lastActivity)}" data-f="ago"></span></span></span>`;
   function toolLine(s) {
+    if (isStopped(s)) return stoppedLine(s);
     if (s.status === 'busy') {
       if (s.currentTool) {
         const ct = s.currentTool;
@@ -1197,7 +1214,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (model) meta.push(`<span class="m">${esc(model)}</span>`);
     meta.push(`<span class="m" style="flex:none">up <span data-up="${n0(s.startedAt)}"></span></span>`);
     meta.push(`<span class="m" style="flex:none">${compact(sumU(s.tokens))} tokens</span>`);
-    return `<span class="s-r1"><span class="s-name">${esc(s.name || 'Session')}</span>${statusPill(s.status)}</span>
+    return `<span class="s-r1"><span class="s-name">${esc(s.name || 'Session')}</span>${statusPill(shownStatus(s))}</span>
       <span class="s-proj"><span class="p">${esc(s.project || s.cwd || '')}</span>${kind}</span>
       <span class="s-tool">${toolLine(s)}</span>
       <span class="ctx"><span class="ctx-bar"><span class="ctx-fill lvl-${lvl}" style="width:${(pct || 0).toFixed(1)}%"></span></span><span class="ctx-txt">${ctxTxt}</span></span>
@@ -1461,7 +1478,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     const now = serverNow();
 
     setText($('#d-title'), s.name || 'Session');
-    setHTML($('#d-status'), statusPill(ended ? 'ended' : s.status));
+    setHTML($('#d-status'), statusPill(ended ? 'ended' : shownStatus(s)));
     setHTML($('#d-ended'), ended ? `<div class="d-ended">${svg('flag')}This session has ended. Showing the last data seen.</div>` : '');
     setHTML($('#d-proj'), `<span>${esc(s.project || '')}</span>${s.kind ? `<span class="tag">${esc(s.kind)}</span>` : ''}`);
     setText($('#d-cwd'), s.cwd || '');
@@ -1478,6 +1495,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       nowHTML = `${chip(ct.name)}<span class="tgt">${esc(ct.target || '')}</span><span class="ago" data-ago="${n0(ct.t)}"></span>`;
     } else if (!ended && s.status === 'busy') {
       nowHTML = `<span class="thinking">Thinking…</span><span class="ago" data-ago="${n0(s.lastActivity)}"></span>`;
+    } else if (!ended && isStopped(s)) {
+      nowHTML = stoppedLine(s);
     } else {
       const lt = s.lastTool;
       nowHTML = `<span class="idle-line" style="flex:1">${svg('clock')}<span style="flex:none" data-ago="${n0(s.lastActivity)}" data-f="idle"></span>${lt ? `<span class="tgt">· last</span>` : ''}</span>${lt ? chip(lt.name) : ''}`;
@@ -1622,6 +1641,13 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     try { if (WA && WA.HapticFeedback && ver('6.1')) WA.HapticFeedback.notificationOccurred(type); } catch (_) {}
   }
   function kick() { clearTimeout(timer); poll(); }
+  // "Working…", then the seconds so far once it takes a while (peer actions can take 25 s).
+  const waitText = since => { const sec = Math.floor((Date.now() - n0(since)) / 1000); return sec >= 3 ? `Working… ${sec} s` : 'Working…'; };
+  function startWait(el, since) {
+    if (!el) return;
+    if (!since) { if (el.dataset.since) { delete el.dataset.since; setText(el, 'Working…'); } return; }
+    if (el.dataset.since !== String(since)) { el.dataset.since = since; setText(el, waitText(since)); }
+  }
 
   // Every control request: tma auth and the selected machine, JSON for POST.
   async function api(path, o) {
@@ -1630,7 +1656,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     q.set('machine', S.machine);
     const ctrl = new AbortController();
     let timedOut = false;
-    const killer = setTimeout(() => { timedOut = true; ctrl.abort(); }, o.timeout || 30000);
+    // Control on another machine can take 25 s (its CLI call has 20 s), so wait a little longer.
+    const killer = setTimeout(() => { timedOut = true; ctrl.abort(); }, o.timeout || 35000);
     const outer = o.signal, onAbort = () => ctrl.abort();
     if (outer) outer.addEventListener('abort', onAbort);
     const headers = { Authorization: 'tma ' + ((WA && WA.initData) || '') };
@@ -1806,7 +1833,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     const b = $('#nt-go'); if (!b) return;
     b.setAttribute('aria-disabled', String(C.newBusy));
     b.classList.toggle('busy', C.newBusy);
-    setHTML(b, C.newBusy ? '<span class="spin" aria-hidden="true"></span>Starting…' : 'Start task');
+    setHTML(b, C.newBusy ? `<span class="spin" aria-hidden="true"></span><span data-since="${C.newAt}">Working…</span>` : 'Start task');
     const ta = $('#nt-prompt'); if (ta) ta.readOnly = C.newBusy;
   }
   function showRes(el, ok, text) {
@@ -1834,7 +1861,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     const mLabel = (MODES.find(m => m.v === mode) || MODES[0]).label;
     if (!await confirmAction(`Start a background task in ${clipName(proj ? proj.name : cwd)} (${mLabel})?`, 'Start')) return;
     if (!C.sheet || C.sheet.kind !== 'new' || C.newBusy) return;
-    C.newBusy = true; syncNewBtn();
+    C.newBusy = true; C.newAt = Date.now(); syncNewBtn();
+    announce('Working…');
     const gen = S.gen;
     const r = await api('api/control', { body: { action: 'new', cwd, prompt, mode } });
     C.newBusy = false;
@@ -1873,7 +1901,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   async function loadLogs() {
     const L = C.logs;
     if (!L || L.busy) return;
-    L.busy = true; renderLogs(false);
+    L.busy = true; L.at = Date.now(); renderLogs(false);
     const gen = S.gen;
     const r = await api('api/control', { body: { action: 'logs', id: L.id } });
     L.busy = false;
@@ -1890,7 +1918,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (rb) rb.setAttribute('aria-disabled', String(L.busy));
     let html = '';
     if (L.output != null) html = `<pre class="logs" tabindex="0" aria-label="Log output">${esc(L.output.replace(/\s+$/, '') || 'No output yet.')}</pre>`;
-    else if (L.busy) html = `<div class="logs logs-wait"><span class="spin" aria-hidden="true"></span><span class="sr-only">Loading logs</span></div>`;
+    else if (L.busy) html = `<div class="logs logs-wait"><span class="spin" aria-hidden="true"></span><span data-since="${L.at}">Working…</span></div>`;
     if (L.err) html += `<p class="res on err">${svg('alert')}<span>${esc(L.err)}</span></p>`;
     setHTML(box, html);
     if (scroll) { const b = $('#sheet-body'); b.scrollTop = b.scrollHeight; }
@@ -1903,7 +1931,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       const desc = k === 'interrupt' ? 'ctl-d-interrupt ctl-n-interrupt' : 'ctl-d-' + k;
       return `<button type="button" class="ctl" data-act="${k}" aria-label="${a.name}" aria-describedby="${desc}"${k === 'logs' ? ' aria-haspopup="dialog"' : ''} hidden>
         <span class="ctl-ico">${svg(a.icon)}</span>
-        <span class="ctl-txt"><span class="ctl-name">${a.name}</span><span class="ctl-desc" id="ctl-d-${k}">${a.desc}</span></span>
+        <span class="ctl-txt"><span class="ctl-name">${a.name}</span><span class="ctl-desc" id="ctl-d-${k}">${a.desc}</span><span class="ctl-wait" aria-hidden="true">Working…</span></span>
         <span class="ctl-end">${k === 'logs' ? svg('chevR') : ''}<span class="spin" aria-hidden="true"></span></span>
       </button>`;
     };
@@ -1917,7 +1945,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
             <button type="submit" class="send" id="d-send-go" aria-disabled="true">Send</button>
           </form>
         </div>
-        <p class="cmp-foot" id="d-send-foot" hidden><span id="d-send-hint">Continues the session in the background. If it is still running, a copy starts.</span><span class="cmp-count" id="d-send-count"></span></p>
+        <p class="cmp-foot" id="d-send-foot" hidden><span class="cmp-msg" id="d-send-msg"><span id="d-send-hint">Continues the session in the background. If it is still running, a copy starts.</span><span class="cmp-wait" id="d-send-wait" aria-hidden="true">Working…</span></span><span class="cmp-count" id="d-send-count"></span></p>
         <p class="res" id="d-send-res" role="status"></p>
       </section>
       <section class="block" id="d-ctl" aria-labelledby="d-ctl-title" hidden>
@@ -1953,6 +1981,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       if (on) { if (ACTS[k].danger) danger++; else safe++; }
       b.classList.toggle('busy', busy === k);
       b.setAttribute('aria-disabled', String(!!busy));
+      startWait(b.querySelector('.ctl-wait'), busy === k ? C.busy.at : 0);
     });
     // Outside the button, so the resume command can be selected and copied.
     const note = $('#ctl-n-interrupt'), ending = acts.includes('interrupt');
@@ -1977,6 +2006,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     b.classList.toggle('busy', sending);
     setHTML(b, sending ? '<span class="spin" aria-hidden="true"></span><span class="sr-only">Sending</span>' : 'Send');
     ta.readOnly = sending;
+    $('#d-send-msg').classList.toggle('busy', sending);
+    startWait($('#d-send-wait'), sending ? C.sendAt : 0);
     const cnt = $('#d-send-count');
     setText(cnt, len > MAX_TEXT - 1000 ? `${fmtInt(len)} / ${fmtInt(MAX_TEXT)}` : '');
     cnt.classList.toggle('over', len >= MAX_TEXT);
@@ -2072,7 +2103,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (!text) { ta.focus(); return; }
     if (!await confirmAction(`Send this message to "${clipName(s.name)}"?`, 'Send')) return;
     if (C.sending === id) return;
-    C.sending = id; syncSend();
+    C.sending = id; C.sendAt = Date.now(); syncSend();
+    announce('Working…');
     const gen = S.gen;
     const r = await api('api/control', { body: { action: 'send', id, text } });
     if (C.sending === id) C.sending = null;
@@ -2093,10 +2125,16 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (k === 'logs') { openLogs(s, trigger); return; }
     if (!await confirmAction(def.ask(clipName(s.name)), def.name, !!def.danger)) return;
     if (C.busy && C.busy.id === id) return;
-    C.busy = { id, act: k };
+    C.busy = { id, act: k, at: Date.now() };
     if (S.view === 'detail') renderDetail();
+    announce('Working…');
     const gen = S.gen;
-    const r = await api('api/control', { body: { action: k, id } });
+    let r = await api('api/control', { body: { action: k, id } });
+    // Right after a stop the CLI can list the session as running for about a second: retry once.
+    if (k === 'rm' && r.status === 409 && gen === S.gen) {
+      await new Promise(done => setTimeout(done, 1500));
+      if (gen === S.gen) r = await api('api/control', { body: { action: k, id } });
+    }
     if (C.busy && C.busy.id === id) C.busy = null;
     if (gen !== S.gen) return;
     notify(r.ok ? 'success' : 'error');
@@ -2112,6 +2150,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     const now = serverNow();
     $$('[data-ago]').forEach(el => setText(el, fmtAgo(now - n0(+el.dataset.ago), el.dataset.f || 'short')));
     $$('[data-up]').forEach(el => setText(el, uptime(now - n0(+el.dataset.up))));
+    $$('[data-since]').forEach(el => setText(el, waitText(+el.dataset.since)));
     const age = S.snap ? performance.now() - S.at : 0;
     let upd = 'connecting…';
     if (S.mode === 'loading') upd = 'starting up…';

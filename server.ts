@@ -172,6 +172,8 @@ let isSecondary = false; // true when another instance owns the bot polling
 const DAEMON_MODE = process.env.TELEGRAM_DAEMON_MODE === "1";
 
 function acquireLock(): void {
+  // A fresh install has no data dir yet, and writing the lock would throw.
+  mkdirSync(DATA_DIR, { recursive: true });
   if (existsSync(LOCK_FILE)) {
     const existingPid = Number.parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
     if (!Number.isNaN(existingPid) && existingPid !== process.pid) {
@@ -954,6 +956,7 @@ function readAccessFile(): Access {
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
       autoTranscribe: parsed.autoTranscribe,
+      autoApproveTools: parsed.autoApproveTools,
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return defaultAccess();

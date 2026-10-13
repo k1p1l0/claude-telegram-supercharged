@@ -26,7 +26,7 @@
 <hr />
 </div>
 
-<video src="docs/how-it-works.mp4" poster="docs/how-it-works-poster.jpg" controls muted playsinline width="100%"></video>
+<video src="https://github.com/k1p1l0/claude-telegram-supercharged/raw/readme-how-it-works-video/docs/how-it-works.mp4" controls width="100%"></video>
 
 ## Claude Telegram Supercharged
 

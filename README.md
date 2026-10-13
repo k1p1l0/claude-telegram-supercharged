@@ -395,6 +395,7 @@ The built-in commands answer allowlisted users in DMs. `/verbose` is stored per 
 - **Subagents:** running and recently finished, with their current tool and tokens.
 - **Last 24 hours:** tokens per hour (input, output, cache read, cache write), tool calls and cache hit rate.
 - **Recent tool calls** across all sessions.
+- **Other machines:** switch to any other computer that runs the plugin. See [Several machines](#agents-board-mini-app) below.
 
 <img src="./docs/agents-board.png" alt="Agents Board: overview, live sessions with subagents, session detail" width="100%" />
 
@@ -422,6 +423,18 @@ For a fixed address, use your own HTTPS setup:
 | `TELEGRAM_MINIAPP_PORT` | `8790` | Local port of the board. |
 | `TELEGRAM_MINIAPP_NAME` | computer name | Machine name in the board header. |
 | `TELEGRAM_MINIAPP` | on | `off` turns the board off. |
+| `TELEGRAM_MINIAPP_PEERS` | not set | Other machines the board can switch to, as `name=url` pairs separated by commas. |
+| `TELEGRAM_MINIAPP_PEER_TOKEN` | not set | Shared secret (16+ characters) between the machines. Without it, `TELEGRAM_MINIAPP_PEERS` is ignored. |
+| `TELEGRAM_MINIAPP_HOST` | `127.0.0.1` | Address the board server binds. Set it on a machine that other boards read from. |
+
+**Several machines.** If you run Claude Code on more than one computer, one board can show all of them. Tap the machine name in the header to switch. Every machine runs this plugin with its own bot.
+
+1. Pick a long random secret, for example with `openssl rand -hex 24`, and put the same `TELEGRAM_MINIAPP_PEER_TOKEN` in the `.env` of every machine.
+2. On each other machine, make the board reachable from the main one. With Tailscale, set `TELEGRAM_MINIAPP_HOST` to that machine's tailnet address, or to `::` for all addresses.
+3. On the machine whose bot you use, list the others: `TELEGRAM_MINIAPP_PEERS=studio=http://studio:8790,laptop=http://laptop:8790`.
+4. Restart the daemons and open `/agents`.
+
+The main board fetches the other machine's data when you select it. The request carries the shared secret, and the board only fetches addresses from `TELEGRAM_MINIAPP_PEERS`. Plain HTTP is fine inside a tailnet, because Tailscale encrypts the traffic.
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
 

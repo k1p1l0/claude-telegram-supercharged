@@ -5,6 +5,7 @@
  * server binds to 127.0.0.1 only; put it behind HTTPS (Tailscale Serve or
  * Funnel, Cloudflare Tunnel) and set TELEGRAM_MINIAPP_URL to that address.
  * With TELEGRAM_MINIAPP_URL=auto the bot runs a Cloudflare quick tunnel itself.
+ * With TELEGRAM_MINIAPP_PEERS the board can also show other machines that run this plugin.
  * Every API call must carry Telegram initData signed for this bot by a user on
  * the allowlist, so the public URL shows nothing to anyone else.
  * With TELEGRAM_WEBHOOK=on the same server also takes Telegram's updates at
@@ -227,6 +228,28 @@ export function verifyInitData(raw: string, token: string, maxAgeSec = DAY / 100
   }
 }
 
+// Other machines the board can switch to: TELEGRAM_MINIAPP_PEERS="name=url,name2=url2". Each one runs
+// this plugin too and shares TELEGRAM_MINIAPP_PEER_TOKEN, which guards its /api/peer/state.
+function peerList(): Map<string, string> {
+  const peers = new Map<string, string>();
+  for (const part of (process.env.TELEGRAM_MINIAPP_PEERS ?? "").split(",")) {
+    const eq = part.indexOf("=");
+    const name = part.slice(0, eq).trim();
+    const url = part
+      .slice(eq + 1)
+      .trim()
+      .replace(/\/+$/, "");
+    if (eq > 0 && name !== "local" && /^https?:\/\/\S+$/.test(url)) peers.set(name, url);
+  }
+  return peers;
+}
+
+function sameSecret(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
 const HTML_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
   "Cache-Control": "no-store",
@@ -246,9 +269,19 @@ export function startMiniApp(opts: {
   const board = process.env.TELEGRAM_MINIAPP !== "off";
   if (!board && !opts.webhook) return;
   const port = Number(process.env.TELEGRAM_MINIAPP_PORT) || 8790;
+  // 127.0.0.1 by default. A machine that other boards read from binds its tailnet address or "::".
+  const host = process.env.TELEGRAM_MINIAPP_HOST || "127.0.0.1";
   const htmlPath = join(import.meta.dir, "miniapp", "index.html");
   let worker: Worker | null = null;
   let snapshot: Snapshot | null = null;
+
+  const peerToken = (process.env.TELEGRAM_MINIAPP_PEER_TOKEN ?? "").trim();
+  const peerSecret = peerToken.length >= 16 ? peerToken : "";
+  if (peerToken && !peerSecret) opts.log("mini app: TELEGRAM_MINIAPP_PEER_TOKEN needs at least 16 characters");
+  if (process.env.TELEGRAM_MINIAPP_PEERS && !peerSecret)
+    opts.log("mini app: TELEGRAM_MINIAPP_PEERS is ignored without TELEGRAM_MINIAPP_PEER_TOKEN");
+  const peers = peerSecret ? peerList() : new Map<string, string>();
+  const machines = [{ id: "local", name: machineName() }, ...[...peers.keys()].map((name) => ({ id: name, name }))];
 
   const touch = () => {
     if (!worker) {
@@ -271,8 +304,9 @@ export function startMiniApp(opts: {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
 
-  const fetch = (req: Request): Response | Promise<Response> => {
-    const { pathname } = new URL(req.url);
+  const fetch = async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+    const { pathname } = url;
     if (opts.webhook && pathname === "/telegram/webhook") {
       return req.method === "POST" ? opts.webhook(req) : new Response("Method not allowed", { status: 405 });
     }
@@ -289,6 +323,29 @@ export function startMiniApp(opts: {
       const m = /^tma (.+)$/.exec(req.headers.get("authorization") ?? "");
       const userId = m ? verifyInitData(m[1], opts.token) : null;
       if (!userId || !opts.isAllowed(userId)) return json({ error: "unauthorized" }, 401);
+      const machine = url.searchParams.get("machine") || "local";
+      if (machine !== "local") {
+        // Only machines from TELEGRAM_MINIAPP_PEERS, so the board never fetches an address from the request.
+        const base = peers.get(machine);
+        if (!base) return json({ error: "unknown machine" }, 404);
+        try {
+          const res = await globalThis.fetch(`${base}/api/peer/state`, {
+            headers: { Authorization: `Bearer ${peerSecret}` },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return json({ ...(await res.json()), machine, machines });
+        } catch {
+          return json({ error: "unreachable", machine, machines }, 502);
+        }
+      }
+      touch();
+      return json({ ...(snapshot ?? { loading: true }), machine, machines });
+    }
+    if (pathname === "/api/peer/state") {
+      // Another machine's board reads this machine's snapshot.
+      if (!peerSecret || !sameSecret(req.headers.get("authorization") ?? "", `Bearer ${peerSecret}`))
+        return json({ error: "unauthorized" }, 401);
       touch();
       return json(snapshot ?? { loading: true });
     }
@@ -299,15 +356,16 @@ export function startMiniApp(opts: {
   // that dropped to MCP-only mode can hold it until it exits, so keep trying, less often after 30 s.
   const listen = (attempt: number) => {
     try {
-      Bun.serve({ hostname: "127.0.0.1", port, fetch });
+      Bun.serve({ hostname: host, port, fetch });
       if (!board) {
-        opts.log(`webhook: listening on 127.0.0.1:${port} (agents board off)`);
+        opts.log(`webhook: listening on ${host}:${port} (agents board off)`);
         return;
       }
-      opts.log(`mini app: listening on 127.0.0.1:${port}${miniAppUrl() ? `, public URL ${miniAppUrl()}` : ""}`);
+      opts.log(`mini app: listening on ${host}:${port}${miniAppUrl() ? `, public URL ${miniAppUrl()}` : ""}`);
+      if (peers.size) opts.log(`mini app: other machines: ${[...peers.keys()].join(", ")}`);
       if (isAuto()) startQuickTunnel(port, opts.log);
     } catch (err) {
-      if (attempt === 20) opts.log(`mini app: cannot listen on 127.0.0.1:${port}: ${err}. Trying again every 15 s.`);
+      if (attempt === 20) opts.log(`mini app: cannot listen on ${host}:${port}: ${err}. Trying again every 15 s.`);
       setTimeout(() => listen(attempt + 1), attempt < 20 ? 1500 : 15_000);
     }
   };

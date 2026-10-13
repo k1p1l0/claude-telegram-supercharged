@@ -379,8 +379,9 @@ Bot: [the answer replaces the Working message]
 | `/status` | Working or idle, elapsed time, tool count, uptime, router model |
 | `/new` | Fresh Claude session through the supervisor. Memory and history are kept. |
 | `/agents` | Opens the [Agents Board](#agents-board-mini-app) Mini App |
+| `/<your command>` | Runs a Claude Code skill you mapped in `commands.json`. See [Custom commands](#custom-commands). |
 
-Commands answer allowlisted users in DMs. `/verbose` is stored per chat.
+The built-in commands answer allowlisted users in DMs. `/verbose` is stored per chat.
 
 **How it works.** The supervisor passes `scripts/telegram-progress-hook.ts` to Claude as a `PreToolUse`, `PostToolUse` and `Stop` hook via `--settings`, so it never runs in your interactive sessions. The hook appends each event to `~/.claude/channels/telegram/data/progress.jsonl`, and the server tails that file and edits the Working message (at most one edit per 1.5 seconds). Claude's notes and the thinking/writing phase come from the session transcript. The server's instructions ask Claude to write one short sentence before each tool call.
 
@@ -423,6 +424,37 @@ For a fixed address, use your own HTTPS setup:
 | `TELEGRAM_MINIAPP` | on | `off` turns the board off. |
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
+
+### Custom commands
+
+You can add your own bot commands and map each one to a Claude Code skill. List them in `~/.claude/channels/telegram/commands.json`:
+
+```json
+{
+  "commands": {
+    "standup": { "skill": "daily-standup", "description": "Daily standup summary" },
+    "report": { "skill": "weekly-report" }
+  }
+}
+```
+
+Send `/standup` and Claude runs the `daily-standup` skill. Any text after the command goes to the skill as arguments, for example `/standup only the backend team`.
+
+- The commands appear in the bot's menu in DMs, after the built-in ones.
+- You don't need to restart after editing the file. The server checks it on every message and every 30 seconds.
+- A custom command is handled like any other message: the same allowlist, reactions, batching and Agentic Mode. Message history keeps what you typed.
+- In groups, send `/standup@your_bot`. If the group requires a mention, a bare `/standup` is held like any other unmentioned message, and reaches Claude only if a mention follows within 5 seconds.
+- Forwarded messages never run a command, and unknown commands still reach Claude as plain text.
+
+| Field | What it does |
+| --- | --- |
+| name (the key) | 1 to 32 characters: `a-z`, `0-9` and `_`. |
+| `skill` | Required. The skill name as Claude Code knows it, for example `daily-standup` or `plugin:skill`. |
+| `description` | Optional menu text, up to 256 characters. The default is `Run the <skill> skill`. |
+
+The server skips an entry with a bad name, a built-in name (`status`, `verbose`, `new`, `agents`) or no skill, and logs it to stderr. Telegram allows 100 commands, which leaves room for 96 of your own.
+
+**How it works.** In place of `/standup`, Claude receives `Run the "daily-standup" skill with the Skill tool.` and an `Arguments:` line when there are arguments. The notification also carries `command` and `skill` attributes. If the daemon restarts before Claude answers, the replayed message gets the same rewrite.
 
 ### How context reset works
 
@@ -729,13 +761,13 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Agentic Mode: live progress, typing indicator, in-place answers
 - [x] Remote permission approval (inline buttons, text replies, auto-approve list)
 - [x] Agents Board Mini App (`/agents`): live sessions, subagents, context use and tokens per hour
+- [x] Custom commands (`commands.json`): bot commands that run Claude Code skills
 
 ### Planned
 - [ ] **Scheduled messages** -- Send messages at a specific time
 - [ ] **Multi-bot support** -- Run multiple bots from one server instance
 - [ ] **Rate limiting & usage stats** -- Track token usage and set limits per user
 - [ ] **Webhook mode** -- Alternative to polling for production deployments
-- [ ] **Custom commands** -- Define bot commands that map to Claude Code skills
 
 ## Contributing
 

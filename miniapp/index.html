@@ -520,6 +520,8 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
 .ctl.busy .ctl-end .spin { display: block; }
 .ctl-list.danger .ctl-name, .ctl-list.danger .ctl-ico { color: var(--danger); }
 .ctl-list.danger .ctl-ico { background: rgb(239 68 68 / .12); }
+.ctl-note { margin: -8px 0 0; padding: 0 14px 12px 58px; font-size: 12.5px; line-height: 1.35; color: var(--hint); overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.ctl-note code { font-size: .92em; -webkit-user-select: all; user-select: all; }
 
 /* Sheets and the fallback confirm */
 .scrim { position: fixed; inset: 0; z-index: 50; background: rgba(8, 10, 16, .42); -webkit-tap-highlight-color: transparent; }
@@ -737,7 +739,6 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/>',
     logs: '<path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8Z"/><path d="M14 3.5V8h4.5"/><path d="M9 12.5h6M9 16h4"/>',
     trash: '<path d="M4.5 7h15"/><path d="M9.5 7V5.25c0-.7.55-1.25 1.25-1.25h2.5c.7 0 1.25.55 1.25 1.25V7"/><path d="m6.5 7 .8 11.2a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8L17.5 7"/><path d="M10.25 11v5.5M13.75 11v5.5"/>',
-    octagon: '<path d="M8.3 3.5h7.4l5.3 5.3v7.4l-5.3 5.3H8.3L3 16.2V8.8Z"/><path d="M8.5 12h7"/>',
     power: '<path d="M12 3.5v8"/><path d="M6.7 6.8a7.5 7.5 0 1 0 10.6 0"/>',
     x: '<path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>',
     alert: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.75v5M12 16.25h.01"/>',
@@ -1596,8 +1597,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     'bot-new': { name: 'New session', desc: 'Starts a fresh conversation, same as /new', icon: 'plusCircle', ask: () => 'Start a new bot session? This is the same as /new.' },
     'bot-restart': { name: 'Restart', desc: 'Restarts the bot and keeps the conversation', icon: 'refresh', ask: () => 'Restart the bot? The conversation is kept.' },
     rm: { name: 'Remove', desc: 'Deletes this background session', icon: 'trash', danger: true, ask: n => `Remove "${n}"? This deletes the background session.` },
-    interrupt: { name: 'Interrupt', desc: 'Sends Ctrl+C (SIGINT) to the process', icon: 'octagon', danger: true, ask: n => `Interrupt "${n}"? This sends Ctrl+C (SIGINT) to the process.` },
-    terminate: { name: 'Terminate', desc: 'Ends the process (SIGTERM)', icon: 'power', danger: true, ask: n => `Terminate "${n}"? This ends the process (SIGTERM).` },
+    // SIGINT and SIGTERM both make Claude Code quit, so one button: it posts "interrupt".
+    interrupt: { name: 'End session', desc: 'Sends Ctrl+C. Claude Code quits and a reply in progress is lost.', icon: 'power', danger: true, ask: n => `End "${n}"? Claude Code quits and a reply in progress is lost. The conversation is kept.` },
   };
   const MODES = [
     { v: 'plan', label: 'Plan', hint: 'Reads the code and writes a plan. Makes no changes.' },
@@ -1899,7 +1900,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   function controlsShell() {
     const row = k => {
       const a = ACTS[k];
-      return `<button type="button" class="ctl" data-act="${k}" aria-label="${a.name}" aria-describedby="ctl-d-${k}"${k === 'logs' ? ' aria-haspopup="dialog"' : ''} hidden>
+      const desc = k === 'interrupt' ? 'ctl-d-interrupt ctl-n-interrupt' : 'ctl-d-' + k;
+      return `<button type="button" class="ctl" data-act="${k}" aria-label="${a.name}" aria-describedby="${desc}"${k === 'logs' ? ' aria-haspopup="dialog"' : ''} hidden>
         <span class="ctl-ico">${svg(a.icon)}</span>
         <span class="ctl-txt"><span class="ctl-name">${a.name}</span><span class="ctl-desc" id="ctl-d-${k}">${a.desc}</span></span>
         <span class="ctl-end">${k === 'logs' ? svg('chevR') : ''}<span class="spin" aria-hidden="true"></span></span>
@@ -1921,7 +1923,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       <section class="block" id="d-ctl" aria-labelledby="d-ctl-title" hidden>
         <div class="block-head"><h2 id="d-ctl-title">Controls</h2></div>
         <div class="card ctl-list" id="d-ctl-safe">${['logs', 'stop', 'bot-new', 'bot-restart'].map(row).join('')}</div>
-        <div class="card ctl-list danger" id="d-ctl-danger" role="group" aria-label="Process signals and removal">${['rm', 'interrupt', 'terminate'].map(row).join('')}</div>
+        <div class="card ctl-list danger" id="d-ctl-danger" role="group" aria-label="Destructive actions">${['rm', 'interrupt'].map(row).join('')}<p class="ctl-note" id="ctl-n-interrupt" hidden></p></div>
       </section>
       <p class="res" id="d-ctl-res" role="status"></p>`;
   }
@@ -1952,6 +1954,10 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       b.classList.toggle('busy', busy === k);
       b.setAttribute('aria-disabled', String(!!busy));
     });
+    // Outside the button, so the resume command can be selected and copied.
+    const note = $('#ctl-n-interrupt'), ending = acts.includes('interrupt');
+    note.hidden = !ending;
+    if (ending) setHTML(note, `The conversation is kept: run <code>claude --resume ${esc(s.id)}</code> to continue.`);
     $('#d-ctl-safe').hidden = !safe;
     $('#d-ctl-danger').hidden = !danger;
     $('#d-ctl').hidden = !(safe + danger);

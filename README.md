@@ -26,6 +26,8 @@
 <hr />
 </div>
 
+<video src="docs/how-it-works.mp4" poster="docs/how-it-works-poster.jpg" controls muted playsinline width="100%"></video>
+
 ## Claude Telegram Supercharged
 
 Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram). Install once, get 15+ features the official plugin doesn't have. Built on top of the [official plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) -- everything works, just better.

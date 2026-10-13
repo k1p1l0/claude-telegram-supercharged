@@ -4224,6 +4224,12 @@ function isAdmin(access: Access, userId: string): boolean {
   return Array.isArray(access.admins) && access.admins.includes(userId);
 }
 
+// Agents Board session controls: admins, or everyone on the allowlist when no admins are set.
+function canControl(userId: string): boolean {
+  const access = loadAccess();
+  return access.admins?.length ? isAdmin(access, userId) : access.allowFrom.includes(userId);
+}
+
 function effectiveLimits(access: Access, userId: string): Required<UsageLimits> {
   const l: UsageLimits = { ...access.limits, ...access.userLimits?.[userId] };
   const n = (v: unknown) => {
@@ -4553,15 +4559,20 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
     return true;
   }
 
-  // /new: fresh Claude session via the supervisor. Memory and message history are kept.
   try {
-    mkdirSync(DATA_DIR, { recursive: true });
-    writeFileSync(join(DATA_DIR, "restart.signal"), `${Date.now() + 1000}\n`);
+    requestNewSession();
     await ctx.reply("Starting a fresh session. Memory is kept. Back in a minute.");
   } catch (err) {
     await ctx.reply(`Could not signal a restart: ${err}`);
   }
   return true;
+}
+
+// /new and the board's "New session" button: fresh Claude session via the supervisor. Memory and
+// message history are kept.
+function requestNewSession(): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(join(DATA_DIR, "restart.signal"), `${Date.now() + 1000}\n`);
 }
 
 // ── Post-gate delivery: download media, build context, add to batch ──
@@ -5090,6 +5101,10 @@ if (!isSecondary) {
   miniapp?.startMiniApp({
     token: TOKEN,
     isAllowed: (userId) => loadAccess().allowFrom.includes(userId),
+    canControl,
+    newSession: requestNewSession,
+    notify: (userId, text) => bots[0].bot.api.sendMessage(userId, text),
+    dataDir: DATA_DIR,
     log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
     webhook: WEBHOOK_MODE ? (req) => webhookHandler?.(req) ?? new Response("Not ready", { status: 503 }) : undefined,
   });

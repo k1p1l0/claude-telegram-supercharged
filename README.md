@@ -426,6 +426,7 @@ For a fixed address, use your own HTTPS setup:
 | `TELEGRAM_MINIAPP_PEERS` | not set | Other machines the board can switch to, as `name=url` pairs separated by commas. |
 | `TELEGRAM_MINIAPP_PEER_TOKEN` | not set | Shared secret (16+ characters) between the machines. Without it, `TELEGRAM_MINIAPP_PEERS` is ignored. |
 | `TELEGRAM_MINIAPP_HOST` | `127.0.0.1` | Address the board server binds. Set it on a machine that other boards read from. |
+| `TELEGRAM_MINIAPP_CONTROL` | on | `off` turns the session controls off. The board stays read-only. |
 
 **Several machines.** If you run Claude Code on more than one computer, one board can show all of them. Tap the machine name in the header to switch. Every machine runs this plugin with its own bot.
 
@@ -435,6 +436,17 @@ For a fixed address, use your own HTTPS setup:
 4. Restart the daemons and open `/agents`.
 
 The main board fetches the other machine's data when you select it. The request carries the shared secret, and the board only fetches addresses from `TELEGRAM_MINIAPP_PEERS`. Plain HTTP is fine inside a tailnet, because Tailscale encrypts the traffic.
+
+**Session controls.** Admins can act on sessions from the board. If `access.json` lists no `admins`, everyone on the allowlist can. Other users get the board read-only.
+
+- **Read:** the last messages of a session, with each tool call on one line, for example `[Bash] git status`.
+- **Send:** continue a session with a message. A background session that finished its turn is stopped and resumed with your message. A session that is still working, or a terminal session, gets a background copy that starts with your message.
+- **New task:** start a background session in a folder the board knows, in plan, accept-edits or default permission mode. For tasks on this machine, the bot messages you when the task finishes.
+- **Background sessions:** stop, read the recent output, remove a stopped one.
+- **Terminal sessions:** "End session" sends Ctrl+C (SIGINT). Claude Code quits on it, busy or idle, and a reply in progress is lost. The conversation stays on disk, and `claude --resume <id>` continues it.
+- **The bot's own session:** "New session" does the same as `/new`. The board never signals or messages the session it runs in.
+
+On another machine the controls go through the shared secret, unless that machine turned them off. Each user can run 10 actions per minute. Every action goes to the bot's log, without the message text. `TELEGRAM_MINIAPP_CONTROL=off` makes the board read-only.
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
 
@@ -872,6 +884,7 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Rate limiting & usage stats (`/usage`): messages and tokens per user, limits per minute, hour and day
 - [x] Multi-bot support: several bots from one server instance, with per-bot history and optional per-bot access
 - [x] Scheduled messages: one-time, repeating and cron jobs
+- [x] Agents Board session controls: read, send, new task, stop and end sessions from Telegram
 
 ## Contributing
 

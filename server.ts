@@ -33,7 +33,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
-import type { ReactionTypeEmoji } from "grammy/types";
+import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 
 const ALLOWED_REACTIONS = new Set([
@@ -2620,6 +2620,116 @@ function cacheMedia(uniqueId: string, path: string, transcription?: string): voi
     }
   }
 }
+
+// ── Inbound formatting → Markdown ─────────────────────────────────
+// Telegram never sends markup: it sends plain text plus `entities` (offsets in
+// UTF-16 units) for bold, code, links and so on. Read as plain text, a link
+// like "the docs" loses its URL and a pasted code block loses its boundaries.
+// Rewrite text and captions as Markdown before any other handler sees them,
+// The converted entities are dropped; the others (mentions, commands, URLs)
+// are shifted so mention detection keeps working.
+function entitiesToMarkdown(text: string, entities: MessageEntity[]): { text: string; entities: MessageEntity[] } {
+  const ins: { pos: number; str: string; open: boolean; rank: number; idx: number }[] = [];
+  const kept: MessageEntity[] = [];
+  for (const [idx, e] of entities.entries()) {
+    let start = e.offset;
+    let end = e.offset + e.length;
+    const block = e.type === "pre" || e.type === "blockquote" || e.type === "expandable_blockquote";
+    if (!block) {
+      // "**bold **" is not valid Markdown: keep surrounding whitespace outside the markers.
+      while (start < end && /\s/.test(text[start])) start++;
+      while (end > start && /\s/.test(text[end - 1])) end--;
+    }
+    if (start >= end) {
+      kept.push(e);
+      continue;
+    }
+    const content = text.slice(start, end);
+    let open: string;
+    let close: string;
+    switch (e.type) {
+      case "bold":
+        open = close = "**";
+        break;
+      case "italic":
+        open = close = "_";
+        break;
+      case "underline":
+        open = "<u>";
+        close = "</u>";
+        break;
+      case "strikethrough":
+        open = close = "~~";
+        break;
+      case "spoiler":
+        open = close = "||";
+        break;
+      case "code":
+        [open, close] = content.includes("`") ? ["`` ", " ``"] : ["`", "`"];
+        break;
+      case "pre": {
+        const fence = content.includes("```") ? "````" : "```";
+        open = `${start > 0 && text[start - 1] !== "\n" ? "\n" : ""}${fence}${e.language ?? ""}\n`;
+        close = `${content.endsWith("\n") ? "" : "\n"}${fence}${end < text.length && text[end] !== "\n" ? "\n" : ""}`;
+        break;
+      }
+      case "text_link":
+        if (content === e.url) {
+          kept.push(e);
+          continue;
+        }
+        open = "[";
+        close = `](${e.url.replace(/[()\s]/g, (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`)})`;
+        break;
+      case "text_mention":
+        open = "[";
+        close = `](tg://user?id=${e.user.id})`;
+        break;
+      case "blockquote":
+      case "expandable_blockquote":
+        open = "> ";
+        close = "";
+        for (let i = start; i < end - 1; i++) {
+          if (text[i] === "\n") ins.push({ pos: i + 1, str: "> ", open: true, rank: Number.NEGATIVE_INFINITY, idx });
+        }
+        break;
+      default:
+        kept.push(e);
+        continue;
+    }
+    // At the same position: closings before openings, outer opens first, inner closes first.
+    ins.push({ pos: start, str: open, open: true, rank: start - end, idx });
+    if (close) ins.push({ pos: end, str: close, open: false, rank: end - start, idx: -idx });
+  }
+  if (!ins.length) return { text, entities };
+  ins.sort((a, b) => a.pos - b.pos || Number(a.open) - Number(b.open) || a.rank - b.rank || a.idx - b.idx);
+  let out = "";
+  let last = 0;
+  for (const i of ins) {
+    out += text.slice(last, i.pos) + i.str;
+    last = i.pos;
+  }
+  out += text.slice(last);
+  // Insertions at an entity's start belong before it, those at its end after it.
+  const shift = (p: number, atStart: boolean) =>
+    ins.reduce((n, i) => n + (i.pos < p || (atStart && i.pos === p) ? i.str.length : 0), 0);
+  const shifted = kept.map((e) => {
+    const s = e.offset + shift(e.offset, true);
+    const end = e.offset + e.length + shift(e.offset + e.length, false);
+    return { ...e, offset: s, length: end - s };
+  });
+  return { text: out, entities: shifted };
+}
+
+bot.use(async (ctx, next) => {
+  for (const m of [ctx.message, ctx.message?.reply_to_message]) {
+    if (m?.text && m.entities) ({ text: m.text, entities: m.entities } = entitiesToMarkdown(m.text, m.entities));
+    if (m?.caption && m.caption_entities) {
+      ({ text: m.caption, entities: m.caption_entities } = entitiesToMarkdown(m.caption, m.caption_entities));
+    }
+  }
+  await next();
+});
 
 // ── Store ALL messages before gate check ──────────────────────────
 // This middleware runs for every message (text, photo, voice, etc.)

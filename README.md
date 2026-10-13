@@ -81,6 +81,7 @@ Run it again any time to update. The full walkthrough is in [Getting Started](#g
 | **📦 Message Batching** | Forward 20+ messages at once -- collected into one batch (5s debounce), auto-summarized instantly, then Claude responds to the whole conversation in one reply. |
 | **📄 Document Support** | Send PDFs, DOCX, CSV, TXT, JSON -- Claude downloads, reads, and summarizes. 10MB file size limit. |
 | **🎨 MarkdownV2 Auto-escaping** | Special characters auto-escaped server-side -- Claude writes natural text, no manual `\.` escaping needed. |
+| **🔤 Incoming Formatting** | Bold, italic, strike, underline, spoiler, code, code blocks with language, quotes and hidden links in your messages reach Claude as Markdown, instead of being dropped by Telegram's plain-text `text` field. Captions and replied-to messages too. |
 | **😎 Sticker & GIF Support** | Claude sees stickers and GIFs. Static as images, animated as multi-frame collages. |
 | **📰 Telegraph Instant View** | Long research (3000+ chars) published to telegra.ph as Instant View. Disabled by default -- opt-in via `TELEGRAPH_ENABLED=true`. |
 

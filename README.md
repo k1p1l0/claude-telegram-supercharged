@@ -26,7 +26,7 @@
 <hr />
 </div>
 
-<!-- how-it-works video: the GitHub upload URL goes here -->
+https://github.com/user-attachments/assets/51f9f8c4-886d-4aec-bf2a-dddc8ef15cfc
 
 ## Claude Telegram Supercharged
 

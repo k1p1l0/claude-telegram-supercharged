@@ -395,6 +395,8 @@ Commands answer allowlisted users in DMs. `/verbose` is stored per chat.
 - **Last 24 hours:** tokens per hour (input, output, cache read, cache write), tool calls and cache hit rate.
 - **Recent tool calls** across all sessions.
 
+<img src="./docs/agents-board.png" alt="Agents Board: overview, live sessions with subagents, session detail" width="100%" />
+
 **How it works.** The instance that owns the bot runs a small HTTP server on `127.0.0.1:8790`. A worker thread reads `claude agents --json` for the live sessions and the transcripts in `~/.claude/projects` for tokens, tool calls and subagents. It reads only new bytes, and only while someone has the board open. Every API request must carry Telegram's signed `initData` from a user on your allowlist, so the URL shows nothing to anyone else.
 
 **Setup.** Telegram opens Mini Apps only over HTTPS.

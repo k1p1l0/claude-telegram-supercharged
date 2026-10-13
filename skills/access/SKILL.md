@@ -42,14 +42,24 @@ Arguments passed: `$ARGUMENTS`
       "senderId": "...", "chatId": "...",
       "createdAt": <ms>, "expiresAt": <ms>,
       "type": "dm" | "group",
-      "groupTitle": "..."
+      "groupTitle": "...",
+      "bot": "team_bot"
     }
   },
-  "mentionPatterns": ["@mybot"]
+  "mentionPatterns": ["@mybot"],
+  "bots": {
+    "team_bot": { "dmPolicy": "allowlist", "allowFrom": ["..."], "groups": {} }
+  }
 }
 ```
 
 Missing file = `{dmPolicy:"pairing", allowFrom:[], groups:{}, pending:{}}`.
+
+`bots` and a pending entry's `bot` exist only with extra bots
+(`TELEGRAM_EXTRA_BOT_TOKENS`). `bots.<username>` overrides `dmPolicy`,
+`allowFrom` and `groups` for that bot; keys it leaves out use the top level.
+A pending entry's `bot` names the extra bot that issued the code (absent = the
+primary bot).
 
 ---
 
@@ -61,14 +71,19 @@ Parse `$ARGUMENTS` (space-separated). If empty or unrecognized, show status.
 
 1. Read `~/.claude/channels/telegram/access.json` (handle missing file).
 2. Show: dmPolicy, allowFrom count and list, pending count with codes +
-   sender IDs + age, groups count.
+   sender IDs + age (+ `bot` when set), groups count, and any `bots` overrides.
 
 ### `pair <code>`
 
 1. Read `~/.claude/channels/telegram/access.json`.
 2. Look up `pending[<code>]`. If not found or `expiresAt < Date.now()`,
    tell the user and stop.
-3. Check the entry's `type` field:
+3. Pick the target list for step b. If the entry has a `bot` field and
+   `bots[<bot>]` defines `groups` (group pairing) or `allowFrom` (DM pairing),
+   step b writes to `bots[<bot>].groups` or `bots[<bot>].allowFrom`. Otherwise
+   it writes to the top-level `groups` or `allowFrom`, which every bot without
+   its own list shares. Tell the user which bot the code came from.
+4. Check the entry's `type` field:
 
    **If `type` is `"group"` (group pairing):**
    a. Extract `chatId` (the group ID) and `groupTitle` from the entry.

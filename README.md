@@ -871,9 +871,7 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Webhook mode: alternative to polling for production deployments
 - [x] Rate limiting & usage stats (`/usage`): messages and tokens per user, limits per minute, hour and day
 - [x] Multi-bot support: several bots from one server instance, with per-bot history and optional per-bot access
-
-### Planned
-- [ ] **Scheduled messages** -- Send messages at a specific time
+- [x] Scheduled messages: one-time, repeating and cron jobs
 
 ## Contributing
 

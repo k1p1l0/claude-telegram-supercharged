@@ -623,7 +623,7 @@ setInterval(checkSchedules, 30_000);
 // Rolling buffer: max 500 messages per chat, 14-day TTL, 50MB hard limit.
 
 class MessageStore {
-  private db: Database;
+  readonly db: Database;
   private insertCount = 0;
 
   constructor(dbPath: string) {
@@ -793,6 +793,109 @@ class MessageStore {
 
 const messageStore = new MessageStore(DB_PATH);
 
+// ── Usage stats store (same database) ───────────────────────────────
+// Per user per UTC day: messages delivered to Claude, messages blocked by a
+// limit, and the tokens of the turns their messages started. usage_hits keeps
+// the delivery times of the last hour for the per-minute and per-hour limits,
+// so a restart (or /new) doesn't reset them. Stats are kept for 90 days.
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+type TokenUsage = { input: number; output: number; cacheRead: number; cacheWrite: number };
+type UsageTotals = TokenUsage & { messages: number; blocked: number };
+
+function utcDay(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+class UsageStore {
+  constructor(private db: Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS usage_daily (
+        user_id     TEXT NOT NULL,
+        day         TEXT NOT NULL,
+        messages    INTEGER NOT NULL DEFAULT 0,
+        blocked     INTEGER NOT NULL DEFAULT 0,
+        input       INTEGER NOT NULL DEFAULT 0,
+        output      INTEGER NOT NULL DEFAULT 0,
+        cache_read  INTEGER NOT NULL DEFAULT 0,
+        cache_write INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, day)
+      );
+      CREATE TABLE IF NOT EXISTS usage_hits (
+        user_id TEXT NOT NULL,
+        ts      INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_usage_hits_user_ts ON usage_hits(user_id, ts);
+    `);
+    db.run("DELETE FROM usage_daily WHERE day < ?", [utcDay(Date.now() - 90 * DAY_MS)]);
+    db.run("DELETE FROM usage_hits WHERE ts < ?", [Date.now() - HOUR_MS]);
+  }
+
+  add(userId: string, day: string, d: Partial<UsageTotals>): void {
+    this.db.run(
+      `INSERT INTO usage_daily (user_id, day, messages, blocked, input, output, cache_read, cache_write)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, day) DO UPDATE SET
+         messages = messages + excluded.messages, blocked = blocked + excluded.blocked,
+         input = input + excluded.input, output = output + excluded.output,
+         cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write`,
+      [userId, day, d.messages ?? 0, d.blocked ?? 0, d.input ?? 0, d.output ?? 0, d.cacheRead ?? 0, d.cacheWrite ?? 0],
+    );
+  }
+
+  /** A message delivered to Claude: counts for today and for the minute/hour windows. */
+  recordMessage(userId: string, now: number): void {
+    this.add(userId, utcDay(now), { messages: 1 });
+    this.db.run("INSERT INTO usage_hits (user_id, ts) VALUES (?, ?)", [userId, now]);
+    this.db.run("DELETE FROM usage_hits WHERE user_id = ? AND ts < ?", [userId, now - HOUR_MS]);
+  }
+
+  /** Delivery times after `since`, oldest first. */
+  hits(userId: string, since: number): number[] {
+    const rows = this.db
+      .query("SELECT ts FROM usage_hits WHERE user_id = ? AND ts > ? ORDER BY ts")
+      .all(userId, since) as Array<{ ts: number }>;
+    return rows.map((r) => r.ts);
+  }
+
+  /** One user's rows from `fromDay` on, newest first. */
+  days(userId: string, fromDay: string): Array<UsageTotals & { day: string }> {
+    return this.db
+      .query(
+        `SELECT day, messages, blocked, input, output, cache_read AS cacheRead, cache_write AS cacheWrite
+         FROM usage_daily WHERE user_id = ? AND day >= ? ORDER BY day DESC`,
+      )
+      .all(userId, fromDay) as Array<UsageTotals & { day: string }>;
+  }
+
+  /** Totals per user from `fromDay` on, most tokens first. */
+  users(fromDay: string): Array<UsageTotals & { userId: string }> {
+    return this.db
+      .query(
+        `SELECT user_id AS userId, SUM(messages) AS messages, SUM(blocked) AS blocked, SUM(input) AS input,
+           SUM(output) AS output, SUM(cache_read) AS cacheRead, SUM(cache_write) AS cacheWrite
+         FROM usage_daily WHERE day >= ? GROUP BY user_id
+         ORDER BY SUM(input) + SUM(output) + SUM(cache_write) DESC, SUM(messages) DESC`,
+      )
+      .all(fromDay) as Array<UsageTotals & { userId: string }>;
+  }
+
+  /** The newest @username or first name this user sent a message with, from the history store. */
+  name(userId: string): string | undefined {
+    const row = this.db
+      .query(
+        "SELECT username, first_name FROM messages WHERE user_id = ? AND is_outgoing = 0 ORDER BY date DESC LIMIT 1",
+      )
+      .get(userId) as { username: string | null; first_name: string | null } | null;
+    return row?.username ? `@${row.username}` : (row?.first_name ?? undefined);
+  }
+}
+
+const usageStore = new UsageStore(messageStore.db);
+
 // Graceful shutdown — checkpoint and close the database.
 process.on("SIGINT", () => {
   messageStore.close();
@@ -830,6 +933,14 @@ type GroupPolicy = {
   allowFrom: string[];
 };
 
+/** Missing or 0 = no limit. */
+type UsageLimits = {
+  messagesPerMinute?: number;
+  messagesPerHour?: number;
+  /** Input + output + cache write tokens per UTC day. Cache reads don't count. */
+  tokensPerDay?: number;
+};
+
 type Access = {
   dmPolicy: "pairing" | "allowlist" | "disabled";
   allowFrom: string[];
@@ -849,6 +960,12 @@ type Access = {
   autoTranscribe?: boolean;
   /** Tool names whose permission_requests are auto-allowed without a Telegram round-trip. */
   autoApproveTools?: string[];
+  /** Default limits for every user. */
+  limits?: UsageLimits;
+  /** Per-user overrides keyed by user id. Each key set here replaces the default. */
+  userLimits?: Record<string, UsageLimits>;
+  /** User ids exempt from limits. /usage shows them everyone's usage. */
+  admins?: string[];
 };
 
 function defaultAccess(): Access {
@@ -957,6 +1074,9 @@ function readAccessFile(): Access {
       chunkMode: parsed.chunkMode,
       autoTranscribe: parsed.autoTranscribe,
       autoApproveTools: parsed.autoApproveTools,
+      limits: parsed.limits,
+      userLimits: parsed.userLimits,
+      admins: parsed.admins,
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return defaultAccess();
@@ -3065,6 +3185,8 @@ bot.on("message_reaction", async (ctx) => {
 
   // Only forward reactions from allowlisted users.
   if (!senderId || !access.allowFrom.includes(senderId)) return;
+  // A reaction starts a turn too, so it counts like a message and is dropped over a limit.
+  if (overLimit(access, senderId)) return;
 
   const newReactions = reaction.new_reaction ?? [];
   const oldReactions = reaction.old_reaction ?? [];
@@ -3084,6 +3206,8 @@ bot.on("message_reaction", async (ctx) => {
   const user = reaction.user;
   const username = user && "username" in user ? (user.username ?? String(user.id)) : senderId;
 
+  usageStore.recordMessage(senderId, Date.now());
+  lastDeliveredUser = senderId;
   void mcp.notification({
     method: "notifications/claude/channel",
     params: {
@@ -3139,6 +3263,12 @@ async function promotePregateBuffer(chatId: string): Promise<void> {
   pregateBuffers.delete(chatId);
   // Deliver each buffered message through the normal post-gate path.
   for (const entry of buf.messages) {
+    // These never addressed the bot, so a sender over a limit is skipped without a notice.
+    const sender = String(entry.ctx.from?.id ?? "");
+    if (overLimit(entry.access, sender)) {
+      usageStore.add(sender, utcDay(Date.now()), { blocked: 1 });
+      continue;
+    }
     await deliverMessage(entry.ctx, entry.inboundText, entry.downloadMedia, entry.access, entry.command);
   }
 }
@@ -3315,9 +3445,14 @@ async function handleInbound(
     return;
   }
 
+  if (await enforceLimits(ctx, result.access)) return;
+
   // action === "deliver" — first promote any buffered messages from this chat
   const chat_id = String(ctx.chat!.id);
+  const buffered = pregateBuffers.has(chat_id);
   await promotePregateBuffer(chat_id);
+  // The sender's own buffered messages may have used up their last slots.
+  if (buffered && (await enforceLimits(ctx, result.access))) return;
 
   await deliverMessage(ctx, inboundText, downloadMedia, result.access, command);
 }
@@ -3682,6 +3817,370 @@ function startProgressWatcher(): void {
   }, 1000);
 }
 
+// ── Usage stats & limits ─────────────────────────────────────────────
+// Tokens come from the session transcript, read like miniapp.ts does (new
+// bytes only). Each API call's tokens go to the user whose Telegram message
+// started the turn: the user_id of the newest <channel> message in the
+// transcript. A turn typed in the terminal or fired by a /loop has no owner and
+// isn't counted. Subagent transcripts count for the current owner.
+//
+// "Tokens" for limits = input + output + cache write. Cache reads are stored
+// and shown separately: they are most of every call and cheap, so counting
+// them would make any limit meaningless.
+
+const USAGE_SCAN_MS = 5000;
+const USAGE_READ_MAX = 8 * 1024 * 1024; // bytes per read; up to 8 reads per file per scan
+const usageOffsets = new Map<string, number>();
+const usageSeen = new Map<string, TokenUsage>(); // API message id → highest usage seen
+let usageOwner: string | undefined;
+let usageTagsSeen = false;
+// Owner while the transcript shows no <channel> tags at all (a format change):
+// the sender of the last delivered message.
+let lastDeliveredUser: string | undefined;
+let hookTranscript: string | undefined;
+let fallbackTranscript: string | undefined;
+const limitNotices = new Map<string, number>(); // "user:chat" → end of the window the last notice was for
+
+function zeroTokens(): TokenUsage {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+}
+
+function limitTokens(u: TokenUsage): number {
+  return u.input + u.output + u.cacheWrite;
+}
+
+// This session's transcript. In daemon mode the progress hook reports it (and
+// follows /clear). Otherwise Claude Code gives MCP servers CLAUDE_CODE_SESSION_ID
+// and CLAUDE_PROJECT_DIR, and the file is
+// projects/<project dir with every non-alphanumeric character replaced by "-">/<id>.jsonl.
+// Without a session id (older versions): the newest transcript in that folder
+// written since this server started.
+function sessionTranscript(): string | undefined {
+  // A path under subagents/ isn't the session's own: keep the last main one.
+  if (lastTranscript && !lastTranscript.includes(`${sep}subagents${sep}`)) hookTranscript = lastTranscript;
+  if (hookTranscript) return hookTranscript;
+  const root = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+  const encoded = (process.env.CLAUDE_PROJECT_DIR || process.env.PWD || process.cwd()).replace(/[^a-zA-Z0-9]/g, "-");
+  let dir = join(root, encoded);
+  // Very long names are cut to 200 characters and get a hash appended.
+  if (encoded.length > 200 && !existsSync(dir)) {
+    try {
+      const match = readdirSync(root).find((d) => d.startsWith(encoded.slice(0, 200)));
+      if (match) dir = join(root, match);
+    } catch {}
+  }
+  const id = process.env.CLAUDE_CODE_SESSION_ID;
+  if (id) return join(dir, `${id}.jsonl`);
+  if (!fallbackTranscript) {
+    let newest = serverStartedAt;
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith(".jsonl")) continue;
+        const mtime = statSync(join(dir, f)).mtimeMs;
+        if (mtime >= newest) {
+          newest = mtime;
+          fallbackTranscript = join(dir, f);
+        }
+      }
+    } catch {}
+  }
+  return fallbackTranscript;
+}
+
+// Complete lines added since the last read. A file seen for the first time is
+// read from the start, unless nothing was written to it since this server
+// started. ingestUsage skips usage from before the start by timestamp.
+function readNewLines(path: string): string[] {
+  let size: number;
+  let mtime: number;
+  try {
+    ({ size, mtimeMs: mtime } = statSync(path));
+  } catch {
+    return [];
+  }
+  let off = usageOffsets.get(path) ?? (mtime < serverStartedAt ? size : 0);
+  if (off > size) off = 0; // truncated or replaced
+  usageOffsets.set(path, off);
+  const len = Math.min(size - off, USAGE_READ_MAX);
+  if (len <= 0) return [];
+  const buf = Buffer.alloc(len);
+  const fd = openSync(path, "r");
+  try {
+    readSync(fd, buf, 0, len, off);
+  } finally {
+    closeSync(fd);
+  }
+  const end = buf.lastIndexOf(10);
+  if (end < 0) {
+    // One line longer than a whole read (a big tool result, never usage): skip it.
+    if (len === USAGE_READ_MAX) usageOffsets.set(path, off + len);
+    return [];
+  }
+  usageOffsets.set(path, off + end + 1);
+  return buf.subarray(0, end).toString("utf-8").split("\n");
+}
+
+function ingestUsage(line: string, main: boolean, pending: Map<string, TokenUsage>): void {
+  if (line.includes('"type":"user"')) {
+    // Prompts in the main transcript decide who owns the turn.
+    if (!main) return;
+    if (!line.includes("<channel") && !/"turnOrigin":"(human|scheduled)"/.test(line)) return;
+    const e = JSON.parse(line);
+    if (e.type !== "user") return;
+    const c = e.message?.content;
+    const text = typeof c === "string" ? c : Array.isArray(c) && c[0]?.type === "text" ? String(c[0].text) : "";
+    const tag = /^<channel\s[^>]*>/.exec(text)?.[0];
+    if (tag) {
+      // user_id comes before every attribute with user text in it (reply_to_text),
+      // so the first match is the sender. Another channel's message (Discord...)
+      // starts a turn no Telegram user owns.
+      const id = /\ssource="[^"]*telegram/i.test(tag) ? /\suser_id="(\d+)"/.exec(tag)?.[1] : undefined;
+      usageOwner = id;
+      if (id) usageTagsSeen = true;
+    } else if (e.turnOrigin === "human" || e.turnOrigin === "scheduled") {
+      usageOwner = undefined;
+    }
+    return;
+  }
+  if (!line.includes('"type":"assistant"')) return;
+  const e = JSON.parse(line);
+  const m = e.message;
+  if (e.type !== "assistant" || !m?.id || !m.usage) return;
+  const t = Date.parse(e.timestamp) || 0;
+  if (t < serverStartedAt) return; // the server running back then counted it
+  const u = m.usage;
+  const cur = {
+    input: u.input_tokens ?? 0,
+    output: u.output_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    cacheWrite: u.cache_creation_input_tokens ?? 0,
+  };
+  // Same rule as miniapp.ts: the lines of one message share its id and later
+  // ones can carry a larger output_tokens, so keep the highest value per field
+  // and count only the growth.
+  const seen = usageSeen.get(m.id) ?? zeroTokens();
+  const growth = {
+    input: Math.max(0, cur.input - seen.input),
+    output: Math.max(0, cur.output - seen.output),
+    cacheRead: Math.max(0, cur.cacheRead - seen.cacheRead),
+    cacheWrite: Math.max(0, cur.cacheWrite - seen.cacheWrite),
+  };
+  usageSeen.set(m.id, {
+    input: seen.input + growth.input,
+    output: seen.output + growth.output,
+    cacheRead: seen.cacheRead + growth.cacheRead,
+    cacheWrite: seen.cacheWrite + growth.cacheWrite,
+  });
+  if (usageSeen.size > 10_000) for (const k of [...usageSeen.keys()].slice(0, 5_000)) usageSeen.delete(k);
+  const owner = usageTagsSeen ? usageOwner : lastDeliveredUser;
+  if (!owner) return;
+  const key = `${owner} ${utcDay(t)}`;
+  const p = pending.get(key) ?? zeroTokens();
+  p.input += growth.input;
+  p.output += growth.output;
+  p.cacheRead += growth.cacheRead;
+  p.cacheWrite += growth.cacheWrite;
+  pending.set(key, p);
+}
+
+function scanUsage(): void {
+  try {
+    const main = sessionTranscript();
+    if (!main) return;
+    // Main transcript first: its prompts set the owner that subagent usage goes to.
+    const files = [main];
+    const subDir = join(main.replace(/\.jsonl$/, ""), "subagents");
+    try {
+      for (const f of readdirSync(subDir)) if (f.endsWith(".jsonl")) files.push(join(subDir, f));
+    } catch {}
+    const pending = new Map<string, TokenUsage>();
+    for (const path of files) {
+      for (let i = 0; i < 8; i++) {
+        const lines = readNewLines(path);
+        if (lines.length === 0) break;
+        for (const line of lines) {
+          if (!line.startsWith("{")) continue;
+          try {
+            ingestUsage(line, path === main, pending);
+          } catch {
+            // Skip a record with an unexpected shape.
+          }
+        }
+      }
+    }
+    for (const [key, u] of pending) {
+      const [userId, day] = key.split(" ");
+      usageStore.add(userId, day, u);
+    }
+  } catch (err) {
+    process.stderr.write(`telegram channel: usage scan failed: ${err}\n`);
+  }
+}
+
+function isAdmin(access: Access, userId: string): boolean {
+  return Array.isArray(access.admins) && access.admins.includes(userId);
+}
+
+function effectiveLimits(access: Access, userId: string): Required<UsageLimits> {
+  const l: UsageLimits = { ...access.limits, ...access.userLimits?.[userId] };
+  const n = (v: unknown) => {
+    const x = Number(v);
+    return Number.isFinite(x) && x > 0 ? Math.floor(x) : 0;
+  };
+  return {
+    messagesPerMinute: n(l.messagesPerMinute),
+    messagesPerHour: n(l.messagesPerHour),
+    tokensPerDay: n(l.tokensPerDay),
+  };
+}
+
+// 950, 45.2K, 1.2M
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${Number((n / 1000).toFixed(1))}K`;
+  return `${Number((n / 1_000_000).toFixed(1))}M`;
+}
+
+// 40 s, 14 min, 5 h 12 min
+function fmtWait(ms: number): string {
+  const s = Math.max(1, Math.ceil(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.ceil(s / 60);
+  if (m < 60) return `${m} min`;
+  return m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`;
+}
+
+type LimitHit = { what: string; retryAt: number };
+
+// The limit this user is over right now, or undefined. Admins have none. When
+// several apply, the one that lasts longest, so "try again in" holds.
+function overLimit(access: Access, userId: string, now = Date.now()): LimitHit | undefined {
+  if (isAdmin(access, userId)) return undefined;
+  const lim = effectiveLimits(access, userId);
+  const hits: LimitHit[] = [];
+  const windows = [
+    [lim.messagesPerMinute, MINUTE_MS, "minute"],
+    [lim.messagesPerHour, HOUR_MS, "hour"],
+  ] as const;
+  for (const [limit, windowMs, unit] of windows) {
+    if (!limit) continue;
+    const times = usageStore.hits(userId, now - windowMs);
+    // A slot frees up when enough of the oldest deliveries leave the window.
+    if (times.length >= limit) {
+      const what = `${limit} message${limit === 1 ? "" : "s"} per ${unit}`;
+      hits.push({ what, retryAt: times[times.length - limit] + windowMs });
+    }
+  }
+  if (lim.tokensPerDay) {
+    scanUsage();
+    const today = usageStore.days(userId, utcDay(now))[0];
+    if (today && limitTokens(today) >= lim.tokensPerDay) {
+      const midnight = (Math.floor(now / DAY_MS) + 1) * DAY_MS;
+      hits.push({ what: `${lim.tokensPerDay.toLocaleString("en-US")} tokens per day`, retryAt: midnight });
+    }
+  }
+  return hits.sort((a, b) => b.retryAt - a.retryAt)[0];
+}
+
+// Over a limit: the message doesn't reach Claude and counts as blocked. The
+// sender gets one notice per window in this chat, not one per message.
+// Returns true when the message is blocked.
+async function enforceLimits(ctx: Context, access: Access): Promise<boolean> {
+  const userId = String(ctx.from?.id ?? "");
+  const now = Date.now();
+  const hit = userId ? overLimit(access, userId, now) : undefined;
+  if (!hit) return false;
+  usageStore.add(userId, utcDay(now), { blocked: 1 });
+  const key = `${userId}:${ctx.chat?.id}`;
+  if ((limitNotices.get(key) ?? 0) > now) return true;
+  if (limitNotices.size > 1000) for (const [k, end] of limitNotices) if (end <= now) limitNotices.delete(k);
+  limitNotices.set(key, hit.retryAt);
+  // In groups, quote the message so it's clear whose limit it is.
+  const msgId = ctx.message?.message_id;
+  const quote = ctx.chat?.type !== "private" && msgId != null ? { reply_parameters: { message_id: msgId } } : {};
+  await ctx.reply(`Limit reached: ${hit.what}. Try again in ${fmtWait(hit.retryAt - now)}.`, quote).catch(() => {});
+  return true;
+}
+
+function limitLines(access: Access, userId: string, now: number, todayTokens: number): string[] {
+  if (isAdmin(access, userId)) return ["- none (admin)"];
+  const lim = effectiveLimits(access, userId);
+  const out: string[] = [];
+  if (lim.messagesPerMinute) {
+    const used = usageStore.hits(userId, now - MINUTE_MS).length;
+    out.push(`- ${lim.messagesPerMinute} messages per minute (${used} used)`);
+  }
+  if (lim.messagesPerHour) {
+    const used = usageStore.hits(userId, now - HOUR_MS).length;
+    out.push(`- ${lim.messagesPerHour} messages per hour (${used} used)`);
+  }
+  if (lim.tokensPerDay) {
+    out.push(`- ${lim.tokensPerDay.toLocaleString("en-US")} tokens per day (${fmtTokens(todayTokens)} used)`);
+  }
+  return out.length > 0 ? out : ["- none"];
+}
+
+// /usage: the caller's today and last 7 days (UTC) and their limits. Admins
+// also get every user's totals when adminView is set (DMs only).
+function usageReport(access: Access, userId: string, adminView: boolean): string {
+  scanUsage();
+  const now = Date.now();
+  const today = utcDay(now);
+  const weekStart = utcDay(now - 6 * DAY_MS);
+  const days = usageStore.days(userId, weekStart);
+  const t = days.find((d) => d.day === today) ?? { messages: 0, blocked: 0, ...zeroTokens() };
+  const lines = [
+    `Today (UTC): ${t.messages} messages, ${t.blocked} blocked`,
+    `Tokens: ${fmtTokens(limitTokens(t))} (input ${fmtTokens(t.input)}, output ${fmtTokens(t.output)}, cache write ${fmtTokens(t.cacheWrite)})`,
+    `Cache reads: ${fmtTokens(t.cacheRead)} (not counted toward limits)`,
+    "",
+    "Last 7 days:",
+  ];
+  if (days.length === 0) lines.push("No usage yet");
+  for (const d of days) {
+    lines.push(`${d.day}: ${d.messages} msg, ${d.blocked} blocked, ${fmtTokens(limitTokens(d))} tokens`);
+  }
+  if (days.length > 1) {
+    const sum = (f: (d: (typeof days)[number]) => number) => days.reduce((a, d) => a + f(d), 0);
+    lines.push(
+      `Total: ${sum((d) => d.messages)} msg, ${sum((d) => d.blocked)} blocked, ${fmtTokens(sum(limitTokens))} tokens, ${fmtTokens(sum((d) => d.cacheRead))} cache reads`,
+    );
+  }
+  lines.push("", "Limits:", ...limitLines(access, userId, now, limitTokens(t)));
+  if (adminView && isAdmin(access, userId)) {
+    const week = usageStore.users(weekStart);
+    const byUserToday = new Map(usageStore.users(today).map((u) => [u.userId, u]));
+    lines.push("", "All users, today / 7 days:");
+    if (week.length === 0) lines.push("No usage yet");
+    for (const u of week.slice(0, 25)) {
+      const td = byUserToday.get(u.userId);
+      const name = usageStore.name(u.userId);
+      const blocked = u.blocked ? `, ${u.blocked} blocked` : "";
+      lines.push(
+        `${name ? `${name} ` : ""}(${u.userId}): ${td?.messages ?? 0} / ${u.messages} msg, ${fmtTokens(td ? limitTokens(td) : 0)} / ${fmtTokens(limitTokens(u))} tokens${blocked}`,
+      );
+    }
+    if (week.length > 25) lines.push(`…and ${week.length - 25} more`);
+  }
+  return lines.join("\n").slice(0, MAX_CHUNK_LIMIT);
+}
+
+// /usage in a group the bot is in: for members it answers there, and only
+// their own numbers. The admin table stays in DMs.
+async function handleGroupUsage(ctx: Context): Promise<boolean> {
+  const access = loadAccess();
+  const policy = access.groups[String(ctx.chat?.id)];
+  const userId = String(ctx.from?.id ?? "");
+  const allowed = policy?.allowFrom ?? [];
+  if (access.dmPolicy === "disabled" || !policy || !userId) return false;
+  if (allowed.length > 0 && !allowed.includes(userId)) return false;
+  const msgId = ctx.message?.message_id;
+  await ctx
+    .reply(usageReport(access, userId, false), msgId != null ? { reply_parameters: { message_id: msgId } } : {})
+    .catch(() => {});
+  return true;
+}
+
 // ── Custom commands ──────────────────────────────────────────────────
 // commands.json maps bot commands to Claude Code skills:
 //   { "commands": { "standup": { "skill": "daily-standup", "description": "Daily standup summary" } } }
@@ -3695,6 +4194,7 @@ const BUILTIN_COMMANDS = [
   { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
   { command: "new", description: "Fresh session (memory kept)" },
   { command: "agents", description: "Live board of sessions, subagents, tokens" },
+  { command: "usage", description: "Your messages, tokens and limits" },
 ];
 const MAX_BOT_COMMANDS = 100; // Telegram's limit per scope
 
@@ -3779,12 +4279,14 @@ function customCommandPrompt(c: CustomCommandMatch): string {
   return c.args ? `${run}\nArguments: ${c.args}` : run;
 }
 
-// /verbose, /status, /new, /agents. DM-only and allowlisted senders only; everything
-// else falls through to Claude. Returns true when the message was handled.
+// /verbose, /status, /new, /agents, /usage. DM-only and allowlisted senders only
+// (/usage also works in groups); everything else falls through to Claude.
+// Returns true when the message was handled.
 async function handleAgenticCommand(ctx: Context): Promise<boolean> {
-  const m = /^\/(verbose|status|new|agents)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
-  if (!m || ctx.chat?.type !== "private") return false;
+  const m = /^\/(verbose|status|new|agents|usage)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
+  if (!m) return false;
   if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return false;
+  if (ctx.chat?.type !== "private") return m[1].toLowerCase() === "usage" && (await handleGroupUsage(ctx));
   if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return false;
   const chatId = String(ctx.chat.id);
   const cmd = m[1].toLowerCase();
@@ -3834,6 +4336,11 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
     return true;
   }
 
+  if (cmd === "usage") {
+    await ctx.reply(usageReport(loadAccess(), String(ctx.from?.id), true));
+    return true;
+  }
+
   // /new: fresh Claude session via the supervisor. Memory and message history are kept.
   try {
     mkdirSync(DATA_DIR, { recursive: true });
@@ -3859,6 +4366,10 @@ async function deliverMessage(
   const from = ctx.from!;
   const chat_id = String(ctx.chat!.id);
   const msgId = ctx.message?.message_id;
+
+  // Counts for the sender's stats and message limits.
+  usageStore.recordMessage(String(from.id), Date.now());
+  lastDeliveredUser = String(from.id);
 
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void bot.api.sendChatAction(chat_id, "typing").catch(() => {});
@@ -4030,6 +4541,8 @@ function replayUnanswered(): void {
     if (allowedChats.length === 0) return;
 
     for (const chatId of allowedChats) {
+      // Blocked messages are in the history too: don't replay them past a limit.
+      if (overLimit(access, chatId)) continue;
       // Get last 10 messages from this chat, newest first
       const recent = messageStore.getHistory(chatId, 10);
       if (recent.length === 0) continue;
@@ -4120,6 +4633,8 @@ function botStarted(username: string, mode: string): void {
   if (startupDone) return;
   startupDone = true;
   startProgressWatcher();
+  setInterval(scanUsage, USAGE_SCAN_MS);
+  process.stderr.write(`telegram channel: usage stats from ${sessionTranscript() ?? "no transcript found"}\n`);
   refreshCustomCommands(); // registers the built-in and custom commands
   setInterval(refreshCustomCommands, 30_000);
   const chain = [

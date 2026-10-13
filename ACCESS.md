@@ -94,6 +94,22 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`autoTranscribe`** controls whether voice/audio messages are automatically transcribed in the history middleware, even when the bot isn't mentioned. When `true` (default), all voice messages in group chats are downloaded and transcribed so that `get_history` shows the spoken text (prefixed with 🎤) instead of `[voice]`. Set to `false` to disable and reduce CPU usage on busy groups.
 
+## Usage limits
+
+Limits cap how much each user can send to Claude, in DMs and in groups. Every field is optional. A missing value or `0` means no limit, which is the default.
+
+`limits` applies to every user. `userLimits` overrides it per user ID, key by key: a key set there replaces the default for that user, and `0` removes that limit. `admins` lists user IDs with no limits at all; in a DM, their `/usage` also lists every user.
+
+| Key | What it counts |
+| --- | --- |
+| `messagesPerMinute` | Messages delivered to Claude in any 60 seconds |
+| `messagesPerHour` | Messages delivered to Claude in any 60 minutes |
+| `tokensPerDay` | Input + output + cache write tokens per UTC day. Cache reads don't count. |
+
+A reaction that Claude receives counts as a message. A message over a limit never reaches Claude. The sender gets one notice per window and can check their numbers with `/usage`. See [Usage stats & limits](./README.md#usage-stats--limits) for how tokens are counted per user.
+
+`/telegram:access set` doesn't handle these keys. Edit `access.json` by hand; the server re-reads it on every message.
+
 ## Skill reference
 
 | Command | Effect |
@@ -150,6 +166,15 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
   "autoTranscribe": true,
 
   // Tools whose permission requests are allowed without asking in Telegram.
-  "autoApproveTools": ["Read", "Grep", "Glob"]
+  "autoApproveTools": ["Read", "Grep", "Glob"],
+
+  // Limits for every user. Missing or 0 = no limit.
+  "limits": { "messagesPerMinute": 5, "messagesPerHour": 60, "tokensPerDay": 2000000 },
+
+  // Per-user overrides, key by key. 0 removes that limit for the user.
+  "userLimits": { "412587349": { "messagesPerHour": 200 } },
+
+  // No limits. Their /usage in a DM lists every user.
+  "admins": ["628194073"]
 }
 ```

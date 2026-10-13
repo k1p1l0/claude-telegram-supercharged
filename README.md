@@ -456,6 +456,29 @@ The server skips an entry with a bad name, a built-in name (`status`, `verbose`,
 
 **How it works.** In place of `/standup`, Claude receives `Run the "daily-standup" skill with the Skill tool.` and an `Arguments:` line when there are arguments. The notification also carries `command` and `skill` attributes. If the daemon restarts before Claude answers, the replayed message gets the same rewrite.
 
+### Webhook mode
+
+By default the bot asks Telegram for new messages with long polling. In webhook mode Telegram sends each update to the bot over HTTPS instead. Use it on a server with a fixed public address.
+
+1. Give the local server, the Agents Board server on `127.0.0.1:8790`, an HTTPS address that Telegram can reach: `tailscale funnel --bg 8790`, a named Cloudflare Tunnel or a reverse proxy. Serve it at the root of that address, or make the proxy strip the path. Telegram accepts only ports 443, 80, 88 and 8443.
+2. Add to `~/.claude/channels/telegram/.env`:
+   ```
+   TELEGRAM_WEBHOOK=on
+   TELEGRAM_WEBHOOK_URL=https://bot.example.com
+   ```
+3. Restart the daemon. The log shows `webhook: Telegram posts updates to https://bot.example.com/telegram/webhook`.
+
+Without `TELEGRAM_WEBHOOK_URL` the bot uses the board's address from `TELEGRAM_MINIAPP_URL`. With `TELEGRAM_MINIAPP_URL=auto` it waits up to 60 seconds for the quick tunnel, and sets the webhook again each time the tunnel gets a new address. Addresses from `tailscale serve` work only inside your tailnet, so Telegram cannot reach them.
+
+**How it works.** The instance that owns the bot calls `setWebhook` with `<address>/telegram/webhook`, the same update types as polling, and a secret token that is new on every start. The local server takes `POST /telegram/webhook` and answers 401 to any request without that token. Updates are handled one at a time and in order, as with polling. The bot answers each request within 8 seconds; a slow update, such as a long voice note, keeps running after that. If there is no HTTPS address, or Telegram rejects it, the bot logs why and falls back to polling. When you turn webhook mode off, polling deletes the old webhook first, so there is nothing to clean up. Telegram reports failed deliveries only through `getWebhookInfo`. The bot checks it 15 seconds after it sets the webhook and then every 5 minutes, and logs each new error.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `TELEGRAM_WEBHOOK` | off | `on` receives updates by webhook instead of long polling. |
+| `TELEGRAM_WEBHOOK_URL` | board address | Public HTTPS address that forwards to `127.0.0.1:8790` (or `TELEGRAM_MINIAPP_PORT`). The bot adds `/telegram/webhook`. |
+
+`TELEGRAM_MINIAPP=off` turns the board off, but the server keeps running for the webhook route. It also stops the quick tunnel, so set `TELEGRAM_WEBHOOK_URL` then.
+
 ### How context reset works
 
 1. User sends "clear everything" in Telegram
@@ -762,12 +785,12 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Remote permission approval (inline buttons, text replies, auto-approve list)
 - [x] Agents Board Mini App (`/agents`): live sessions, subagents, context use and tokens per hour
 - [x] Custom commands (`commands.json`): bot commands that run Claude Code skills
+- [x] Webhook mode: alternative to polling for production deployments
 
 ### Planned
 - [ ] **Scheduled messages** -- Send messages at a specific time
 - [ ] **Multi-bot support** -- Run multiple bots from one server instance
 - [ ] **Rate limiting & usage stats** -- Track token usage and set limits per user
-- [ ] **Webhook mode** -- Alternative to polling for production deployments
 
 ## Contributing
 

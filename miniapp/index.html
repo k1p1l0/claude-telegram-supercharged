@@ -1300,7 +1300,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   function renderSessions(snap) {
     const box = $('#sessions');
     const list = Array.isArray(snap.sessions) ? snap.sessions : [];
-    setText($('#s-count'), list.length ? `${list.length} open` : '');
+    const open = list.filter((x) => x.status !== 'stopped').length;
+    setText($('#s-count'), open ? `${open} open` : '');
     if (!list.length) {
       box.dataset.kind = 'empty'; box._map = null;
       setHTML(box, `<div class="empty">${svg('term')}<p class="empty-title">No Claude Code sessions on ${multiMachine() ? esc(machineName()) : 'this Mac'}</p><p class="empty-sub">Start <code>claude</code> in a terminal and it shows up here.</p></div>`);

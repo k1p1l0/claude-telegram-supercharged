@@ -443,7 +443,7 @@ The main board fetches the other machine's data when you select it. The request 
 - **Send:** continue a session with a message. A background session that finished its turn is stopped and resumed with your message. A session that is still working, or a terminal session, gets a background copy that starts with your message.
 - **New task:** start a background session in a folder the board knows, in plan, accept-edits or default permission mode. For tasks on this machine, the bot messages you when the task finishes.
 - **Background sessions:** stop, read the recent output, remove a stopped one.
-- **Terminal sessions:** interrupt (SIGINT) or terminate (SIGTERM). Claude Code quits on both signals, busy or idle, and a reply in progress is lost. The conversation stays on disk, and `claude --resume <id>` continues it.
+- **Terminal sessions:** "End session" sends Ctrl+C (SIGINT). Claude Code quits on it, busy or idle, and a reply in progress is lost. The conversation stays on disk, and `claude --resume <id>` continues it.
 - **The bot's own session:** "New session" does the same as `/new`. The board never signals or messages the session it runs in.
 
 On another machine the controls go through the shared secret, unless that machine turned them off. Each user can run 10 actions per minute. Every action goes to the bot's log, without the message text. `TELEGRAM_MINIAPP_CONTROL=off` makes the board read-only.
@@ -884,6 +884,7 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Rate limiting & usage stats (`/usage`): messages and tokens per user, limits per minute, hour and day
 - [x] Multi-bot support: several bots from one server instance, with per-bot history and optional per-bot access
 - [x] Scheduled messages: one-time, repeating and cron jobs
+- [x] Agents Board session controls: read, send, new task, stop and end sessions from Telegram
 
 ## Contributing
 

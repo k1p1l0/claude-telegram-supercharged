@@ -379,8 +379,9 @@ Bot: [the answer replaces the Working message]
 | `/status` | Working or idle, elapsed time, tool count, uptime, router model |
 | `/new` | Fresh Claude session through the supervisor. Memory and history are kept. |
 | `/agents` | Opens the [Agents Board](#agents-board-mini-app) Mini App |
+| `/usage` | Your messages and tokens for today and the last 7 days, and your [limits](#usage-stats--limits). Admins also see every user. |
 
-Commands answer allowlisted users in DMs. `/verbose` is stored per chat.
+Commands answer allowlisted users in DMs. `/usage` also answers group members in groups the bot is in. `/verbose` is stored per chat.
 
 **How it works.** The supervisor passes `scripts/telegram-progress-hook.ts` to Claude as a `PreToolUse`, `PostToolUse` and `Stop` hook via `--settings`, so it never runs in your interactive sessions. The hook appends each event to `~/.claude/channels/telegram/data/progress.jsonl`, and the server tails that file and edits the Working message (at most one edit per 1.5 seconds). Claude's notes and the thinking/writing phase come from the session transcript. The server's instructions ask Claude to write one short sentence before each tool call.
 
@@ -423,6 +424,38 @@ For a fixed address, use your own HTTPS setup:
 | `TELEGRAM_MINIAPP` | on | `off` turns the board off. |
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
+
+### Usage stats & limits
+
+The bot counts each user's messages per day, delivered and blocked, and the tokens (input, output, cache write and cache read) of every turn their messages started. You can cap messages per minute, messages per hour and tokens per day, for everyone or for one user.
+
+`/usage` shows your numbers for today and the last 7 days, and your limits. Admins also get a line for every user. In a group, it shows only your own numbers.
+
+**How it works.** Before a message reaches Claude, the server checks the sender's limits. If the sender is over a limit, the message is dropped and counted as blocked. The sender gets one short notice per window, for example `Limit reached: 20 messages per hour. Try again in 14 min.`, and no notice for more messages in the same window. The tokens per day limit lasts until the next midnight UTC. Every Telegram message counts, so 10 forwarded messages count as 10. A reaction that reaches Claude starts a turn too, so it counts as a message, and reactions from a user who is over a limit are dropped.
+
+Tokens come from the session transcript in `~/.claude/projects`. The server reads only new bytes, as the Agents Board does. Each API call goes to the user whose Telegram message started the turn, which is the sender of the newest Telegram message in the transcript. Turns typed in the terminal or started by `/loop` have no owner and aren't counted. Subagent tokens count for the user too. The server finds the transcript from the path that the daemon's progress hook reports. Without the hook, it uses `CLAUDE_PROJECT_DIR` and `CLAUDE_CODE_SESSION_ID`, which Claude Code passes to every MCP server.
+
+For limits, tokens = input + output + cache write. Cache reads are shown separately and never count. They make up most of every call and are much cheaper than input, so counting them would make any limit meaningless.
+
+The server keeps stats in `messages.db` (table `usage_daily`) for 90 days. It stores the minute and hour windows there too, so a restart or `/new` doesn't reset them.
+
+**Config** goes in `~/.claude/channels/telegram/access.json`. Every field is optional. A missing value or 0 means no limit, so the bot works as before until you set one.
+
+```json
+{
+  "limits": { "messagesPerMinute": 5, "messagesPerHour": 60, "tokensPerDay": 2000000 },
+  "userLimits": { "412587349": { "messagesPerHour": 200 } },
+  "admins": ["628194073"]
+}
+```
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `limits.messagesPerMinute` | no limit | Messages a user can send to Claude in any 60 seconds. |
+| `limits.messagesPerHour` | no limit | Messages a user can send to Claude in any 60 minutes. |
+| `limits.tokensPerDay` | no limit | Input + output + cache write tokens per user per UTC day. |
+| `userLimits.<userId>` | not set | The same keys for one user. Each key set here replaces the default, and `0` removes that limit. |
+| `admins` | none | User IDs with no limits. In a DM, their `/usage` lists every user. |
 
 ### How context reset works
 
@@ -729,11 +762,11 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Agentic Mode: live progress, typing indicator, in-place answers
 - [x] Remote permission approval (inline buttons, text replies, auto-approve list)
 - [x] Agents Board Mini App (`/agents`): live sessions, subagents, context use and tokens per hour
+- [x] Rate limiting & usage stats (`/usage`): messages and tokens per user, limits per minute, hour and day
 
 ### Planned
 - [ ] **Scheduled messages** -- Send messages at a specific time
 - [ ] **Multi-bot support** -- Run multiple bots from one server instance
-- [ ] **Rate limiting & usage stats** -- Track token usage and set limits per user
 - [ ] **Webhook mode** -- Alternative to polling for production deployments
 - [ ] **Custom commands** -- Define bot commands that map to Claude Code skills
 

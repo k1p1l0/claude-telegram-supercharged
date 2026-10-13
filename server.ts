@@ -2475,6 +2475,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         // ElevenLabs returns OGG/Opus directly — no ffmpeg conversion needed
         let sent: { message_id: number };
+        let mediaType = "voice";
         try {
           sent = await b.bot.api.sendVoice(chat_id, new InputFile(audioPath), {
             ...(reply_to != null ? { reply_parameters: { message_id: reply_to } } : {}),
@@ -2497,10 +2498,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             title: "Voice reply",
             ...(reply_to != null ? { reply_parameters: { message_id: reply_to } } : {}),
           });
+          mediaType = "audio";
         }
         try {
           rmSync(audioPath);
         } catch {}
+        // Track the voice answer like a text reply, so history and the restart replay see the chat as answered.
+        trackMessage(chat_id, sent.message_id, {
+          sender: b.username ?? "bot",
+          text: text.slice(0, 200),
+          ts: Date.now(),
+          replyTo: reply_to,
+        });
+        messageStore.store({
+          message_id: sent.message_id,
+          chat_id,
+          username: b.username ?? "bot",
+          text: text.slice(0, 2000),
+          media_type: mediaType,
+          reply_to_msg_id: reply_to,
+          date: Math.floor(Date.now() / 1000),
+          is_outgoing: true,
+          bot: botKey(b),
+        });
         if (b.primary) onBotMessageSent(chat_id);
         return { content: [{ type: "text", text: `voice reply sent (id: ${sent.message_id})` }] };
       }

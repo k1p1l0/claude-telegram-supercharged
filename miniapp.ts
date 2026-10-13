@@ -49,7 +49,8 @@ interface SessionView {
   project: string;
   cwd: string;
   kind: string;
-  status: "busy" | "idle";
+  /** stopped: a background session without a process, listed by `claude agents --all`. */
+  status: "busy" | "idle" | "stopped";
   startedAt: number;
   model: string | null;
   contextTokens: number;
@@ -1368,7 +1369,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         project: projectName(cwd),
         cwd,
         kind: s.kind ?? "interactive",
-        status: s.status === "busy" ? "busy" : "idle",
+        status: s.kind === "background" && !s.pid ? "stopped" : s.status === "busy" ? "busy" : "idle",
         startedAt: s.startedAt ?? f?.firstTs ?? now,
         model: f?.model ?? null,
         contextTokens: f?.contextTokens ?? 0,
@@ -1383,10 +1384,12 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         actions: fromCli ? sessionActions(s) : ["peek"],
       };
     });
-    // Busy first in a stable order, so cards do not jump on every poll; idle ones by last activity.
+    // Busy first in a stable order, so cards do not jump on every poll; idle ones by last activity,
+    // stopped ones last.
+    const rank = { busy: 0, idle: 1, stopped: 2 };
     sessions.sort((a, b) =>
       a.status !== b.status
-        ? Number(b.status === "busy") - Number(a.status === "busy")
+        ? rank[a.status] - rank[b.status]
         : a.status === "busy"
           ? a.startedAt - b.startedAt
           : b.lastActivity - a.lastActivity,
@@ -1431,7 +1434,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
       host,
       ready,
       totals: {
-        sessions: live.filter((s) => s.kind !== "background" || s.pid).length,
+        sessions: sessions.filter((s) => s.status !== "stopped").length,
         busy: sessions.filter((s) => s.status === "busy").length,
         agentsRunning: sessions.reduce((n, s) => n + s.agents.filter((a) => a.status === "running").length, 0),
         agents24h,

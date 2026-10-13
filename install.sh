@@ -34,7 +34,9 @@ TARGET="$CACHE/$VERSION"
 # Keep the official server once, so you can go back to it.
 [ -f "$TARGET/server.ts.official" ] || cp "$TARGET/server.ts" "$TARGET/server.ts.official"
 
-cp "$DIR/server.ts" "$TARGET/server.ts"
+cp "$DIR/server.ts" "$DIR/miniapp.ts" "$TARGET/"
+mkdir -p "$TARGET/miniapp"
+cp -R "$DIR/miniapp/." "$TARGET/miniapp/"
 mkdir -p "$TARGET/skills"
 cp -R "$DIR/skills/." "$TARGET/skills/"
 # package.json is left alone: the official start script keeps `bun install`

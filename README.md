@@ -64,6 +64,7 @@ Run it again any time to update. The full walkthrough is in [Getting Started](#g
 | Model routing (Haiku / Sonnet / Opus) | ❌ | ✅ |
 | Long answers as Telegraph articles | ❌ | ✅ |
 | Approve permission prompts from Telegram | ✅ | ✅ Buttons or "yes <id>", plus an auto-approve list |
+| Live board of sessions, subagents and tokens | ❌ | ✅ [`/agents` Mini App](#agents-board-mini-app) |
 
 ## Features
 
@@ -105,6 +106,7 @@ Run it again any time to update. The full walkthrough is in [Getting Started](#g
 | --- | --- |
 | **⚡ Two-Tier Model Routing** | Configurable router: Haiku (fast, 200K), Sonnet (balanced, 1M), or Opus (deep, 1M). Set via `TELEGRAM_ROUTER_MODEL`. Complex tasks auto-escalate to Opus via subagents (change the target with `TELEGRAM_ESCALATION_MODEL`). |
 | **🛠 Agentic Mode** | Watch Claude work: "typing…" the whole time, plus a live "Working… (Ns)" message with Claude's notes and each tool call as it runs. The answer replaces it in place. `/verbose 0\|1\|2`, `/status`, `/new`. [Details](#agentic-mode) |
+| **📊 Agents Board** | `/agents` opens a Mini App in Telegram: every Claude Code session on the Mac, its subagents, context use, tokens per hour and the latest tool calls. [Details](#agents-board-mini-app) |
 | **🔄 Daemon Mode** | Supervisor auto-restarts Claude on crash or context reset. Memory preserved, zero downtime. |
 | **🛡 Context Watchdog** | Auto-restarts when context exceeds 50%, or after 2 hours of uptime, to keep sessions responsive. SQLite history and memory survive restarts. |
 | **🔒 Single-Instance Lock** | PID-based lock file prevents duplicate bot instances competing for Telegram updates. |
@@ -147,7 +149,9 @@ Clone this repo and install both the supercharged server and the daemon supervis
 
 ```sh
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
-cp claude-telegram-supercharged/server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)/server.ts
+PLUGIN_DIR=~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
+cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts $PLUGIN_DIR/
+cp -R claude-telegram-supercharged/miniapp $PLUGIN_DIR/
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 cp claude-telegram-supercharged/scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
@@ -207,7 +211,8 @@ git pull
 # Find the current version (e.g. 0.0.4)
 PLUGIN_VERSION=$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
 echo "Updating to version: $PLUGIN_VERSION"
-cp server.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/server.ts
+cp server.ts miniapp.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
+cp -R miniapp ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 # Copy skills
 cp -r skills/* ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/skills/
@@ -373,12 +378,51 @@ Bot: [the answer replaces the Working message]
 | `/verbose 2` | Longer notes and full tool inputs (commands, paths, URLs) |
 | `/status` | Working or idle, elapsed time, tool count, uptime, router model |
 | `/new` | Fresh Claude session through the supervisor. Memory and history are kept. |
+| `/agents` | Opens the [Agents Board](#agents-board-mini-app) Mini App |
 
 Commands answer allowlisted users in DMs. `/verbose` is stored per chat.
 
 **How it works.** The supervisor passes `scripts/telegram-progress-hook.ts` to Claude as a `PreToolUse`, `PostToolUse` and `Stop` hook via `--settings`, so it never runs in your interactive sessions. The hook appends each event to `~/.claude/channels/telegram/data/progress.jsonl`, and the server tails that file and edits the Working message (at most one edit per 1.5 seconds). Claude's notes and the thinking/writing phase come from the session transcript. The server's instructions ask Claude to write one short sentence before each tool call.
 
 **Config** (supervisor environment): `TELEGRAM_VERBOSE` sets the default level (1). `TELEGRAM_AGENTIC_MODE=off` turns the hook off.
+
+### Agents Board (Mini App)
+
+`/agents` opens a live board inside Telegram for every Claude Code session on the Mac, not only the daemon:
+
+- **Sessions:** busy or idle, the tool running now, context use (green below 50%, yellow to 80%, red above), model, uptime and tokens.
+- **Subagents:** running and recently finished, with their current tool and tokens.
+- **Last 24 hours:** tokens per hour (input, output, cache read, cache write), tool calls and cache hit rate.
+- **Recent tool calls** across all sessions.
+
+<img src="./docs/agents-board.png" alt="Agents Board: overview, live sessions with subagents, session detail" width="100%" />
+
+**How it works.** The instance that owns the bot runs a small HTTP server on `127.0.0.1:8790`. A worker thread reads `claude agents --json` for the live sessions and the transcripts in `~/.claude/projects` for tokens, tool calls and subagents. It reads only new bytes, and only while someone has the board open. Every API request must carry Telegram's signed `initData` from a user on your allowlist, so the URL shows nothing to anyone else.
+
+**Setup.** Telegram opens Mini Apps only over HTTPS, so the board needs an HTTPS address that your phone can reach.
+
+The easiest way needs no account:
+
+1. Install cloudflared: `brew install cloudflared`.
+2. Add `TELEGRAM_MINIAPP_URL=auto` to `~/.claude/channels/telegram/.env`.
+3. Restart the daemon and send `/agents`.
+
+The bot then starts a Cloudflare quick tunnel and puts its address on the `/agents` button. The address is random and changes when the bot restarts. After a restart, send `/agents` again, because older buttons stop working.
+
+For a fixed address, use your own HTTPS setup:
+
+1. Put the port behind HTTPS. For a private address that works on devices in your tailnet: `tailscale serve --bg 8790`. For a public address: `tailscale funnel --bg 8790` or a named Cloudflare Tunnel.
+2. Add the address to `~/.claude/channels/telegram/.env`, for example `TELEGRAM_MINIAPP_URL=https://my-mac.tail1234.ts.net`. Serve the board at the root of that address, or make the proxy strip the path.
+3. Restart the daemon and send `/agents`.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `TELEGRAM_MINIAPP_URL` | not set | HTTPS address of the board, or `auto` for a Cloudflare quick tunnel (needs `cloudflared`). Until it is set, `/agents` replies with these setup steps. |
+| `TELEGRAM_MINIAPP_PORT` | `8790` | Local port of the board. |
+| `TELEGRAM_MINIAPP_NAME` | computer name | Machine name in the board header. |
+| `TELEGRAM_MINIAPP` | on | `off` turns the board off. |
+
+The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
 
 ### How context reset works
 

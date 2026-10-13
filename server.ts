@@ -36,6 +36,12 @@ import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "gramm
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 
+// The Agents Board is optional. If miniapp.ts is missing next to this file, only /agents stops working.
+const miniapp = await import("./miniapp").catch((err) => {
+  process.stderr.write(`telegram channel: mini app disabled: ${err}\n`);
+  return null;
+});
+
 const ALLOWED_REACTIONS = new Set([
   "👍",
   "👎",
@@ -3661,10 +3667,10 @@ function startProgressWatcher(): void {
   }, 1000);
 }
 
-// /verbose, /status, /new. DM-only and allowlisted senders only; everything
+// /verbose, /status, /new, /agents. DM-only and allowlisted senders only; everything
 // else falls through to Claude. Returns true when the message was handled.
 async function handleAgenticCommand(ctx: Context): Promise<boolean> {
-  const m = /^\/(verbose|status|new)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
+  const m = /^\/(verbose|status|new|agents)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
   if (!m || ctx.chat?.type !== "private") return false;
   if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return false;
   if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return false;
@@ -3697,6 +3703,22 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
     await ctx.reply(
       [`Status: ${work}`, `Uptime: ${up} min`, `Router model: ${ROUTER_MODEL}`, `Verbosity: ${getVerbose(chatId)} (${VERBOSE_LABELS[getVerbose(chatId)]})`].join("\n"),
     );
+    return true;
+  }
+
+  if (cmd === "agents") {
+    if (!miniapp) {
+      await ctx.reply("The agents board is not installed. Copy miniapp.ts and the miniapp folder next to server.ts and restart.");
+      return true;
+    }
+    const url = miniapp.miniAppUrl();
+    if (!url.startsWith("https://")) {
+      await ctx.reply(miniapp.miniAppSetupHint());
+      return true;
+    }
+    await ctx.reply("Live board of your Claude Code sessions, subagents and tokens.", {
+      reply_markup: new InlineKeyboard().webApp("Open agents board", url),
+    });
     return true;
   }
 
@@ -3968,6 +3990,11 @@ function ownsLock(): boolean {
 // server and left the daemon deaf until its next restart.
 let pollingSetupDone = false;
 if (!isSecondary) {
+  miniapp?.startMiniApp({
+    token: TOKEN,
+    isAllowed: (userId) => loadAccess().allowFrom.includes(userId),
+    log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
+  });
   void (async () => {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -3993,6 +4020,7 @@ if (!isSecondary) {
                   { command: "status", description: "Is Claude working, uptime, model" },
                   { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
                   { command: "new", description: "Fresh session (memory kept)" },
+                  { command: "agents", description: "Live board of sessions, subagents, tokens" },
                 ],
                 { scope: { type: "all_private_chats" } },
               )

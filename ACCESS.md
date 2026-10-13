@@ -120,6 +120,24 @@ The primary bot always uses the top-level settings. The `pending` map, `mentionP
 
 **Pairing through an extra bot.** A code issued by an extra bot records it in the pending entry (`"bot": "team_bot"`). `/telegram:access pair <code>` then adds the person (or group) to that bot's own `allowFrom` (or `groups`) when its entry defines one, and to the top-level list otherwise. Approving a code from a bot without its own list gives the person access to every bot that shares the top-level list. The "Paired!" confirmation comes from the bot the person wrote to.
 
+`limits`, `userLimits` and `admins` (see [Usage limits](#usage-limits)) are top-level only. They count each Telegram user across all bots, so a `bots` entry can't override them.
+
+## Usage limits
+
+Limits cap how much each user can send to Claude, in DMs and in groups. Every field is optional. A missing value or `0` means no limit, which is the default.
+
+`limits` applies to every user. `userLimits` overrides it per user ID, key by key: a key set there replaces the default for that user, and `0` removes that limit. `admins` lists user IDs with no limits at all; in a DM, their `/usage` also lists every user.
+
+| Key | What it counts |
+| --- | --- |
+| `messagesPerMinute` | Messages delivered to Claude in any 60 seconds |
+| `messagesPerHour` | Messages delivered to Claude in any 60 minutes |
+| `tokensPerDay` | Input + output + cache write tokens per UTC day. Cache reads don't count. |
+
+A reaction that Claude receives counts as a message. A message over a limit never reaches Claude. The sender gets one notice per window and can check their numbers with `/usage`. See [Usage stats & limits](./README.md#usage-stats--limits) for how tokens are counted per user.
+
+`/telegram:access set` doesn't handle these keys. Edit `access.json` by hand; the server re-reads it on every message.
+
 ## Skill reference
 
 | Command | Effect |
@@ -177,6 +195,15 @@ The primary bot always uses the top-level settings. The `pending` map, `mentionP
 
   // Tools whose permission requests are allowed without asking in Telegram.
   "autoApproveTools": ["Read", "Grep", "Glob"],
+
+  // Limits for every user. Missing or 0 = no limit.
+  "limits": { "messagesPerMinute": 5, "messagesPerHour": 60, "tokensPerDay": 2000000 },
+
+  // Per-user overrides, key by key. 0 removes that limit for the user.
+  "userLimits": { "412587349": { "messagesPerHour": 200 } },
+
+  // No limits. Their /usage in a DM lists every user.
+  "admins": ["628194073"],
 
   // Extra bots only (TELEGRAM_EXTRA_BOT_TOKENS): per-bot dmPolicy, allowFrom
   // and groups, keyed by bot username. Missing keys use the values above.

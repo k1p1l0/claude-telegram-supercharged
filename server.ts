@@ -32,7 +32,7 @@ import { extname, join, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
+import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 
@@ -122,6 +122,7 @@ const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
 const ACCESS_FILE = join(STATE_DIR, "access.json");
 const APPROVED_DIR = join(STATE_DIR, "approved");
 const ENV_FILE = join(STATE_DIR, ".env");
+const COMMANDS_FILE = join(STATE_DIR, "commands.json");
 
 // Load ~/.claude/channels/telegram/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where the token lives.
@@ -134,9 +135,9 @@ try {
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 // More bots served by this same instance, comma-separated. See "Multiple bots" in the README.
-const EXTRA_TOKENS = [
-  ...new Set((process.env.TELEGRAM_EXTRA_BOT_TOKENS ?? "").split(",").map((t) => t.trim())),
-].filter((t) => t && t !== TOKEN);
+const EXTRA_TOKENS = [...new Set((process.env.TELEGRAM_EXTRA_BOT_TOKENS ?? "").split(",").map((t) => t.trim()))].filter(
+  (t) => t && t !== TOKEN,
+);
 const MULTI_BOT = EXTRA_TOKENS.length > 0;
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === "static";
 const TELEGRAPH_ENABLED = process.env.TELEGRAPH_ENABLED === "true"; // default false — opt-in
@@ -186,6 +187,8 @@ function lockFileFor(token: string): string {
 // Returns false when another live instance owns the lock: that bot then runs
 // MCP-only here. `label` names an extra bot in the logs.
 function acquireLock(lockFile = LOCK_FILE, label = ""): boolean {
+  // A fresh install has no data dir yet, and writing the lock would throw.
+  mkdirSync(DATA_DIR, { recursive: true });
   if (existsSync(lockFile)) {
     const existingPid = Number.parseInt(readFileSync(lockFile, "utf-8").trim(), 10);
     if (!Number.isNaN(existingPid) && existingPid !== process.pid) {
@@ -641,7 +644,7 @@ setInterval(checkSchedules, 30_000);
 // Rolling buffer: max 500 messages per chat, 14-day TTL, 50MB hard limit.
 
 class MessageStore {
-  private db: Database;
+  readonly db: Database;
   private insertCount = 0;
 
   constructor(dbPath: string) {
@@ -695,7 +698,10 @@ class MessageStore {
           this.db.exec("DROP TABLE IF EXISTS messages_new");
           this.db.exec(schema("messages_new"));
           const fresh = this.db.query("PRAGMA table_info(messages_new)").all() as Array<{ name: string }>;
-          const copy = old.filter((c) => fresh.some((f) => f.name === c.name)).map((c) => c.name).join(", ");
+          const copy = old
+            .filter((c) => fresh.some((f) => f.name === c.name))
+            .map((c) => c.name)
+            .join(", ");
           this.db.exec(`INSERT INTO messages_new (${copy}) SELECT ${copy} FROM messages`);
           this.db.exec("DROP TABLE messages");
           this.db.exec("ALTER TABLE messages_new RENAME TO messages");
@@ -846,6 +852,109 @@ class MessageStore {
 
 const messageStore = new MessageStore(DB_PATH);
 
+// ── Usage stats store (same database) ───────────────────────────────
+// Per user per UTC day: messages delivered to Claude, messages blocked by a
+// limit, and the tokens of the turns their messages started. usage_hits keeps
+// the delivery times of the last hour for the per-minute and per-hour limits,
+// so a restart (or /new) doesn't reset them. Stats are kept for 90 days.
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+type TokenUsage = { input: number; output: number; cacheRead: number; cacheWrite: number };
+type UsageTotals = TokenUsage & { messages: number; blocked: number };
+
+function utcDay(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+class UsageStore {
+  constructor(private db: Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS usage_daily (
+        user_id     TEXT NOT NULL,
+        day         TEXT NOT NULL,
+        messages    INTEGER NOT NULL DEFAULT 0,
+        blocked     INTEGER NOT NULL DEFAULT 0,
+        input       INTEGER NOT NULL DEFAULT 0,
+        output      INTEGER NOT NULL DEFAULT 0,
+        cache_read  INTEGER NOT NULL DEFAULT 0,
+        cache_write INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, day)
+      );
+      CREATE TABLE IF NOT EXISTS usage_hits (
+        user_id TEXT NOT NULL,
+        ts      INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_usage_hits_user_ts ON usage_hits(user_id, ts);
+    `);
+    db.run("DELETE FROM usage_daily WHERE day < ?", [utcDay(Date.now() - 90 * DAY_MS)]);
+    db.run("DELETE FROM usage_hits WHERE ts < ?", [Date.now() - HOUR_MS]);
+  }
+
+  add(userId: string, day: string, d: Partial<UsageTotals>): void {
+    this.db.run(
+      `INSERT INTO usage_daily (user_id, day, messages, blocked, input, output, cache_read, cache_write)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, day) DO UPDATE SET
+         messages = messages + excluded.messages, blocked = blocked + excluded.blocked,
+         input = input + excluded.input, output = output + excluded.output,
+         cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write`,
+      [userId, day, d.messages ?? 0, d.blocked ?? 0, d.input ?? 0, d.output ?? 0, d.cacheRead ?? 0, d.cacheWrite ?? 0],
+    );
+  }
+
+  /** A message delivered to Claude: counts for today and for the minute/hour windows. */
+  recordMessage(userId: string, now: number): void {
+    this.add(userId, utcDay(now), { messages: 1 });
+    this.db.run("INSERT INTO usage_hits (user_id, ts) VALUES (?, ?)", [userId, now]);
+    this.db.run("DELETE FROM usage_hits WHERE user_id = ? AND ts < ?", [userId, now - HOUR_MS]);
+  }
+
+  /** Delivery times after `since`, oldest first. */
+  hits(userId: string, since: number): number[] {
+    const rows = this.db
+      .query("SELECT ts FROM usage_hits WHERE user_id = ? AND ts > ? ORDER BY ts")
+      .all(userId, since) as Array<{ ts: number }>;
+    return rows.map((r) => r.ts);
+  }
+
+  /** One user's rows from `fromDay` on, newest first. */
+  days(userId: string, fromDay: string): Array<UsageTotals & { day: string }> {
+    return this.db
+      .query(
+        `SELECT day, messages, blocked, input, output, cache_read AS cacheRead, cache_write AS cacheWrite
+         FROM usage_daily WHERE user_id = ? AND day >= ? ORDER BY day DESC`,
+      )
+      .all(userId, fromDay) as Array<UsageTotals & { day: string }>;
+  }
+
+  /** Totals per user from `fromDay` on, most tokens first. */
+  users(fromDay: string): Array<UsageTotals & { userId: string }> {
+    return this.db
+      .query(
+        `SELECT user_id AS userId, SUM(messages) AS messages, SUM(blocked) AS blocked, SUM(input) AS input,
+           SUM(output) AS output, SUM(cache_read) AS cacheRead, SUM(cache_write) AS cacheWrite
+         FROM usage_daily WHERE day >= ? GROUP BY user_id
+         ORDER BY SUM(input) + SUM(output) + SUM(cache_write) DESC, SUM(messages) DESC`,
+      )
+      .all(fromDay) as Array<UsageTotals & { userId: string }>;
+  }
+
+  /** The newest @username or first name this user sent a message with, from the history store. */
+  name(userId: string): string | undefined {
+    const row = this.db
+      .query(
+        "SELECT username, first_name FROM messages WHERE user_id = ? AND is_outgoing = 0 ORDER BY date DESC LIMIT 1",
+      )
+      .get(userId) as { username: string | null; first_name: string | null } | null;
+    return row?.username ? `@${row.username}` : (row?.first_name ?? undefined);
+  }
+}
+
+const usageStore = new UsageStore(messageStore.db);
+
 // Graceful shutdown — checkpoint and close the database.
 process.on("SIGINT", () => {
   messageStore.close();
@@ -895,7 +1004,9 @@ function pickBot(chat_id: string | undefined, name?: unknown): BotEntry {
     const want = name.trim().replace(/^@/, "").toLowerCase();
     const found = bots.find((b) => b.username.toLowerCase() === want);
     if (!found) {
-      throw new Error(`unknown bot "${name}" (this server runs ${bots.map((b) => `@${b.username || "?"}`).join(", ")})`);
+      throw new Error(
+        `unknown bot "${name}" (this server runs ${bots.map((b) => `@${b.username || "?"}`).join(", ")})`,
+      );
     }
     return found;
   }
@@ -945,6 +1056,14 @@ type BotPolicy = {
   groups?: Record<string, GroupPolicy>;
 };
 
+/** Missing or 0 = no limit. */
+type UsageLimits = {
+  messagesPerMinute?: number;
+  messagesPerHour?: number;
+  /** Input + output + cache write tokens per UTC day. Cache reads don't count. */
+  tokensPerDay?: number;
+};
+
 type Access = {
   dmPolicy: "pairing" | "allowlist" | "disabled";
   allowFrom: string[];
@@ -964,6 +1083,12 @@ type Access = {
   autoTranscribe?: boolean;
   /** Tool names whose permission_requests are auto-allowed without a Telegram round-trip. */
   autoApproveTools?: string[];
+  /** Default limits for every user. */
+  limits?: UsageLimits;
+  /** Per-user overrides keyed by user id. Each key set here replaces the default. */
+  userLimits?: Record<string, UsageLimits>;
+  /** User ids exempt from limits. /usage shows them everyone's usage. */
+  admins?: string[];
   /** Per-bot overrides for extra bots, keyed by bot username. The primary always uses the top level. */
   bots?: Record<string, BotPolicy>;
 };
@@ -1073,6 +1198,10 @@ function readAccessFile(): Access {
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
       autoTranscribe: parsed.autoTranscribe,
+      autoApproveTools: parsed.autoApproveTools,
+      limits: parsed.limits,
+      userLimits: parsed.userLimits,
+      admins: parsed.admins,
       bots: parsed.bots,
     };
   } catch (err) {
@@ -1439,13 +1568,15 @@ const mcp = new Server(
       ...(MULTI_BOT
         ? [
             "",
-            'MULTIPLE BOTS: This server runs several Telegram bots. The tag\'s bot attribute is the username of the bot that received the message. Pass it back as the bot parameter on reply, react, edit_message, ask_user, voice_reply, create_telegraph_page, get_history, search_messages and clear_history, so the answer comes from the bot the person wrote to. One chat_id can exist on several bots (a private chat\'s id is the user\'s id on every bot), and each bot has its own history. Without bot, the server uses the bot that last received a message from that chat.',
+            "MULTIPLE BOTS: This server runs several Telegram bots. The tag's bot attribute is the username of the bot that received the message. Pass it back as the bot parameter on reply, react, edit_message, ask_user, voice_reply, create_telegraph_page, get_history, search_messages and clear_history, so the answer comes from the bot the person wrote to. One chat_id can exist on several bots (a private chat's id is the user's id on every bot), and each bot has its own history. Without bot, the server uses the bot that last received a message from that chat.",
           ]
         : []),
       "",
       "VOICE TRANSCRIPTION CAUTION: Voice transcriptions can be inaccurate — whisper may mishear words, invent context, or confuse languages. NEVER auto-trigger skills, start heavy tasks, or assume intent based solely on a voice transcription. Instead: (1) briefly confirm what you understood from the voice message, (2) ask the user if that's correct before proceeding, (3) only then take action. Example: 'I heard you asking about X — is that right?' This prevents wasting time on misheard requests. For simple greetings or short clear messages, confirmation is not needed.",
       "",
       "DOCUMENTS: If the tag has a document_path attribute, the user sent a file (PDF, DOCX, spreadsheet, etc.). Read the file to see its contents. PDFs and DOCX files are supported by the Read tool directly. For text-based files (CSV, TXT, JSON, code), Read them directly. For XLSX, suggest the user share as CSV or PDF. Always acknowledge the document and summarize what you found. Files >10MB are skipped.",
+      "",
+      "CUSTOM COMMANDS: If the tag has command and skill attributes, the user sent a bot command that the owner mapped to a skill in commands.json, and the server wrote the instruction in the content. Run that skill with the Skill tool, pass the Arguments line (if any) as its args, and reply with the result via the reply tool.",
       "",
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, edit_message to update a message you previously sent (e.g. progress → result), and ask_user to present inline buttons and wait for a choice.',
       "",
@@ -3004,7 +3135,7 @@ bot.on("message", async (ctx, next) => {
 
 bot.on("message:text", async (ctx) => {
   if (await handleAgenticCommand(ctx)) return;
-  await handleInbound(ctx, ctx.message.text, undefined);
+  await handleInbound(ctx, ctx.message.text, undefined, matchCustomCommand(ctx));
 });
 
 
@@ -3242,11 +3373,13 @@ bot.on("message_reaction", async (ctx) => {
 
   const chat_id = String(reaction.chat.id);
   const b = botOf(ctx);
-  const access = botAccess(loadAccess(), b);
+  const access = loadAccess();
   const senderId = reaction.user ? String(reaction.user.id) : undefined;
 
   // Only forward reactions from allowlisted users.
-  if (!senderId || !access.allowFrom.includes(senderId)) return;
+  if (!senderId || !botAccess(access, b).allowFrom.includes(senderId)) return;
+  // A reaction starts a turn too, so it counts like a message and is dropped over a limit.
+  if (overLimit(access, senderId)) return;
 
   const newReactions = reaction.new_reaction ?? [];
   const oldReactions = reaction.old_reaction ?? [];
@@ -3267,6 +3400,8 @@ bot.on("message_reaction", async (ctx) => {
   const username = user && "username" in user ? (user.username ?? String(user.id)) : senderId;
 
   lastBotByChat.set(chat_id, b);
+  usageStore.recordMessage(senderId, Date.now());
+  lastDeliveredUser = senderId;
   void mcp.notification({
     method: "notifications/claude/channel",
     params: {
@@ -3301,6 +3436,7 @@ interface BufferedCtx {
     | (() => Promise<{ path: string; type: "image" | "audio" | "document"; transcription?: string } | undefined>)
     | undefined;
   access: Access;
+  command?: CustomCommandMatch;
 }
 
 // Keyed by chatKey(): one buffer per bot and chat.
@@ -3323,7 +3459,13 @@ async function promotePregateBuffer(key: string): Promise<void> {
   pregateBuffers.delete(key);
   // Deliver each buffered message through the normal post-gate path.
   for (const entry of buf.messages) {
-    await deliverMessage(entry.ctx, entry.inboundText, entry.downloadMedia, entry.access);
+    // These never addressed the bot, so a sender over a limit is skipped without a notice.
+    const sender = String(entry.ctx.from?.id ?? "");
+    if (overLimit(entry.access, sender)) {
+      usageStore.add(sender, utcDay(Date.now()), { blocked: 1 });
+      continue;
+    }
+    await deliverMessage(entry.ctx, entry.inboundText, entry.downloadMedia, entry.access, entry.command);
   }
 }
 
@@ -3346,6 +3488,7 @@ interface BatchedMessage {
   isGroup: boolean;
   chatId: string;
   via: BotEntry; // the bot that received it
+  command?: CustomCommandMatch;
 }
 
 // Keyed by chatKey(): one batch per bot and chat.
@@ -3399,6 +3542,9 @@ function flushBatch(key: string): void {
   const audioPaths = msgs.filter((m) => m.media?.type === "audio").map((m) => m.media!.path);
   const docPaths = msgs.filter((m) => m.media?.type === "document").map((m) => m.media!.path);
 
+  // A batch carries one command/skill pair in meta: the latest one. Each instruction is in the text.
+  const command = msgs.findLast((m) => m.command)?.command;
+
   // Use the last message's context for thread tracking
   const recentHistory = messageStore.formatRecent(chatId, 5, botKey(first.via));
   const content = recentHistory ? `${combinedText}\n\n${recentHistory}` : combinedText;
@@ -3430,6 +3576,7 @@ function flushBatch(key: string): void {
         ...(docPaths.length > 0 ? { document_path: docPaths[0] } : {}),
         ...(docPaths.length > 1 ? { document_paths: docPaths.join(",") } : {}),
         ...(last.threadId != null ? { thread_id: String(last.threadId) } : {}),
+        ...(command ? { command: command.name, skill: command.skill } : {}),
         ...last.replyContext,
         ...threadChainContext,
       },
@@ -3443,9 +3590,12 @@ async function handleInbound(
   downloadMedia:
     | (() => Promise<{ path: string; type: "image" | "audio" | "document"; transcription?: string } | undefined>)
     | undefined,
+  command?: CustomCommandMatch,
 ): Promise<void> {
-  const result = gate(ctx);
+  let result = gate(ctx);
   const b = botOf(ctx);
+  // "/standup@this_bot" in a group addresses the bot the way a mention does.
+  if (result.action === "buffer" && command?.addressed) result = { action: "deliver", access: result.access };
 
   if (result.action === "drop") return;
 
@@ -3487,21 +3637,27 @@ async function handleInbound(
     if (buf) {
       if (buf.messages.length >= MAX_PREGATE_BUFFER) return; // safety cap
       clearTimeout(buf.timer);
-      buf.messages.push({ ctx, inboundText, downloadMedia, access: result.access });
+      buf.messages.push({ ctx, inboundText, downloadMedia, access: result.access, command });
       buf.timer = setTimeout(() => discardPregateBuffer(key), BATCH_WINDOW_MS);
     } else {
       pregateBuffers.set(key, {
-        messages: [{ ctx, inboundText, downloadMedia, access: result.access }],
+        messages: [{ ctx, inboundText, downloadMedia, access: result.access, command }],
         timer: setTimeout(() => discardPregateBuffer(key), BATCH_WINDOW_MS),
       });
     }
     return;
   }
 
-  // action === "deliver" — first promote any buffered messages from this chat
-  await promotePregateBuffer(chatKey(b, String(ctx.chat!.id)));
+  if (await enforceLimits(ctx, result.access)) return;
 
-  await deliverMessage(ctx, inboundText, downloadMedia, result.access);
+  // action === "deliver" — first promote any buffered messages from this chat
+  const key = chatKey(b, String(ctx.chat!.id));
+  const buffered = pregateBuffers.has(key);
+  await promotePregateBuffer(key);
+  // The sender's own buffered messages may have used up their last slots.
+  if (buffered && (await enforceLimits(ctx, result.access))) return;
+
+  await deliverMessage(ctx, inboundText, downloadMedia, result.access, command);
 }
 
 // ── Agentic Mode: live tool progress ─────────────────────────────────
@@ -3864,13 +4020,486 @@ function startProgressWatcher(): void {
   }, 1000);
 }
 
-// /verbose, /status, /new, /agents. DM-only, primary bot only and allowlisted senders
-// only; everything else falls through to Claude. Returns true when the message was handled.
+// ── Usage stats & limits ─────────────────────────────────────────────
+// Tokens come from the session transcript, read like miniapp.ts does (new
+// bytes only). Each API call's tokens go to the user whose Telegram message
+// started the turn: the user_id of the newest <channel> message in the
+// transcript. A turn typed in the terminal or fired by a /loop has no owner and
+// isn't counted. Subagent transcripts count for the current owner.
+//
+// "Tokens" for limits = input + output + cache write. Cache reads are stored
+// and shown separately: they are most of every call and cheap, so counting
+// them would make any limit meaningless.
+
+const USAGE_SCAN_MS = 5000;
+const USAGE_READ_MAX = 8 * 1024 * 1024; // bytes per read; up to 8 reads per file per scan
+const usageOffsets = new Map<string, number>();
+const usageSeen = new Map<string, TokenUsage>(); // API message id → highest usage seen
+let usageOwner: string | undefined;
+let usageTagsSeen = false;
+// Owner while the transcript shows no <channel> tags at all (a format change):
+// the sender of the last delivered message.
+let lastDeliveredUser: string | undefined;
+let hookTranscript: string | undefined;
+let fallbackTranscript: string | undefined;
+const limitNotices = new Map<string, number>(); // "user:chat" → end of the window the last notice was for
+
+function zeroTokens(): TokenUsage {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+}
+
+function limitTokens(u: TokenUsage): number {
+  return u.input + u.output + u.cacheWrite;
+}
+
+// This session's transcript. In daemon mode the progress hook reports it (and
+// follows /clear). Otherwise Claude Code gives MCP servers CLAUDE_CODE_SESSION_ID
+// and CLAUDE_PROJECT_DIR, and the file is
+// projects/<project dir with every non-alphanumeric character replaced by "-">/<id>.jsonl.
+// Without a session id (older versions): the newest transcript in that folder
+// written since this server started.
+function sessionTranscript(): string | undefined {
+  // A path under subagents/ isn't the session's own: keep the last main one.
+  if (lastTranscript && !lastTranscript.includes(`${sep}subagents${sep}`)) hookTranscript = lastTranscript;
+  if (hookTranscript) return hookTranscript;
+  const root = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+  const encoded = (process.env.CLAUDE_PROJECT_DIR || process.env.PWD || process.cwd()).replace(/[^a-zA-Z0-9]/g, "-");
+  let dir = join(root, encoded);
+  // Very long names are cut to 200 characters and get a hash appended.
+  if (encoded.length > 200 && !existsSync(dir)) {
+    try {
+      const match = readdirSync(root).find((d) => d.startsWith(encoded.slice(0, 200)));
+      if (match) dir = join(root, match);
+    } catch {}
+  }
+  const id = process.env.CLAUDE_CODE_SESSION_ID;
+  if (id) return join(dir, `${id}.jsonl`);
+  if (!fallbackTranscript) {
+    let newest = serverStartedAt;
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith(".jsonl")) continue;
+        const mtime = statSync(join(dir, f)).mtimeMs;
+        if (mtime >= newest) {
+          newest = mtime;
+          fallbackTranscript = join(dir, f);
+        }
+      }
+    } catch {}
+  }
+  return fallbackTranscript;
+}
+
+// Complete lines added since the last read. A file seen for the first time is
+// read from the start, unless nothing was written to it since this server
+// started. ingestUsage skips usage from before the start by timestamp.
+function readNewLines(path: string): string[] {
+  let size: number;
+  let mtime: number;
+  try {
+    ({ size, mtimeMs: mtime } = statSync(path));
+  } catch {
+    return [];
+  }
+  let off = usageOffsets.get(path) ?? (mtime < serverStartedAt ? size : 0);
+  if (off > size) off = 0; // truncated or replaced
+  usageOffsets.set(path, off);
+  const len = Math.min(size - off, USAGE_READ_MAX);
+  if (len <= 0) return [];
+  const buf = Buffer.alloc(len);
+  const fd = openSync(path, "r");
+  try {
+    readSync(fd, buf, 0, len, off);
+  } finally {
+    closeSync(fd);
+  }
+  const end = buf.lastIndexOf(10);
+  if (end < 0) {
+    // One line longer than a whole read (a big tool result, never usage): skip it.
+    if (len === USAGE_READ_MAX) usageOffsets.set(path, off + len);
+    return [];
+  }
+  usageOffsets.set(path, off + end + 1);
+  return buf.subarray(0, end).toString("utf-8").split("\n");
+}
+
+function ingestUsage(line: string, main: boolean, pending: Map<string, TokenUsage>): void {
+  if (line.includes('"type":"user"')) {
+    // Prompts in the main transcript decide who owns the turn.
+    if (!main) return;
+    if (!line.includes("<channel") && !/"turnOrigin":"(human|scheduled)"/.test(line)) return;
+    const e = JSON.parse(line);
+    if (e.type !== "user") return;
+    const c = e.message?.content;
+    const text = typeof c === "string" ? c : Array.isArray(c) && c[0]?.type === "text" ? String(c[0].text) : "";
+    const tag = /^<channel\s[^>]*>/.exec(text)?.[0];
+    if (tag) {
+      // user_id comes before every attribute with user text in it (reply_to_text),
+      // so the first match is the sender. Another channel's message (Discord...)
+      // starts a turn no Telegram user owns.
+      const id = /\ssource="[^"]*telegram/i.test(tag) ? /\suser_id="(\d+)"/.exec(tag)?.[1] : undefined;
+      usageOwner = id;
+      if (id) usageTagsSeen = true;
+    } else if (e.turnOrigin === "human" || e.turnOrigin === "scheduled") {
+      usageOwner = undefined;
+    }
+    return;
+  }
+  if (!line.includes('"type":"assistant"')) return;
+  const e = JSON.parse(line);
+  const m = e.message;
+  if (e.type !== "assistant" || !m?.id || !m.usage) return;
+  const t = Date.parse(e.timestamp) || 0;
+  if (t < serverStartedAt) return; // the server running back then counted it
+  const u = m.usage;
+  const cur = {
+    input: u.input_tokens ?? 0,
+    output: u.output_tokens ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    cacheWrite: u.cache_creation_input_tokens ?? 0,
+  };
+  // Same rule as miniapp.ts: the lines of one message share its id and later
+  // ones can carry a larger output_tokens, so keep the highest value per field
+  // and count only the growth.
+  const seen = usageSeen.get(m.id) ?? zeroTokens();
+  const growth = {
+    input: Math.max(0, cur.input - seen.input),
+    output: Math.max(0, cur.output - seen.output),
+    cacheRead: Math.max(0, cur.cacheRead - seen.cacheRead),
+    cacheWrite: Math.max(0, cur.cacheWrite - seen.cacheWrite),
+  };
+  usageSeen.set(m.id, {
+    input: seen.input + growth.input,
+    output: seen.output + growth.output,
+    cacheRead: seen.cacheRead + growth.cacheRead,
+    cacheWrite: seen.cacheWrite + growth.cacheWrite,
+  });
+  if (usageSeen.size > 10_000) for (const k of [...usageSeen.keys()].slice(0, 5_000)) usageSeen.delete(k);
+  const owner = usageTagsSeen ? usageOwner : lastDeliveredUser;
+  if (!owner) return;
+  const key = `${owner} ${utcDay(t)}`;
+  const p = pending.get(key) ?? zeroTokens();
+  p.input += growth.input;
+  p.output += growth.output;
+  p.cacheRead += growth.cacheRead;
+  p.cacheWrite += growth.cacheWrite;
+  pending.set(key, p);
+}
+
+function scanUsage(): void {
+  try {
+    const main = sessionTranscript();
+    if (!main) return;
+    // Main transcript first: its prompts set the owner that subagent usage goes to.
+    const files = [main];
+    const subDir = join(main.replace(/\.jsonl$/, ""), "subagents");
+    try {
+      for (const f of readdirSync(subDir)) if (f.endsWith(".jsonl")) files.push(join(subDir, f));
+    } catch {}
+    const pending = new Map<string, TokenUsage>();
+    for (const path of files) {
+      for (let i = 0; i < 8; i++) {
+        const lines = readNewLines(path);
+        if (lines.length === 0) break;
+        for (const line of lines) {
+          if (!line.startsWith("{")) continue;
+          try {
+            ingestUsage(line, path === main, pending);
+          } catch {
+            // Skip a record with an unexpected shape.
+          }
+        }
+      }
+    }
+    for (const [key, u] of pending) {
+      const [userId, day] = key.split(" ");
+      usageStore.add(userId, day, u);
+    }
+  } catch (err) {
+    process.stderr.write(`telegram channel: usage scan failed: ${err}\n`);
+  }
+}
+
+function isAdmin(access: Access, userId: string): boolean {
+  return Array.isArray(access.admins) && access.admins.includes(userId);
+}
+
+function effectiveLimits(access: Access, userId: string): Required<UsageLimits> {
+  const l: UsageLimits = { ...access.limits, ...access.userLimits?.[userId] };
+  const n = (v: unknown) => {
+    const x = Number(v);
+    return Number.isFinite(x) && x > 0 ? Math.floor(x) : 0;
+  };
+  return {
+    messagesPerMinute: n(l.messagesPerMinute),
+    messagesPerHour: n(l.messagesPerHour),
+    tokensPerDay: n(l.tokensPerDay),
+  };
+}
+
+// 950, 45.2K, 1.2M
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${Number((n / 1000).toFixed(1))}K`;
+  return `${Number((n / 1_000_000).toFixed(1))}M`;
+}
+
+// 40 s, 14 min, 5 h 12 min
+function fmtWait(ms: number): string {
+  const s = Math.max(1, Math.ceil(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.ceil(s / 60);
+  if (m < 60) return `${m} min`;
+  return m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`;
+}
+
+type LimitHit = { what: string; retryAt: number };
+
+// The limit this user is over right now, or undefined. Admins have none. When
+// several apply, the one that lasts longest, so "try again in" holds.
+function overLimit(access: Access, userId: string, now = Date.now()): LimitHit | undefined {
+  if (isAdmin(access, userId)) return undefined;
+  const lim = effectiveLimits(access, userId);
+  const hits: LimitHit[] = [];
+  const windows = [
+    [lim.messagesPerMinute, MINUTE_MS, "minute"],
+    [lim.messagesPerHour, HOUR_MS, "hour"],
+  ] as const;
+  for (const [limit, windowMs, unit] of windows) {
+    if (!limit) continue;
+    const times = usageStore.hits(userId, now - windowMs);
+    // A slot frees up when enough of the oldest deliveries leave the window.
+    if (times.length >= limit) {
+      const what = `${limit} message${limit === 1 ? "" : "s"} per ${unit}`;
+      hits.push({ what, retryAt: times[times.length - limit] + windowMs });
+    }
+  }
+  if (lim.tokensPerDay) {
+    scanUsage();
+    const today = usageStore.days(userId, utcDay(now))[0];
+    if (today && limitTokens(today) >= lim.tokensPerDay) {
+      const midnight = (Math.floor(now / DAY_MS) + 1) * DAY_MS;
+      hits.push({ what: `${lim.tokensPerDay.toLocaleString("en-US")} tokens per day`, retryAt: midnight });
+    }
+  }
+  return hits.sort((a, b) => b.retryAt - a.retryAt)[0];
+}
+
+// Over a limit: the message doesn't reach Claude and counts as blocked. The
+// sender gets one notice per window in this chat, not one per message.
+// Returns true when the message is blocked.
+async function enforceLimits(ctx: Context, access: Access): Promise<boolean> {
+  const userId = String(ctx.from?.id ?? "");
+  const now = Date.now();
+  const hit = userId ? overLimit(access, userId, now) : undefined;
+  if (!hit) return false;
+  usageStore.add(userId, utcDay(now), { blocked: 1 });
+  const key = `${userId}:${ctx.chat?.id}`;
+  if ((limitNotices.get(key) ?? 0) > now) return true;
+  if (limitNotices.size > 1000) for (const [k, end] of limitNotices) if (end <= now) limitNotices.delete(k);
+  limitNotices.set(key, hit.retryAt);
+  // In groups, quote the message so it's clear whose limit it is.
+  const msgId = ctx.message?.message_id;
+  const quote = ctx.chat?.type !== "private" && msgId != null ? { reply_parameters: { message_id: msgId } } : {};
+  await ctx.reply(`Limit reached: ${hit.what}. Try again in ${fmtWait(hit.retryAt - now)}.`, quote).catch(() => {});
+  return true;
+}
+
+function limitLines(access: Access, userId: string, now: number, todayTokens: number): string[] {
+  if (isAdmin(access, userId)) return ["- none (admin)"];
+  const lim = effectiveLimits(access, userId);
+  const out: string[] = [];
+  if (lim.messagesPerMinute) {
+    const used = usageStore.hits(userId, now - MINUTE_MS).length;
+    out.push(`- ${lim.messagesPerMinute} messages per minute (${used} used)`);
+  }
+  if (lim.messagesPerHour) {
+    const used = usageStore.hits(userId, now - HOUR_MS).length;
+    out.push(`- ${lim.messagesPerHour} messages per hour (${used} used)`);
+  }
+  if (lim.tokensPerDay) {
+    out.push(`- ${lim.tokensPerDay.toLocaleString("en-US")} tokens per day (${fmtTokens(todayTokens)} used)`);
+  }
+  return out.length > 0 ? out : ["- none"];
+}
+
+// /usage: the caller's today and last 7 days (UTC) and their limits. Admins
+// also get every user's totals when adminView is set (DMs only).
+function usageReport(access: Access, userId: string, adminView: boolean): string {
+  scanUsage();
+  const now = Date.now();
+  const today = utcDay(now);
+  const weekStart = utcDay(now - 6 * DAY_MS);
+  const days = usageStore.days(userId, weekStart);
+  const t = days.find((d) => d.day === today) ?? { messages: 0, blocked: 0, ...zeroTokens() };
+  const lines = [
+    `Today (UTC): ${t.messages} messages, ${t.blocked} blocked`,
+    `Tokens: ${fmtTokens(limitTokens(t))} (input ${fmtTokens(t.input)}, output ${fmtTokens(t.output)}, cache write ${fmtTokens(t.cacheWrite)})`,
+    `Cache reads: ${fmtTokens(t.cacheRead)} (not counted toward limits)`,
+    "",
+    "Last 7 days:",
+  ];
+  if (days.length === 0) lines.push("No usage yet");
+  for (const d of days) {
+    lines.push(`${d.day}: ${d.messages} msg, ${d.blocked} blocked, ${fmtTokens(limitTokens(d))} tokens`);
+  }
+  if (days.length > 1) {
+    const sum = (f: (d: (typeof days)[number]) => number) => days.reduce((a, d) => a + f(d), 0);
+    lines.push(
+      `Total: ${sum((d) => d.messages)} msg, ${sum((d) => d.blocked)} blocked, ${fmtTokens(sum(limitTokens))} tokens, ${fmtTokens(sum((d) => d.cacheRead))} cache reads`,
+    );
+  }
+  lines.push("", "Limits:", ...limitLines(access, userId, now, limitTokens(t)));
+  if (adminView && isAdmin(access, userId)) {
+    const week = usageStore.users(weekStart);
+    const byUserToday = new Map(usageStore.users(today).map((u) => [u.userId, u]));
+    lines.push("", "All users, today / 7 days:");
+    if (week.length === 0) lines.push("No usage yet");
+    for (const u of week.slice(0, 25)) {
+      const td = byUserToday.get(u.userId);
+      const name = usageStore.name(u.userId);
+      const blocked = u.blocked ? `, ${u.blocked} blocked` : "";
+      lines.push(
+        `${name ? `${name} ` : ""}(${u.userId}): ${td?.messages ?? 0} / ${u.messages} msg, ${fmtTokens(td ? limitTokens(td) : 0)} / ${fmtTokens(limitTokens(u))} tokens${blocked}`,
+      );
+    }
+    if (week.length > 25) lines.push(`…and ${week.length - 25} more`);
+  }
+  return lines.join("\n").slice(0, MAX_CHUNK_LIMIT);
+}
+
+// /usage in a group the bot is in: for members it answers there, and only
+// their own numbers. The admin table stays in DMs.
+async function handleGroupUsage(ctx: Context): Promise<boolean> {
+  const access = loadAccess();
+  const rules = botAccess(access, botOf(ctx)); // limits stay top-level, groups are per bot
+  const policy = rules.groups[String(ctx.chat?.id)];
+  const userId = String(ctx.from?.id ?? "");
+  const allowed = policy?.allowFrom ?? [];
+  if (rules.dmPolicy === "disabled" || !policy || !userId) return false;
+  if (allowed.length > 0 && !allowed.includes(userId)) return false;
+  const msgId = ctx.message?.message_id;
+  await ctx
+    .reply(usageReport(access, userId, false), msgId != null ? { reply_parameters: { message_id: msgId } } : {})
+    .catch(() => {});
+  return true;
+}
+
+// ── Custom commands ──────────────────────────────────────────────────
+// commands.json maps bot commands to Claude Code skills:
+//   { "commands": { "standup": { "skill": "daily-standup", "description": "Daily standup summary" } } }
+// A custom command takes the normal inbound path (gate, batching, reactions,
+// history), but Claude gets an instruction to run the skill instead of the raw
+// "/standup". The file is re-read when its mtime changes, checked on every text
+// message and every 30s, so edits reach the command menu without a restart.
+
+const BUILTIN_COMMANDS = [
+  { command: "status", description: "Is Claude working, uptime, model" },
+  { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
+  { command: "new", description: "Fresh session (memory kept)" },
+  { command: "agents", description: "Live board of sessions, subagents, tokens" },
+  { command: "usage", description: "Your messages, tokens and limits" },
+];
+const MAX_BOT_COMMANDS = 100; // Telegram's limit per scope
+
+interface CustomCommandMatch {
+  name: string;
+  skill: string;
+  args: string;
+  addressed: boolean; // sent as /name@this_bot
+}
+
+let customCommands = new Map<string, { skill: string; description: string }>();
+let customCommandsMtime = -1; // -1 = not read yet, 0 = no file
+
+function readCommandsFile(): Map<string, { skill: string; description: string }> {
+  const commands = new Map<string, { skill: string; description: string }>();
+  let parsed: any;
+  try {
+    parsed = JSON.parse(readFileSync(COMMANDS_FILE, "utf8"));
+  } catch (err) {
+    process.stderr.write(`telegram channel: commands.json unreadable, no custom commands: ${err}\n`);
+    return commands;
+  }
+  if (!parsed?.commands || typeof parsed.commands !== "object" || Array.isArray(parsed.commands)) {
+    process.stderr.write('telegram channel: commands.json has no "commands" object, no custom commands\n');
+    return commands;
+  }
+  for (const [name, def] of Object.entries<any>(parsed.commands)) {
+    let skip = "";
+    if (!/^[a-z0-9_]{1,32}$/.test(name)) skip = "names are 1-32 characters of a-z, 0-9 and _";
+    else if (BUILTIN_COMMANDS.some((c) => c.command === name)) skip = "built-in command";
+    else if (typeof def?.skill !== "string" || !def.skill.trim()) skip = "no skill";
+    else if (commands.size >= MAX_BOT_COMMANDS - BUILTIN_COMMANDS.length) skip = "Telegram allows 100 commands";
+    if (skip) {
+      process.stderr.write(`telegram channel: commands.json: skipped /${name} (${skip})\n`);
+      continue;
+    }
+    const skill = def.skill.trim();
+    // setMyCommands rejects the whole list if one description is empty or over 256 chars.
+    const description =
+      typeof def.description === "string" && def.description.trim() ? def.description.trim() : `Run the ${skill} skill`;
+    commands.set(name, { skill, description: description.slice(0, 256) });
+  }
+  return commands;
+}
+
+// Re-reads commands.json if its mtime changed, then re-registers the menu.
+function refreshCustomCommands(): void {
+  let mtime = 0;
+  try {
+    mtime = statSync(COMMANDS_FILE).mtimeMs;
+  } catch {}
+  if (mtime === customCommandsMtime) return;
+  customCommandsMtime = mtime;
+  customCommands = mtime ? readCommandsFile() : new Map();
+  if (mtime) process.stderr.write(`telegram channel: ${customCommands.size} custom command(s) from commands.json\n`);
+  const custom = [...customCommands].map(([command, c]) => ({ command, description: c.description }));
+  // Every bot gets the custom commands. Of the built-ins, extra bots answer only /usage.
+  for (const b of bots) {
+    const builtin = b.primary ? BUILTIN_COMMANDS : BUILTIN_COMMANDS.filter((c) => c.command === "usage");
+    void b.bot.api
+      .setMyCommands([...builtin, ...custom], { scope: { type: "all_private_chats" } })
+      .catch((err) => process.stderr.write(`telegram channel: setMyCommands${botLabel(b)} failed: ${err}\n`));
+  }
+}
+
+// "/standup [args]" or "/standup@this_bot [args]" for a command in commands.json.
+// `username` is the bot that received it: "/standup@other_bot" is not for us.
+function parseCustomCommand(text: string, username: string): CustomCommandMatch | undefined {
+  const m = /^\/([a-z0-9_]{1,32})(?:@(\w+))?(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (!m) return undefined;
+  if (m[2] && username && m[2].toLowerCase() !== username.toLowerCase()) return undefined;
+  const name = m[1].toLowerCase();
+  const cmd = customCommands.get(name);
+  if (!cmd) return undefined;
+  return { name, skill: cmd.skill, args: (m[3] ?? "").trim(), addressed: m[2] != null };
+}
+
+// Forwarded commands are content to read, not commands to run.
+function matchCustomCommand(ctx: Context): CustomCommandMatch | undefined {
+  refreshCustomCommands();
+  if (customCommands.size === 0 || ctx.message?.forward_origin) return undefined;
+  return parseCustomCommand(ctx.message?.text ?? "", ctx.me.username);
+}
+
+function customCommandPrompt(c: CustomCommandMatch): string {
+  const run = `Run the "${c.skill}" skill with the Skill tool.`;
+  return c.args ? `${run}\nArguments: ${c.args}` : run;
+}
+
+// /verbose, /status, /new, /agents, /usage. DM-only and allowlisted senders only
+// (/usage also works in groups); everything else falls through to Claude.
+// /usage answers on every bot, the others on the primary only.
+// Returns true when the message was handled.
 async function handleAgenticCommand(ctx: Context): Promise<boolean> {
-  const m = /^\/(verbose|status|new|agents)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
-  if (!m || ctx.chat?.type !== "private" || !botOf(ctx).primary) return false;
+  const m = /^\/(verbose|status|new|agents|usage)(?:@(\w+))?(?:\s+(.*))?$/i.exec(ctx.message?.text?.trim() ?? "");
+  if (!m) return false;
   if (m[2] && m[2].toLowerCase() !== ctx.me.username.toLowerCase()) return false;
-  if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return false;
+  const b = botOf(ctx);
+  if (!b.primary && m[1].toLowerCase() !== "usage") return false;
+  if (ctx.chat?.type !== "private") return m[1].toLowerCase() === "usage" && (await handleGroupUsage(ctx));
+  if (!botAccess(loadAccess(), b).allowFrom.includes(String(ctx.from?.id))) return false;
   const chatId = String(ctx.chat.id);
   const cmd = m[1].toLowerCase();
   const arg = (m[3] ?? "").trim();
@@ -3919,6 +4548,11 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
     return true;
   }
 
+  if (cmd === "usage") {
+    await ctx.reply(usageReport(loadAccess(), String(ctx.from?.id), true));
+    return true;
+  }
+
   // /new: fresh Claude session via the supervisor. Memory and message history are kept.
   try {
     mkdirSync(DATA_DIR, { recursive: true });
@@ -3939,6 +4573,7 @@ async function deliverMessage(
     | (() => Promise<{ path: string; type: "image" | "audio" | "document"; transcription?: string } | undefined>)
     | undefined,
   access: Access,
+  command?: CustomCommandMatch,
 ): Promise<void> {
   const from = ctx.from!;
   const chat_id = String(ctx.chat!.id);
@@ -3946,6 +4581,10 @@ async function deliverMessage(
   const b = botOf(ctx);
   const key = chatKey(b, chat_id);
   lastBotByChat.set(chat_id, b);
+
+  // Counts for the sender's stats and message limits.
+  usageStore.recordMessage(String(from.id), Date.now());
+  lastDeliveredUser = String(from.id);
 
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void ctx.api.sendChatAction(chat_id, "typing").catch(() => {});
@@ -4075,8 +4714,9 @@ async function deliverMessage(
   }
 
   // ── Batch or send immediately ─────────────────────────────────────
+  // Custom commands reach Claude as an instruction. History and thread tracking keep the original text.
   const batchedMsg: BatchedMessage = {
-    text,
+    text: command ? customCommandPrompt(command) : text,
     msgId,
     username,
     userId: String(from.id),
@@ -4087,6 +4727,7 @@ async function deliverMessage(
     isGroup,
     chatId: chat_id,
     via: b,
+    command,
   };
 
   const batch = pendingBatches.get(key);
@@ -4113,11 +4754,13 @@ function replayUnanswered(b: BotEntry): void {
   if (!ownsLock(b.lockFile) || !(b.primary || b.username)) return;
   try {
     const cutoff = Math.floor(Date.now() / 1000) - 300; // last 5 minutes
-    const access = botAccess(loadAccess(), b);
-    const allowedChats = access.allowFrom;
+    const access = loadAccess();
+    const allowedChats = botAccess(access, b).allowFrom;
     if (allowedChats.length === 0) return;
 
     for (const chatId of allowedChats) {
+      // Blocked messages are in the history too: don't replay them past a limit.
+      if (overLimit(access, chatId)) continue;
       // Get last 10 messages from this chat, newest first
       const recent = messageStore.getHistory(chatId, 10, undefined, botKey(b));
       if (recent.length === 0) continue;
@@ -4133,10 +4776,13 @@ function replayUnanswered(b: BotEntry): void {
 
       if (unanswered.length === 0) continue;
 
-      // Replay as a single notification
+      // Replay as a single notification. A custom command replays as its skill instruction.
       const lines = unanswered
         .reverse() // chronological order
-        .map((m) => (m.text as string) ?? "[media]")
+        .map((m) => {
+          const command = m.text ? parseCustomCommand(m.text as string, b.username) : undefined;
+          return command ? customCommandPrompt(command) : ((m.text as string) ?? "[media]");
+        })
         .join("\n");
 
       const last = unanswered[unanswered.length - 1];
@@ -4191,54 +4837,206 @@ function ownsLock(lockFile = LOCK_FILE): boolean {
   }
 }
 
+// The same update types in polling and webhook mode.
+const ALLOWED_UPDATES = [
+  "message",
+  "edited_message",
+  "channel_post",
+  "edited_channel_post",
+  "callback_query",
+  "message_reaction",
+] as const;
+
+// Runs each time a bot starts polling and when webhook mode starts. The setup after the log line
+// runs once, for the primary bot.
+let startupDone = false;
+function botStarted(b: BotEntry, username: string, mode: string): void {
+  b.username = username;
+  process.stderr.write(`telegram channel: ${mode} as @${username}\n`);
+  if (!b.primary || startupDone) return;
+  startupDone = true;
+  startProgressWatcher();
+  setInterval(scanUsage, USAGE_SCAN_MS);
+  process.stderr.write(`telegram channel: usage stats from ${sessionTranscript() ?? "no transcript found"}\n`);
+  refreshCustomCommands(); // registers the built-in and custom commands
+  setInterval(refreshCustomCommands, 30_000);
+  const chain = [
+    OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+    GROQ_API_KEY && "Groq",
+    DEEPGRAM_API_KEY && "Deepgram",
+    findWhisperBin() || null,
+  ].filter(Boolean);
+  process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+  if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+  // Check for messages that were lost during the restart gap (every bot polled here)
+  setTimeout(() => {
+    for (const x of bots) replayUnanswered(x);
+  }, 3000);
+}
+
+// ── Webhook mode ─────────────────────────────────────────────────────
+// TELEGRAM_WEBHOOK=on: Telegram POSTs updates to /telegram/webhook on the local server in miniapp.ts
+// instead of the bot calling getUpdates. The public address is TELEGRAM_WEBHOOK_URL, else the Agents
+// Board address. Only the lock owner sets the webhook. It stays set on exit: the next owner replaces it,
+// and bot.start() deletes it before the first getUpdates, so going back to polling needs no cleanup.
+
+const WEBHOOK_MODE = process.env.TELEGRAM_WEBHOOK === "on";
+// New on every start. Telegram sends it in X-Telegram-Bot-Api-Secret-Token; other requests get 401.
+const webhookSecret = randomBytes(32).toString("hex");
+let webhookHandler: ((req: Request) => Promise<Response>) | null = null;
+let webhookTarget = ""; // the URL Telegram should post to; "" while polling
+let webhookErrorAt = 0; // last_error_date (ms) of the newest Telegram error already logged
+
+const logWebhook = (msg: string) => process.stderr.write(`telegram channel: webhook: ${msg}\n`);
+const errText = (err: unknown) => (err instanceof GrammyError ? err.description : String(err));
+// Also accepts a TELEGRAM_WEBHOOK_URL that already ends with the path.
+const webhookUrl = (base: string) => `${base.replace(/\/+$/, "").replace(/\/telegram\/webhook$/, "")}/telegram/webhook`;
+
+// The public HTTPS address, or "" after logging why there is none. With TELEGRAM_MINIAPP_URL=auto it
+// waits up to 60 s for the quick tunnel, which miniapp.ts starts once its server listens.
+async function webhookBase(): Promise<string> {
+  const own = (process.env.TELEGRAM_WEBHOOK_URL ?? "").trim();
+  let base = own || miniapp?.miniAppUrl() || "";
+  const tunnel = !base && process.env.TELEGRAM_MINIAPP !== "off" && process.env.TELEGRAM_MINIAPP_URL?.trim() === "auto";
+  if (tunnel && miniapp) {
+    base = await new Promise<string>((resolve) => {
+      setTimeout(() => resolve(""), 60_000);
+      miniapp.onMiniAppUrlChange(resolve);
+    });
+  }
+  if (base.startsWith("https://")) return base;
+  const port = Number(process.env.TELEGRAM_MINIAPP_PORT) || 8790;
+  const why = own
+    ? "TELEGRAM_WEBHOOK_URL must start with https://"
+    : tunnel
+      ? "the quick tunnel has no address after 60 s"
+      : `set TELEGRAM_WEBHOOK_URL to an HTTPS address that reaches 127.0.0.1:${port}`;
+  logWebhook(`no HTTPS address (${why}), falling back to polling`);
+  return "";
+}
+
+// Points Telegram at url. Retries network and server errors with backoff. Returns false when a newer
+// address replaced url or another instance owns the lock. Throws when Telegram rejects the address.
+async function pointWebhook(url: string): Promise<boolean> {
+  webhookTarget = url;
+  for (let attempt = 1; webhookTarget === url && ownsLock(); attempt++) {
+    try {
+      const since = Date.now();
+      await bot.api.setWebhook(url, { secret_token: webhookSecret, allowed_updates: ALLOWED_UPDATES });
+      logWebhook(`Telegram posts updates to ${url}`);
+      // Report only errors from this address. 5 s of slack for clock skew.
+      webhookErrorAt = Math.max(webhookErrorAt, since - 5_000);
+      setTimeout(() => void checkWebhook(), 15_000);
+      return true;
+    } catch (err) {
+      if (err instanceof GrammyError && err.error_code < 500 && err.error_code !== 429) throw err;
+      const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
+      logWebhook(`setWebhook failed: ${err}, retrying in ${delay / 1000}s`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  return false;
+}
+
+// Telegram reports failed deliveries only through getWebhookInfo. Log each new one.
+async function checkWebhook(): Promise<void> {
+  try {
+    const info = await bot.api.getWebhookInfo();
+    const at = (info.last_error_date ?? 0) * 1000;
+    if (!info.last_error_message || at <= webhookErrorAt) return;
+    webhookErrorAt = at;
+    logWebhook(`Telegram reports "${info.last_error_message}" (${info.pending_update_count} updates waiting)`);
+  } catch {}
+}
+
+// Returns false, after logging why, when webhook mode cannot start. The caller then polls.
+async function startWebhook(): Promise<boolean> {
+  if (!miniapp) {
+    logWebhook("needs miniapp.ts next to server.ts for the local HTTP server, falling back to polling");
+    return false;
+  }
+  try {
+    await bot.init();
+  } catch (err) {
+    logWebhook(`getMe failed: ${errText(err)}, falling back to polling`);
+    return false;
+  }
+  const base = await webhookBase();
+  if (!base) return false;
+  const url = webhookUrl(base);
+  if (!process.env.TELEGRAM_WEBHOOK_URL?.trim()) {
+    // A quick tunnel gets a new address each time it restarts. Listen from before the first setWebhook,
+    // so a restart while it runs is not missed. Ignored once this process falls back to polling.
+    miniapp.onMiniAppUrlChange((next) => {
+      if (!webhookTarget) return;
+      const nextUrl = webhookUrl(next);
+      void pointWebhook(nextUrl).catch((err) => logWebhook(`setWebhook ${nextUrl}: ${errText(err)}`));
+    });
+  }
+  try {
+    await pointWebhook(url);
+  } catch (err) {
+    webhookTarget = "";
+    logWebhook(`setWebhook ${url}: ${errText(err)}, falling back to polling`);
+    return false;
+  }
+  if (!ownsLock()) {
+    logWebhook("another instance owns the lock; not receiving updates");
+    return true;
+  }
+
+  // grammY's polling handles one update at a time. Keep that order here: an update that is still running
+  // when its request gets answered (a long voice note) finishes before the next one starts.
+  const handleUpdate = bot.handleUpdate.bind(bot);
+  let queue: Promise<unknown> = Promise.resolve();
+  bot.handleUpdate = (update, reply) => {
+    const run = queue
+      .then(() => handleUpdate(update, reply))
+      .catch(async (err) => {
+        // As in polling: log through bot.catch and answer 200, so Telegram does not send the update again.
+        if (!(err instanceof BotError)) throw err;
+        await bot.errorHandler(err);
+      });
+    queue = run.catch(() => {});
+    return run;
+  };
+  // Bun.serve drops a request after 10 s without a response, and Telegram then sends the update again.
+  // So answer after 8 s at most and let a slow update finish in the background.
+  const callback = webhookCallback(bot, "bun", {
+    secretToken: webhookSecret,
+    onTimeout: "return",
+    timeoutMilliseconds: 8_000,
+  });
+  webhookHandler = async (req) => {
+    try {
+      return await callback(req);
+    } catch (err) {
+      // A plain 500, never Bun's error page with a stack trace: this route is public.
+      logWebhook(`request failed: ${err}`);
+      return new Response("Internal error", { status: 500 });
+    }
+  };
+  botStarted(bots[0], bot.botInfo.username, "webhook mode");
+  setInterval(() => void checkWebhook(), 5 * 60_000);
+  return true;
+}
+
 // Retry polling with backoff on any error. grammY rejects bot.start() on a 409
 // Conflict (any other getUpdates call: a restart overlap, a second poller, even
 // a manual curl) and on errors thrown by middleware. Unhandled, that killed the
 // server and left the daemon deaf until its next restart. One loop per bot.
-let pollingSetupDone = false;
 function startPolling(b: BotEntry): void {
   void (async () => {
+    // Webhook mode is for the primary bot only. Extra bots always poll.
+    if (b.primary && WEBHOOK_MODE && (await startWebhook())) return;
+    // bot.start() deletes the webhook before its first getUpdates, so one left by webhook mode does not block polling.
     for (let attempt = 1; ; attempt++) {
       try {
         await b.bot.start({
-          allowed_updates: [
-            "message",
-            "edited_message",
-            "channel_post",
-            "edited_channel_post",
-            "callback_query",
-            "message_reaction",
-          ],
+          allowed_updates: ALLOWED_UPDATES,
           onStart: (info) => {
             attempt = 0;
-            b.username = info.username;
-            process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-            if (!b.primary || pollingSetupDone) return;
-            pollingSetupDone = true;
-            startProgressWatcher();
-            void bot.api
-              .setMyCommands(
-                [
-                  { command: "status", description: "Is Claude working, uptime, model" },
-                  { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
-                  { command: "new", description: "Fresh session (memory kept)" },
-                  { command: "agents", description: "Live board of sessions, subagents, tokens" },
-                ],
-                { scope: { type: "all_private_chats" } },
-              )
-              .catch(() => {});
-            const chain = [
-              OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-              GROQ_API_KEY && "Groq",
-              DEEPGRAM_API_KEY && "Deepgram",
-              findWhisperBin() || null,
-            ].filter(Boolean);
-            process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-            if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-            // Check for messages that were lost during the restart gap (every bot polled here)
-            setTimeout(() => {
-              for (const x of bots) replayUnanswered(x);
-            }, 3000);
+            botStarted(b, info.username, "polling");
           },
         });
         return; // bot.stop() was called
@@ -4263,7 +5061,9 @@ function startPolling(b: BotEntry): void {
         }
         const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
         const detail = is409 ? "409 Conflict (another getUpdates caller)" : String(err);
-        process.stderr.write(`telegram channel: polling${botLabel(b)} failed: ${detail}, retrying in ${delay / 1000}s\n`);
+        process.stderr.write(
+          `telegram channel: polling${botLabel(b)} failed: ${detail}, retrying in ${delay / 1000}s\n`,
+        );
         await new Promise((r) => setTimeout(r, delay));
       }
     }
@@ -4272,12 +5072,15 @@ function startPolling(b: BotEntry): void {
 
 // Secondary: fetch bot info for username without starting polling
 function fetchBotInfo(b: BotEntry): void {
-  b.bot.api.getMe().then((info) => {
-    b.username = info.username;
-    process.stderr.write(`telegram channel: MCP-only mode — tools ready for @${info.username}\n`);
-  }).catch(() => {
-    process.stderr.write(`telegram channel: MCP-only mode — could not fetch bot info${botLabel(b)}\n`);
-  });
+  b.bot.api
+    .getMe()
+    .then((info) => {
+      b.username = info.username;
+      process.stderr.write(`telegram channel: MCP-only mode — tools ready for @${info.username}\n`);
+    })
+    .catch(() => {
+      process.stderr.write(`telegram channel: MCP-only mode — could not fetch bot info${botLabel(b)}\n`);
+    });
 }
 
 // Extra bots run the handlers registered on the primary; ctx carries their own api and username.
@@ -4288,6 +5091,7 @@ if (!isSecondary) {
     token: TOKEN,
     isAllowed: (userId) => loadAccess().allowFrom.includes(userId),
     log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
+    webhook: WEBHOOK_MODE ? (req) => webhookHandler?.(req) ?? new Response("Not ready", { status: 503 }) : undefined,
   });
   startPolling(bots[0]);
 } else {

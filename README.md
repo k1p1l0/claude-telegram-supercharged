@@ -378,8 +378,10 @@ Bot: [the answer replaces the Working message]
 | `/status` | Working or idle, elapsed time, tool count, uptime, router model |
 | `/new` | Fresh Claude session through the supervisor. Memory and history are kept. |
 | `/agents` | Opens the [Agents Board](#agents-board-mini-app) Mini App |
+| `/usage` | Your messages and tokens for today and the last 7 days, and your [limits](#usage-stats--limits). Admins also see every user. |
+| `/<your command>` | Runs a Claude Code skill you mapped in `commands.json`. See [Custom commands](#custom-commands). |
 
-Commands answer allowlisted users in DMs. `/verbose` is stored per chat.
+The built-in commands answer allowlisted users in DMs. `/usage` also answers group members in groups the bot is in. `/verbose` is stored per chat.
 
 **How it works.** The supervisor passes `scripts/telegram-progress-hook.ts` to Claude as a `PreToolUse`, `PostToolUse` and `Stop` hook via `--settings`, so it never runs in your interactive sessions. The hook appends each event to `~/.claude/channels/telegram/data/progress.jsonl`, and the server tails that file and edits the Working message (at most one edit per 1.5 seconds). Claude's notes and the thinking/writing phase come from the session transcript. The server's instructions ask Claude to write one short sentence before each tool call.
 
@@ -393,6 +395,7 @@ Commands answer allowlisted users in DMs. `/verbose` is stored per chat.
 - **Subagents:** running and recently finished, with their current tool and tokens.
 - **Last 24 hours:** tokens per hour (input, output, cache read, cache write), tool calls and cache hit rate.
 - **Recent tool calls** across all sessions.
+- **Other machines:** switch to any other computer that runs the plugin. See [Several machines](#agents-board-mini-app) below.
 
 <img src="./docs/agents-board.png" alt="Agents Board: overview, live sessions with subagents, session detail" width="100%" />
 
@@ -420,8 +423,106 @@ For a fixed address, use your own HTTPS setup:
 | `TELEGRAM_MINIAPP_PORT` | `8790` | Local port of the board. |
 | `TELEGRAM_MINIAPP_NAME` | computer name | Machine name in the board header. |
 | `TELEGRAM_MINIAPP` | on | `off` turns the board off. |
+| `TELEGRAM_MINIAPP_PEERS` | not set | Other machines the board can switch to, as `name=url` pairs separated by commas. |
+| `TELEGRAM_MINIAPP_PEER_TOKEN` | not set | Shared secret (16+ characters) between the machines. Without it, `TELEGRAM_MINIAPP_PEERS` is ignored. |
+| `TELEGRAM_MINIAPP_HOST` | `127.0.0.1` | Address the board server binds. Set it on a machine that other boards read from. |
+
+**Several machines.** If you run Claude Code on more than one computer, one board can show all of them. Tap the machine name in the header to switch. Every machine runs this plugin with its own bot.
+
+1. Pick a long random secret, for example with `openssl rand -hex 24`, and put the same `TELEGRAM_MINIAPP_PEER_TOKEN` in the `.env` of every machine.
+2. On each other machine, make the board reachable from the main one. With Tailscale, set `TELEGRAM_MINIAPP_HOST` to that machine's tailnet address, or to `::` for all addresses.
+3. On the machine whose bot you use, list the others: `TELEGRAM_MINIAPP_PEERS=studio=http://studio:8790,laptop=http://laptop:8790`.
+4. Restart the daemons and open `/agents`.
+
+The main board fetches the other machine's data when you select it. The request carries the shared secret, and the board only fetches addresses from `TELEGRAM_MINIAPP_PEERS`. Plain HTTP is fine inside a tailnet, because Tailscale encrypts the traffic.
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
+
+### Custom commands
+
+You can add your own bot commands and map each one to a Claude Code skill. List them in `~/.claude/channels/telegram/commands.json`:
+
+```json
+{
+  "commands": {
+    "standup": { "skill": "daily-standup", "description": "Daily standup summary" },
+    "report": { "skill": "weekly-report" }
+  }
+}
+```
+
+Send `/standup` and Claude runs the `daily-standup` skill. Any text after the command goes to the skill as arguments, for example `/standup only the backend team`.
+
+- The commands appear in the bot's menu in DMs, after the built-in ones.
+- You don't need to restart after editing the file. The server checks it on every message and every 30 seconds.
+- A custom command is handled like any other message: the same allowlist, reactions, batching and Agentic Mode. Message history keeps what you typed.
+- In groups, send `/standup@your_bot`. If the group requires a mention, a bare `/standup` is held like any other unmentioned message, and reaches Claude only if a mention follows within 5 seconds.
+- Forwarded messages never run a command, and unknown commands still reach Claude as plain text.
+
+| Field | What it does |
+| --- | --- |
+| name (the key) | 1 to 32 characters: `a-z`, `0-9` and `_`. |
+| `skill` | Required. The skill name as Claude Code knows it, for example `daily-standup` or `plugin:skill`. |
+| `description` | Optional menu text, up to 256 characters. The default is `Run the <skill> skill`. |
+
+The server skips an entry with a bad name, a built-in name (`status`, `verbose`, `new`, `agents`) or no skill, and logs it to stderr. Telegram allows 100 commands, which leaves room for 96 of your own.
+
+**How it works.** In place of `/standup`, Claude receives `Run the "daily-standup" skill with the Skill tool.` and an `Arguments:` line when there are arguments. The notification also carries `command` and `skill` attributes. If the daemon restarts before Claude answers, the replayed message gets the same rewrite.
+
+### Webhook mode
+
+By default the bot asks Telegram for new messages with long polling. In webhook mode Telegram sends each update to the bot over HTTPS instead. Use it on a server with a fixed public address.
+
+1. Give the local server, the Agents Board server on `127.0.0.1:8790`, an HTTPS address that Telegram can reach: `tailscale funnel --bg 8790`, a named Cloudflare Tunnel or a reverse proxy. Serve it at the root of that address, or make the proxy strip the path. Telegram accepts only ports 443, 80, 88 and 8443.
+2. Add to `~/.claude/channels/telegram/.env`:
+   ```
+   TELEGRAM_WEBHOOK=on
+   TELEGRAM_WEBHOOK_URL=https://bot.example.com
+   ```
+3. Restart the daemon. The log shows `webhook: Telegram posts updates to https://bot.example.com/telegram/webhook`.
+
+Without `TELEGRAM_WEBHOOK_URL` the bot uses the board's address from `TELEGRAM_MINIAPP_URL`. With `TELEGRAM_MINIAPP_URL=auto` it waits up to 60 seconds for the quick tunnel, and sets the webhook again each time the tunnel gets a new address. Addresses from `tailscale serve` work only inside your tailnet, so Telegram cannot reach them.
+
+**How it works.** The instance that owns the bot calls `setWebhook` with `<address>/telegram/webhook`, the same update types as polling, and a secret token that is new on every start. The local server takes `POST /telegram/webhook` and answers 401 to any request without that token. Updates are handled one at a time and in order, as with polling. The bot answers each request within 8 seconds; a slow update, such as a long voice note, keeps running after that. If there is no HTTPS address, or Telegram rejects it, the bot logs why and falls back to polling. When you turn webhook mode off, polling deletes the old webhook first, so there is nothing to clean up. Telegram reports failed deliveries only through `getWebhookInfo`. The bot checks it 15 seconds after it sets the webhook and then every 5 minutes, and logs each new error.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `TELEGRAM_WEBHOOK` | off | `on` receives updates by webhook instead of long polling. |
+| `TELEGRAM_WEBHOOK_URL` | board address | Public HTTPS address that forwards to `127.0.0.1:8790` (or `TELEGRAM_MINIAPP_PORT`). The bot adds `/telegram/webhook`. |
+
+`TELEGRAM_MINIAPP=off` turns the board off, but the server keeps running for the webhook route. It also stops the quick tunnel, so set `TELEGRAM_WEBHOOK_URL` then.
+
+### Usage stats & limits
+
+The bot counts each user's messages per day, delivered and blocked, and the tokens (input, output, cache write and cache read) of every turn their messages started. You can cap messages per minute, messages per hour and tokens per day, for everyone or for one user.
+
+`/usage` shows your numbers for today and the last 7 days, and your limits. Admins also get a line for every user. In a group, it shows only your own numbers.
+
+**How it works.** Before a message reaches Claude, the server checks the sender's limits. If the sender is over a limit, the message is dropped and counted as blocked. The sender gets one short notice per window, for example `Limit reached: 20 messages per hour. Try again in 14 min.`, and no notice for more messages in the same window. The tokens per day limit lasts until the next midnight UTC. Every Telegram message counts, so 10 forwarded messages count as 10. A reaction that reaches Claude starts a turn too, so it counts as a message, and reactions from a user who is over a limit are dropped.
+
+Tokens come from the session transcript in `~/.claude/projects`. The server reads only new bytes, as the Agents Board does. Each API call goes to the user whose Telegram message started the turn, which is the sender of the newest Telegram message in the transcript. Turns typed in the terminal or started by `/loop` have no owner and aren't counted. Subagent tokens count for the user too. The server finds the transcript from the path that the daemon's progress hook reports. Without the hook, it uses `CLAUDE_PROJECT_DIR` and `CLAUDE_CODE_SESSION_ID`, which Claude Code passes to every MCP server.
+
+For limits, tokens = input + output + cache write. Cache reads are shown separately and never count. They make up most of every call and are much cheaper than input, so counting them would make any limit meaningless.
+
+The server keeps stats in `messages.db` (table `usage_daily`) for 90 days. It stores the minute and hour windows there too, so a restart or `/new` doesn't reset them.
+
+**Config** goes in `~/.claude/channels/telegram/access.json`. Every field is optional. A missing value or 0 means no limit, so the bot works as before until you set one.
+
+```json
+{
+  "limits": { "messagesPerMinute": 5, "messagesPerHour": 60, "tokensPerDay": 2000000 },
+  "userLimits": { "412587349": { "messagesPerHour": 200 } },
+  "admins": ["628194073"]
+}
+```
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `limits.messagesPerMinute` | no limit | Messages a user can send to Claude in any 60 seconds. |
+| `limits.messagesPerHour` | no limit | Messages a user can send to Claude in any 60 minutes. |
+| `limits.tokensPerDay` | no limit | Input + output + cache write tokens per user per UTC day. |
+| `userLimits.<userId>` | not set | The same keys for one user. Each key set here replaces the default, and `0` removes that limit. |
+| `admins` | none | User IDs with no limits. In a DM, their `/usage` lists every user. |
 
 ### How context reset works
 
@@ -613,7 +714,9 @@ History is stored per bot, so `get_history` for one bot never shows another bot'
 
 [ACCESS.md](./ACCESS.md#per-bot-overrides) has the details, including how pairing works for an extra bot.
 
-**Primary bot only.** A few features stay on the primary bot: Agentic Mode progress (the Working message and the typing refresh), permission prompts and `yes <id>` / `no <id>` answers, the `/status`, `/verbose`, `/new` and `/agents` commands with the Mini App, and scheduled jobs. On an extra bot, `/new` and the other commands reach Claude as ordinary text.
+**Primary bot only.** A few features stay on the primary bot: Agentic Mode progress (the Working message and the typing refresh), permission prompts and `yes <id>` / `no <id>` answers, the `/status`, `/verbose`, `/new` and `/agents` commands with the Mini App, scheduled jobs, and [webhook mode](#webhook-mode). On an extra bot, `/new` and the other primary-only commands reach Claude as ordinary text. With `TELEGRAM_WEBHOOK=on`, the primary bot gets its updates by webhook (the log shows `webhook mode as @...`) and the extra bots keep long polling, so they need no public address.
+
+**Every bot.** [Custom commands](#custom-commands) and `/usage` work on every bot. Each bot's DM menu lists `/usage` and the commands from `commands.json`; the primary bot also lists its own built-in commands. In a group, `/standup@team_bot` runs only on `@team_bot`. [Usage stats and limits](#usage-stats--limits) count each Telegram user across all bots, so messages to any bot use the same per-minute, per-hour and per-day budget. `limits`, `userLimits` and `admins` stay at the top level of `access.json` and have no per-bot override.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -764,13 +867,13 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Agentic Mode: live progress, typing indicator, in-place answers
 - [x] Remote permission approval (inline buttons, text replies, auto-approve list)
 - [x] Agents Board Mini App (`/agents`): live sessions, subagents, context use and tokens per hour
+- [x] Custom commands (`commands.json`): bot commands that run Claude Code skills
+- [x] Webhook mode: alternative to polling for production deployments
+- [x] Rate limiting & usage stats (`/usage`): messages and tokens per user, limits per minute, hour and day
 - [x] Multi-bot support: several bots from one server instance, with per-bot history and optional per-bot access
 
 ### Planned
 - [ ] **Scheduled messages** -- Send messages at a specific time
-- [ ] **Rate limiting & usage stats** -- Track token usage and set limits per user
-- [ ] **Webhook mode** -- Alternative to polling for production deployments
-- [ ] **Custom commands** -- Define bot commands that map to Claude Code skills
 
 ## Contributing
 

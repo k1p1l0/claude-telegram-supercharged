@@ -26,6 +26,8 @@
 <hr />
 </div>
 
+https://github.com/user-attachments/assets/51f9f8c4-886d-4aec-bf2a-dddc8ef15cfc
+
 ## Claude Telegram Supercharged
 
 Drop-in upgrade for the [official Claude Code Telegram plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram). Install once, get 15+ features the official plugin doesn't have. Built on top of the [official plugin](https://github.com/anthropics/claude-plugins-official/tree/main/external_plugins/telegram) -- everything works, just better.

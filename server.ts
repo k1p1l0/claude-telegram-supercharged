@@ -32,7 +32,7 @@ import { extname, join, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
+import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 
@@ -122,6 +122,7 @@ const STATE_DIR = join(homedir(), ".claude", "channels", "telegram");
 const ACCESS_FILE = join(STATE_DIR, "access.json");
 const APPROVED_DIR = join(STATE_DIR, "approved");
 const ENV_FILE = join(STATE_DIR, ".env");
+const COMMANDS_FILE = join(STATE_DIR, "commands.json");
 
 // Load ~/.claude/channels/telegram/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where the token lives.
@@ -171,6 +172,8 @@ let isSecondary = false; // true when another instance owns the bot polling
 const DAEMON_MODE = process.env.TELEGRAM_DAEMON_MODE === "1";
 
 function acquireLock(): void {
+  // A fresh install has no data dir yet, and writing the lock would throw.
+  mkdirSync(DATA_DIR, { recursive: true });
   if (existsSync(LOCK_FILE)) {
     const existingPid = Number.parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10);
     if (!Number.isNaN(existingPid) && existingPid !== process.pid) {
@@ -953,6 +956,7 @@ function readAccessFile(): Access {
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
       autoTranscribe: parsed.autoTranscribe,
+      autoApproveTools: parsed.autoApproveTools,
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return defaultAccess();
@@ -1291,6 +1295,8 @@ const mcp = new Server(
       "VOICE TRANSCRIPTION CAUTION: Voice transcriptions can be inaccurate — whisper may mishear words, invent context, or confuse languages. NEVER auto-trigger skills, start heavy tasks, or assume intent based solely on a voice transcription. Instead: (1) briefly confirm what you understood from the voice message, (2) ask the user if that's correct before proceeding, (3) only then take action. Example: 'I heard you asking about X — is that right?' This prevents wasting time on misheard requests. For simple greetings or short clear messages, confirmation is not needed.",
       "",
       "DOCUMENTS: If the tag has a document_path attribute, the user sent a file (PDF, DOCX, spreadsheet, etc.). Read the file to see its contents. PDFs and DOCX files are supported by the Read tool directly. For text-based files (CSV, TXT, JSON, code), Read them directly. For XLSX, suggest the user share as CSV or PDF. Always acknowledge the document and summarize what you found. Files >10MB are skipped.",
+      "",
+      "CUSTOM COMMANDS: If the tag has command and skill attributes, the user sent a bot command that the owner mapped to a skill in commands.json, and the server wrote the instruction in the content. Run that skill with the Skill tool, pass the Arguments line (if any) as its args, and reply with the result via the reply tool.",
       "",
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, edit_message to update a message you previously sent (e.g. progress → result), and ask_user to present inline buttons and wait for a choice.',
       "",
@@ -2817,7 +2823,7 @@ bot.on("message", async (ctx, next) => {
 
 bot.on("message:text", async (ctx) => {
   if (await handleAgenticCommand(ctx)) return;
-  await handleInbound(ctx, ctx.message.text, undefined);
+  await handleInbound(ctx, ctx.message.text, undefined, matchCustomCommand(ctx));
 });
 
 
@@ -3111,6 +3117,7 @@ interface BufferedCtx {
     | (() => Promise<{ path: string; type: "image" | "audio" | "document"; transcription?: string } | undefined>)
     | undefined;
   access: Access;
+  command?: CustomCommandMatch;
 }
 
 const pregateBuffers = new Map<string, { messages: BufferedCtx[]; timer: ReturnType<typeof setTimeout> }>();
@@ -3132,7 +3139,7 @@ async function promotePregateBuffer(chatId: string): Promise<void> {
   pregateBuffers.delete(chatId);
   // Deliver each buffered message through the normal post-gate path.
   for (const entry of buf.messages) {
-    await deliverMessage(entry.ctx, entry.inboundText, entry.downloadMedia, entry.access);
+    await deliverMessage(entry.ctx, entry.inboundText, entry.downloadMedia, entry.access, entry.command);
   }
 }
 
@@ -3154,6 +3161,7 @@ interface BatchedMessage {
   replyContext: Record<string, string>;
   isGroup: boolean;
   chatId: string;
+  command?: CustomCommandMatch;
 }
 
 const pendingBatches = new Map<string, { messages: BatchedMessage[]; timer: ReturnType<typeof setTimeout> }>();
@@ -3205,6 +3213,9 @@ function flushBatch(chatId: string): void {
   const audioPaths = msgs.filter((m) => m.media?.type === "audio").map((m) => m.media!.path);
   const docPaths = msgs.filter((m) => m.media?.type === "document").map((m) => m.media!.path);
 
+  // A batch carries one command/skill pair in meta: the latest one. Each instruction is in the text.
+  const command = msgs.findLast((m) => m.command)?.command;
+
   // Use the last message's context for thread tracking
   const recentHistory = messageStore.formatRecent(chatId, 5);
   const content = recentHistory ? `${combinedText}\n\n${recentHistory}` : combinedText;
@@ -3235,6 +3246,7 @@ function flushBatch(chatId: string): void {
         ...(docPaths.length > 0 ? { document_path: docPaths[0] } : {}),
         ...(docPaths.length > 1 ? { document_paths: docPaths.join(",") } : {}),
         ...(last.threadId != null ? { thread_id: String(last.threadId) } : {}),
+        ...(command ? { command: command.name, skill: command.skill } : {}),
         ...last.replyContext,
         ...threadChainContext,
       },
@@ -3248,8 +3260,11 @@ async function handleInbound(
   downloadMedia:
     | (() => Promise<{ path: string; type: "image" | "audio" | "document"; transcription?: string } | undefined>)
     | undefined,
+  command?: CustomCommandMatch,
 ): Promise<void> {
-  const result = gate(ctx);
+  let result = gate(ctx);
+  // "/standup@this_bot" in a group addresses the bot the way a mention does.
+  if (result.action === "buffer" && command?.addressed) result = { action: "deliver", access: result.access };
 
   if (result.action === "drop") return;
 
@@ -3289,11 +3304,11 @@ async function handleInbound(
     if (buf) {
       if (buf.messages.length >= MAX_PREGATE_BUFFER) return; // safety cap
       clearTimeout(buf.timer);
-      buf.messages.push({ ctx, inboundText, downloadMedia, access: result.access });
+      buf.messages.push({ ctx, inboundText, downloadMedia, access: result.access, command });
       buf.timer = setTimeout(() => discardPregateBuffer(chat_id), BATCH_WINDOW_MS);
     } else {
       pregateBuffers.set(chat_id, {
-        messages: [{ ctx, inboundText, downloadMedia, access: result.access }],
+        messages: [{ ctx, inboundText, downloadMedia, access: result.access, command }],
         timer: setTimeout(() => discardPregateBuffer(chat_id), BATCH_WINDOW_MS),
       });
     }
@@ -3304,7 +3319,7 @@ async function handleInbound(
   const chat_id = String(ctx.chat!.id);
   await promotePregateBuffer(chat_id);
 
-  await deliverMessage(ctx, inboundText, downloadMedia, result.access);
+  await deliverMessage(ctx, inboundText, downloadMedia, result.access, command);
 }
 
 // ── Agentic Mode: live tool progress ─────────────────────────────────
@@ -3667,6 +3682,103 @@ function startProgressWatcher(): void {
   }, 1000);
 }
 
+// ── Custom commands ──────────────────────────────────────────────────
+// commands.json maps bot commands to Claude Code skills:
+//   { "commands": { "standup": { "skill": "daily-standup", "description": "Daily standup summary" } } }
+// A custom command takes the normal inbound path (gate, batching, reactions,
+// history), but Claude gets an instruction to run the skill instead of the raw
+// "/standup". The file is re-read when its mtime changes, checked on every text
+// message and every 30s, so edits reach the command menu without a restart.
+
+const BUILTIN_COMMANDS = [
+  { command: "status", description: "Is Claude working, uptime, model" },
+  { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
+  { command: "new", description: "Fresh session (memory kept)" },
+  { command: "agents", description: "Live board of sessions, subagents, tokens" },
+];
+const MAX_BOT_COMMANDS = 100; // Telegram's limit per scope
+
+interface CustomCommandMatch {
+  name: string;
+  skill: string;
+  args: string;
+  addressed: boolean; // sent as /name@this_bot
+}
+
+let customCommands = new Map<string, { skill: string; description: string }>();
+let customCommandsMtime = -1; // -1 = not read yet, 0 = no file
+
+function readCommandsFile(): Map<string, { skill: string; description: string }> {
+  const commands = new Map<string, { skill: string; description: string }>();
+  let parsed: any;
+  try {
+    parsed = JSON.parse(readFileSync(COMMANDS_FILE, "utf8"));
+  } catch (err) {
+    process.stderr.write(`telegram channel: commands.json unreadable, no custom commands: ${err}\n`);
+    return commands;
+  }
+  if (!parsed?.commands || typeof parsed.commands !== "object" || Array.isArray(parsed.commands)) {
+    process.stderr.write('telegram channel: commands.json has no "commands" object, no custom commands\n');
+    return commands;
+  }
+  for (const [name, def] of Object.entries<any>(parsed.commands)) {
+    let skip = "";
+    if (!/^[a-z0-9_]{1,32}$/.test(name)) skip = "names are 1-32 characters of a-z, 0-9 and _";
+    else if (BUILTIN_COMMANDS.some((c) => c.command === name)) skip = "built-in command";
+    else if (typeof def?.skill !== "string" || !def.skill.trim()) skip = "no skill";
+    else if (commands.size >= MAX_BOT_COMMANDS - BUILTIN_COMMANDS.length) skip = "Telegram allows 100 commands";
+    if (skip) {
+      process.stderr.write(`telegram channel: commands.json: skipped /${name} (${skip})\n`);
+      continue;
+    }
+    const skill = def.skill.trim();
+    // setMyCommands rejects the whole list if one description is empty or over 256 chars.
+    const description =
+      typeof def.description === "string" && def.description.trim() ? def.description.trim() : `Run the ${skill} skill`;
+    commands.set(name, { skill, description: description.slice(0, 256) });
+  }
+  return commands;
+}
+
+// Re-reads commands.json if its mtime changed, then re-registers the menu.
+function refreshCustomCommands(): void {
+  let mtime = 0;
+  try {
+    mtime = statSync(COMMANDS_FILE).mtimeMs;
+  } catch {}
+  if (mtime === customCommandsMtime) return;
+  customCommandsMtime = mtime;
+  customCommands = mtime ? readCommandsFile() : new Map();
+  if (mtime) process.stderr.write(`telegram channel: ${customCommands.size} custom command(s) from commands.json\n`);
+  const custom = [...customCommands].map(([command, c]) => ({ command, description: c.description }));
+  void bot.api
+    .setMyCommands([...BUILTIN_COMMANDS, ...custom], { scope: { type: "all_private_chats" } })
+    .catch((err) => process.stderr.write(`telegram channel: setMyCommands failed: ${err}\n`));
+}
+
+// "/standup [args]" or "/standup@this_bot [args]" for a command in commands.json.
+function parseCustomCommand(text: string): CustomCommandMatch | undefined {
+  const m = /^\/([a-z0-9_]{1,32})(?:@(\w+))?(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (!m) return undefined;
+  if (m[2] && botUsername && m[2].toLowerCase() !== botUsername.toLowerCase()) return undefined;
+  const name = m[1].toLowerCase();
+  const cmd = customCommands.get(name);
+  if (!cmd) return undefined;
+  return { name, skill: cmd.skill, args: (m[3] ?? "").trim(), addressed: m[2] != null };
+}
+
+// Forwarded commands are content to read, not commands to run.
+function matchCustomCommand(ctx: Context): CustomCommandMatch | undefined {
+  refreshCustomCommands();
+  if (customCommands.size === 0 || ctx.message?.forward_origin) return undefined;
+  return parseCustomCommand(ctx.message?.text ?? "");
+}
+
+function customCommandPrompt(c: CustomCommandMatch): string {
+  const run = `Run the "${c.skill}" skill with the Skill tool.`;
+  return c.args ? `${run}\nArguments: ${c.args}` : run;
+}
+
 // /verbose, /status, /new, /agents. DM-only and allowlisted senders only; everything
 // else falls through to Claude. Returns true when the message was handled.
 async function handleAgenticCommand(ctx: Context): Promise<boolean> {
@@ -3742,6 +3854,7 @@ async function deliverMessage(
     | (() => Promise<{ path: string; type: "image" | "audio" | "document"; transcription?: string } | undefined>)
     | undefined,
   access: Access,
+  command?: CustomCommandMatch,
 ): Promise<void> {
   const from = ctx.from!;
   const chat_id = String(ctx.chat!.id);
@@ -3875,8 +3988,9 @@ async function deliverMessage(
   }
 
   // ── Batch or send immediately ─────────────────────────────────────
+  // Custom commands reach Claude as an instruction. History and thread tracking keep the original text.
   const batchedMsg: BatchedMessage = {
-    text,
+    text: command ? customCommandPrompt(command) : text,
     msgId,
     username,
     userId: String(from.id),
@@ -3886,6 +4000,7 @@ async function deliverMessage(
     replyContext,
     isGroup,
     chatId: chat_id,
+    command,
   };
 
   const batch = pendingBatches.get(chat_id);
@@ -3930,10 +4045,13 @@ function replayUnanswered(): void {
 
       if (unanswered.length === 0) continue;
 
-      // Replay as a single notification
+      // Replay as a single notification. A custom command replays as its skill instruction.
       const lines = unanswered
         .reverse() // chronological order
-        .map((m) => (m.text as string) ?? "[media]")
+        .map((m) => {
+          const command = m.text ? parseCustomCommand(m.text as string) : undefined;
+          return command ? customCommandPrompt(command) : ((m.text as string) ?? "[media]");
+        })
         .join("\n");
 
       const last = unanswered[unanswered.length - 1];
@@ -3984,57 +4102,206 @@ function ownsLock(): boolean {
   }
 }
 
+// The same update types in polling and webhook mode.
+const ALLOWED_UPDATES = [
+  "message",
+  "edited_message",
+  "channel_post",
+  "edited_channel_post",
+  "callback_query",
+  "message_reaction",
+] as const;
+
+// Runs each time polling starts and when webhook mode starts. The setup after the log line runs once.
+let startupDone = false;
+function botStarted(username: string, mode: string): void {
+  botUsername = username;
+  process.stderr.write(`telegram channel: ${mode} as @${username}\n`);
+  if (startupDone) return;
+  startupDone = true;
+  startProgressWatcher();
+  refreshCustomCommands(); // registers the built-in and custom commands
+  setInterval(refreshCustomCommands, 30_000);
+  const chain = [
+    OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+    GROQ_API_KEY && "Groq",
+    DEEPGRAM_API_KEY && "Deepgram",
+    findWhisperBin() || null,
+  ].filter(Boolean);
+  process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
+  if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
+  // Check for messages that were lost during the restart gap
+  setTimeout(replayUnanswered, 3000);
+}
+
+// ── Webhook mode ─────────────────────────────────────────────────────
+// TELEGRAM_WEBHOOK=on: Telegram POSTs updates to /telegram/webhook on the local server in miniapp.ts
+// instead of the bot calling getUpdates. The public address is TELEGRAM_WEBHOOK_URL, else the Agents
+// Board address. Only the lock owner sets the webhook. It stays set on exit: the next owner replaces it,
+// and bot.start() deletes it before the first getUpdates, so going back to polling needs no cleanup.
+
+const WEBHOOK_MODE = process.env.TELEGRAM_WEBHOOK === "on";
+// New on every start. Telegram sends it in X-Telegram-Bot-Api-Secret-Token; other requests get 401.
+const webhookSecret = randomBytes(32).toString("hex");
+let webhookHandler: ((req: Request) => Promise<Response>) | null = null;
+let webhookTarget = ""; // the URL Telegram should post to; "" while polling
+let webhookErrorAt = 0; // last_error_date (ms) of the newest Telegram error already logged
+
+const logWebhook = (msg: string) => process.stderr.write(`telegram channel: webhook: ${msg}\n`);
+const errText = (err: unknown) => (err instanceof GrammyError ? err.description : String(err));
+// Also accepts a TELEGRAM_WEBHOOK_URL that already ends with the path.
+const webhookUrl = (base: string) => `${base.replace(/\/+$/, "").replace(/\/telegram\/webhook$/, "")}/telegram/webhook`;
+
+// The public HTTPS address, or "" after logging why there is none. With TELEGRAM_MINIAPP_URL=auto it
+// waits up to 60 s for the quick tunnel, which miniapp.ts starts once its server listens.
+async function webhookBase(): Promise<string> {
+  const own = (process.env.TELEGRAM_WEBHOOK_URL ?? "").trim();
+  let base = own || miniapp?.miniAppUrl() || "";
+  const tunnel = !base && process.env.TELEGRAM_MINIAPP !== "off" && process.env.TELEGRAM_MINIAPP_URL?.trim() === "auto";
+  if (tunnel && miniapp) {
+    base = await new Promise<string>((resolve) => {
+      setTimeout(() => resolve(""), 60_000);
+      miniapp.onMiniAppUrlChange(resolve);
+    });
+  }
+  if (base.startsWith("https://")) return base;
+  const port = Number(process.env.TELEGRAM_MINIAPP_PORT) || 8790;
+  const why = own
+    ? "TELEGRAM_WEBHOOK_URL must start with https://"
+    : tunnel
+      ? "the quick tunnel has no address after 60 s"
+      : `set TELEGRAM_WEBHOOK_URL to an HTTPS address that reaches 127.0.0.1:${port}`;
+  logWebhook(`no HTTPS address (${why}), falling back to polling`);
+  return "";
+}
+
+// Points Telegram at url. Retries network and server errors with backoff. Returns false when a newer
+// address replaced url or another instance owns the lock. Throws when Telegram rejects the address.
+async function pointWebhook(url: string): Promise<boolean> {
+  webhookTarget = url;
+  for (let attempt = 1; webhookTarget === url && ownsLock(); attempt++) {
+    try {
+      const since = Date.now();
+      await bot.api.setWebhook(url, { secret_token: webhookSecret, allowed_updates: ALLOWED_UPDATES });
+      logWebhook(`Telegram posts updates to ${url}`);
+      // Report only errors from this address. 5 s of slack for clock skew.
+      webhookErrorAt = Math.max(webhookErrorAt, since - 5_000);
+      setTimeout(() => void checkWebhook(), 15_000);
+      return true;
+    } catch (err) {
+      if (err instanceof GrammyError && err.error_code < 500 && err.error_code !== 429) throw err;
+      const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30_000);
+      logWebhook(`setWebhook failed: ${err}, retrying in ${delay / 1000}s`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  return false;
+}
+
+// Telegram reports failed deliveries only through getWebhookInfo. Log each new one.
+async function checkWebhook(): Promise<void> {
+  try {
+    const info = await bot.api.getWebhookInfo();
+    const at = (info.last_error_date ?? 0) * 1000;
+    if (!info.last_error_message || at <= webhookErrorAt) return;
+    webhookErrorAt = at;
+    logWebhook(`Telegram reports "${info.last_error_message}" (${info.pending_update_count} updates waiting)`);
+  } catch {}
+}
+
+// Returns false, after logging why, when webhook mode cannot start. The caller then polls.
+async function startWebhook(): Promise<boolean> {
+  if (!miniapp) {
+    logWebhook("needs miniapp.ts next to server.ts for the local HTTP server, falling back to polling");
+    return false;
+  }
+  try {
+    await bot.init();
+  } catch (err) {
+    logWebhook(`getMe failed: ${errText(err)}, falling back to polling`);
+    return false;
+  }
+  const base = await webhookBase();
+  if (!base) return false;
+  const url = webhookUrl(base);
+  if (!process.env.TELEGRAM_WEBHOOK_URL?.trim()) {
+    // A quick tunnel gets a new address each time it restarts. Listen from before the first setWebhook,
+    // so a restart while it runs is not missed. Ignored once this process falls back to polling.
+    miniapp.onMiniAppUrlChange((next) => {
+      if (!webhookTarget) return;
+      const nextUrl = webhookUrl(next);
+      void pointWebhook(nextUrl).catch((err) => logWebhook(`setWebhook ${nextUrl}: ${errText(err)}`));
+    });
+  }
+  try {
+    await pointWebhook(url);
+  } catch (err) {
+    webhookTarget = "";
+    logWebhook(`setWebhook ${url}: ${errText(err)}, falling back to polling`);
+    return false;
+  }
+  if (!ownsLock()) {
+    logWebhook("another instance owns the lock; not receiving updates");
+    return true;
+  }
+
+  // grammY's polling handles one update at a time. Keep that order here: an update that is still running
+  // when its request gets answered (a long voice note) finishes before the next one starts.
+  const handleUpdate = bot.handleUpdate.bind(bot);
+  let queue: Promise<unknown> = Promise.resolve();
+  bot.handleUpdate = (update, reply) => {
+    const run = queue
+      .then(() => handleUpdate(update, reply))
+      .catch(async (err) => {
+        // As in polling: log through bot.catch and answer 200, so Telegram does not send the update again.
+        if (!(err instanceof BotError)) throw err;
+        await bot.errorHandler(err);
+      });
+    queue = run.catch(() => {});
+    return run;
+  };
+  // Bun.serve drops a request after 10 s without a response, and Telegram then sends the update again.
+  // So answer after 8 s at most and let a slow update finish in the background.
+  const callback = webhookCallback(bot, "bun", {
+    secretToken: webhookSecret,
+    onTimeout: "return",
+    timeoutMilliseconds: 8_000,
+  });
+  webhookHandler = async (req) => {
+    try {
+      return await callback(req);
+    } catch (err) {
+      // A plain 500, never Bun's error page with a stack trace: this route is public.
+      logWebhook(`request failed: ${err}`);
+      return new Response("Internal error", { status: 500 });
+    }
+  };
+  botStarted(bot.botInfo.username, "webhook mode");
+  setInterval(() => void checkWebhook(), 5 * 60_000);
+  return true;
+}
+
 // Retry polling with backoff on any error. grammY rejects bot.start() on a 409
 // Conflict (any other getUpdates call: a restart overlap, a second poller, even
 // a manual curl) and on errors thrown by middleware. Unhandled, that killed the
 // server and left the daemon deaf until its next restart.
-let pollingSetupDone = false;
 if (!isSecondary) {
   miniapp?.startMiniApp({
     token: TOKEN,
     isAllowed: (userId) => loadAccess().allowFrom.includes(userId),
     log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
+    webhook: WEBHOOK_MODE ? (req) => webhookHandler?.(req) ?? new Response("Not ready", { status: 503 }) : undefined,
   });
   void (async () => {
+    if (WEBHOOK_MODE && (await startWebhook())) return;
+    // bot.start() deletes the webhook before its first getUpdates, so one left by webhook mode does not block polling.
     for (let attempt = 1; ; attempt++) {
       try {
         await bot.start({
-          allowed_updates: [
-            "message",
-            "edited_message",
-            "channel_post",
-            "edited_channel_post",
-            "callback_query",
-            "message_reaction",
-          ],
+          allowed_updates: ALLOWED_UPDATES,
           onStart: (info) => {
             attempt = 0;
-            botUsername = info.username;
-            process.stderr.write(`telegram channel: polling as @${info.username}\n`);
-            if (pollingSetupDone) return;
-            pollingSetupDone = true;
-            startProgressWatcher();
-            void bot.api
-              .setMyCommands(
-                [
-                  { command: "status", description: "Is Claude working, uptime, model" },
-                  { command: "verbose", description: "Live progress detail: 0, 1 or 2" },
-                  { command: "new", description: "Fresh session (memory kept)" },
-                  { command: "agents", description: "Live board of sessions, subagents, tokens" },
-                ],
-                { scope: { type: "all_private_chats" } },
-              )
-              .catch(() => {});
-            const chain = [
-              OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
-              GROQ_API_KEY && "Groq",
-              DEEPGRAM_API_KEY && "Deepgram",
-              findWhisperBin() || null,
-            ].filter(Boolean);
-            process.stderr.write(`telegram channel: transcription chain: ${chain.length > 0 ? chain.join(" → ") : "none"}\n`);
-            if (ELEVENLABS_API_KEY) process.stderr.write(`telegram channel: TTS: ElevenLabs (voice ${ELEVENLABS_VOICE_ID})\n`);
-            // Check for messages that were lost during the restart gap
-            setTimeout(replayUnanswered, 3000);
+            botStarted(info.username, "polling");
           },
         });
         return; // bot.stop() was called

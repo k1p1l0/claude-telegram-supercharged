@@ -111,6 +111,42 @@ h1, h2, h3, p, dl, dd { margin: 0; }
 .brand .sub { margin-top: 2px; font-size: 13px; color: var(--hint); display: flex; gap: 5px; min-width: 0; white-space: nowrap; }
 .brand .sub #host { overflow: hidden; text-overflow: ellipsis; }
 
+/* ---------- Machine switcher (only when more than one machine) ---------- */
+.top.multi .brand .sub { margin-top: 4px; }
+/* The machine name keeps its width; "updated …" gives way first */
+.top.multi .brand .sub #updated { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.brand .sub .mbtn { max-width: calc(100% - 32px); }
+.mbtn {
+  position: relative; display: inline-flex; align-items: center; gap: 2px; flex: none; min-width: 0;
+  margin: -3px 0; padding: 3px 3px 3px 7px; border-radius: 7px;
+  background: var(--fill); color: var(--text); font-weight: 500; transition: background-color .15s;
+}
+.mbtn::after { content: ""; position: absolute; inset: -10px -6px; } /* 44px touch target */
+.mbtn:active, .mbtn[aria-expanded="true"] { background: var(--fill-2); }
+@media (hover: hover) { .mbtn:hover { background: var(--fill-2); } }
+.mbtn-name { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.mbtn .ico { width: 14px; height: 14px; color: var(--hint); transition: transform .25s var(--ease); }
+.mbtn[aria-expanded="true"] .ico { transform: rotate(180deg); }
+.mbtn:focus-visible { outline-offset: 1px; border-radius: 7px; }
+.mscrim { position: fixed; inset: 0; z-index: 40; }
+.mmenu {
+  position: fixed; z-index: 41; top: 0; left: 0; min-width: 224px; max-width: calc(100vw - 24px);
+  padding: 6px; border-radius: 14px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--card); color: var(--text); border: 1px solid var(--sep); box-shadow: var(--toast-shadow);
+}
+html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--fill)), var(--card); } /* lift above the cards */
+.mmenu.menu-in { animation: menu-in .18s var(--ease) both; }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px) scale(.97); } to { opacity: 1; transform: none; } }
+.mm-head { padding: 6px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--hint); }
+.mm-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0 10px; border-radius: 9px; font-size: 15px; font-weight: 500; transition: background-color .12s; }
+.mm-item:active { background: var(--press); }
+@media (hover: hover) { .mm-item:hover { background: var(--press); } }
+.mm-item:focus-visible { outline-offset: -2px; border-radius: 9px; background: var(--press); }
+.mm-item .ico { width: 18px; height: 18px; }
+.mm-ico { color: var(--hint); }
+.mm-item[aria-checked="true"] .mm-ico, .mm-check { color: var(--link); }
+.mm-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ---------- Pills & dots ---------- */
 .pill {
   display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 8px;
@@ -299,9 +335,13 @@ code { font-family: var(--mono); font-size: .92em; padding: 1px 5px; border-radi
 .state-ico .ico { width: 28px; height: 28px; stroke-width: 1.8; }
 .state-ico.bad { color: var(--bad); }
 .state-title { font-size: 20px; font-weight: 700; letter-spacing: -.015em; line-height: 1.3; max-width: 20ch; text-wrap: balance; }
+.state-name { display: inline-block; max-width: 100%; overflow-wrap: anywhere; } /* keeps "omarchy-mac-1" on one line */
 .state-sub { font-size: 14px; color: var(--hint); max-width: 32ch; line-height: 1.45; }
 .btn { margin-top: 10px; height: 44px; padding: 0 22px; border-radius: 12px; background: var(--accent); color: var(--accent-text); font-size: 15px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; transition: transform .12s, opacity .12s; }
 .btn:active { transform: scale(.97); opacity: .9; }
+.state-acts { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.btn-link { height: 44px; padding: 0 16px; border-radius: 12px; color: var(--link); font-size: 15px; font-weight: 600; transition: opacity .12s; }
+.btn-link:active { opacity: .6; }
 
 /* ---------- Skeletons ---------- */
 .sk { display: block; border-radius: 6px; background: linear-gradient(90deg, var(--sk) 25%, var(--sk-hi) 50%, var(--sk) 75%); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }
@@ -330,6 +370,10 @@ body[data-mode="stale"] .wrap { padding-bottom: calc(var(--sab) + 84px); }
 .view-back { animation: view-back .24s var(--ease) both; }
 @keyframes view-back { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
 .dnav { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; margin: -8px 0 8px; }
+.dnav-r { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dnav .mbtn { flex: 0 1 auto; margin: 0; height: 28px; padding: 0 5px 0 9px; font-size: 13px; }
+.d-mach { display: flex; min-width: 0; }
+.d-mach:empty { display: none; }
 .back { display: inline-flex; align-items: center; gap: 1px; height: 44px; padding: 0 10px 0 0; margin-left: -7px; color: var(--link); font-size: 16px; font-weight: 500; border-radius: 10px; }
 .back .ico { width: 24px; height: 24px; stroke-width: 2.3; }
 .back:active { opacity: .6; }
@@ -406,7 +450,7 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
         <span class="mark" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24"><path d="m6 8 4.5 4L6 16"/><path d="M13 16.5h5"/></svg></span>
         <div class="brand-text">
           <h1>Claude Code</h1>
-          <p class="sub"><span id="host">This Mac</span><span aria-hidden="true">·</span><span id="updated">connecting…</span></p>
+          <p class="sub"><span id="host">This Mac</span><button type="button" class="mbtn" id="mbtn" data-mpick="main" aria-haspopup="menu" aria-expanded="false" aria-controls="mmenu" hidden><span class="sr-only">Machine: </span><span class="mbtn-name" id="mbtn-name"></span><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9.5 6 6 6-6"/></svg></button><span aria-hidden="true">·</span><span id="updated">connecting…</span></p>
         </div>
       </div>
       <span id="pill"></span>
@@ -429,6 +473,8 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
   <div id="detail-view" hidden></div>
 </div>
 <div class="toast" id="toast" hidden></div>
+<div class="mscrim" id="mscrim" hidden></div>
+<div class="mmenu" id="mmenu" role="menu" aria-label="Machines" hidden></div>
 <div class="sr-only" id="sr" aria-live="polite"></div>
 <noscript><p style="padding:24px;text-align:center">This dashboard needs JavaScript.</p></noscript>
 
@@ -462,8 +508,18 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
     known: new Map(),      // last seen copy of every session, for ended-session detail
     intro: false,
     paused: false,         // Telegram 'deactivated' (app minimised)
+    machines: [],          // [{ id, name }] from the last response; the picker shows when there are 2+
+    machine: 'local',      // selected machine id
+    machineName: '',       // its name, saved so the header is right before the first response
+    gen: 0,                // bumped on every machine switch; responses from an older gen are dropped
+    err: null,             // why we're offline: 'machine' (bot answered, machine down) | 'net'
+    menu: null,            // trigger the machine picker is open from: 'main' | 'detail'
   };
   try { const m = localStorage.getItem('ccab.metric'); if (m === 'all' || m === 'out') S.metric = m; } catch (_) {}
+  try {
+    const m = JSON.parse(localStorage.getItem('ccab.machine') || 'null');
+    if (m && typeof m.id === 'string' && m.id) { S.machine = m.id; S.machineName = typeof m.name === 'string' ? m.name : ''; }
+  } catch (_) {}
 
   /* ================= Icons (hand-drawn, 24px grid) ================= */
   const ICONS = {
@@ -481,6 +537,8 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
     refresh: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/>',
     inbox: '<path d="M3.5 13.5 6 6.4A2 2 0 0 1 7.9 5h8.2a2 2 0 0 1 1.9 1.4l2.5 7.1"/><path d="M3.5 13.5V18a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-4.5h-5l-1.5 2.5h-4l-1.5-2.5h-5Z"/>',
     flag: '<path d="M5.5 21V4.5"/><path d="M5.5 4.5h11l-2 4 2 4h-11"/>',
+    mac: '<rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2.5 19.5h19"/>',
+    check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
   };
   const svg = (name, cls) => `<svg class="ico${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name] || ''}</svg>`;
 
@@ -647,10 +705,125 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
       default: return `<span class="pill pill-lg tone-wait"><span class="dot"></span>Connecting</span>`;
     }
   }
+  const multiMachine = () => S.machines.length > 1;
+  function machineName() {
+    const m = S.machines.find(x => x.id === S.machine);
+    return (m && m.name) || S.machineName || (S.machine === 'local' ? 'This Mac' : S.machine);
+  }
+  const machineBtnHTML = name => `<button type="button" class="mbtn" id="d-mbtn" data-mpick="detail" aria-haspopup="menu" aria-expanded="false" aria-controls="mmenu"><span class="sr-only">Machine: </span><span class="mbtn-name">${esc(name)}</span>${svg('chevD')}</button>`;
   function renderHeader() {
     setHTML($('#pill'), pillHTML());
     const dp = $('#d-pill'); if (dp) setHTML(dp, pillHTML().replace(' pill-lg', ''));
-    setText($('#host'), (S.snap && S.snap.host) || 'This Mac');
+    const multi = multiMachine();
+    if (S.menu && (!multi || S.mode === 'auth')) closeMenu(false);
+    const name = machineName();
+    // One machine: the plain host line, as before. Several: the name becomes the picker button.
+    const host = $('#host');
+    setText(host, S.machine === 'local' ? ((S.snap && S.snap.host) || 'This Mac') : name);
+    host.hidden = multi;
+    const mb = $('#mbtn');
+    mb.hidden = !multi;
+    $('#main-head').classList.toggle('multi', multi);
+    if (multi) { setText($('#mbtn-name'), name); mb.setAttribute('aria-expanded', String(S.menu === 'main')); }
+    const dm = $('#d-mach');
+    if (dm) {
+      setHTML(dm, multi ? machineBtnHTML(name) : '');
+      if (dm.firstElementChild) dm.firstElementChild.setAttribute('aria-expanded', String(S.menu === 'detail'));
+    }
+    if (S.menu) {
+      const menu = $('#mmenu');
+      const f = menu.contains(doc.activeElement) ? doc.activeElement.dataset.machine : null;
+      if (setHTML(menu, menuHTML()) && f != null) {
+        const el = $$('.mm-item', menu).find(b => b.dataset.machine === f);
+        if (el) el.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  /* ================= Machine picker ================= */
+  function menuHTML() {
+    return `<p class="mm-head" aria-hidden="true">Machines</p>` + S.machines.map(m => {
+      const on = m.id === S.machine;
+      return `<button type="button" class="mm-item" role="menuitemradio" aria-checked="${on}" tabindex="-1" data-machine="${esc(m.id)}">${svg('mac', 'mm-ico')}<span class="mm-name">${esc(m.name)}</span>${on ? svg('check', 'mm-check') : ''}</button>`;
+    }).join('');
+  }
+  const menuTrigger = () => $(S.menu === 'detail' ? '#d-mbtn' : '#mbtn');
+  function placeMenu() {
+    const btn = menuTrigger(), menu = $('#mmenu');
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const vw = root.clientWidth, w = menu.offsetWidth;
+    let left = r.left;
+    if (left + w > vw - 12) left = Math.max(12, r.right - w);
+    menu.style.left = Math.round(left) + 'px';
+    menu.style.top = Math.round(r.bottom + 6) + 'px';
+    menu.style.maxHeight = Math.max(140, window.innerHeight - r.bottom - 18) + 'px';
+    menu.style.transformOrigin = (left === r.left ? 'left' : 'right') + ' top';
+  }
+  function openMenu(where, focus) {
+    if (S.menu || !multiMachine()) return;
+    S.menu = where;
+    const menu = $('#mmenu');
+    setHTML(menu, menuHTML());
+    $('#mscrim').hidden = false;
+    menu.hidden = false;
+    renderHeader();
+    placeMenu();
+    if (motionOK()) { menu.classList.remove('menu-in'); void menu.offsetWidth; menu.classList.add('menu-in'); }
+    haptic();
+    const items = $$('.mm-item', menu);
+    const el = focus === 'first' ? items[0] : focus === 'last' ? items[items.length - 1]
+      : items.find(b => b.getAttribute('aria-checked') === 'true') || items[0];
+    if (el) el.focus({ preventScroll: true });
+  }
+  function closeMenu(refocus) {
+    if (!S.menu) return;
+    const btn = menuTrigger();
+    S.menu = null;
+    $('#mmenu').hidden = true;
+    $('#mscrim').hidden = true;
+    renderHeader();
+    if (refocus && btn && btn.isConnected && !btn.hidden) btn.focus({ preventScroll: true });
+  }
+  function saveMachine() {
+    try { localStorage.setItem('ccab.machine', JSON.stringify({ id: S.machine, name: S.machineName })); } catch (_) {}
+  }
+  function takeMachines(d) {
+    if (!d || !Array.isArray(d.machines)) return;
+    S.machines = d.machines
+      .filter(m => m && typeof m.id === 'string' && m.id)
+      .map(m => ({ id: m.id, name: typeof m.name === 'string' && m.name ? m.name : m.id }));
+    const cur = S.machines.find(m => m.id === S.machine);
+    if (cur && cur.name !== S.machineName) { S.machineName = cur.name; if (S.machine !== 'local') saveMachine(); }
+  }
+  // Point the board at another machine. Everything machine-scoped is dropped first,
+  // so the new name never sits on top of the previous machine's data.
+  function useMachine(id) {
+    S.machine = id;
+    S.machineName = (S.machines.find(m => m.id === id) || {}).name || '';
+    S.gen++;
+    clearTimeout(timer);
+    if (inflight) { inflight.abort(); inflight = null; }
+    S.snap = null; S.at = 0; S.fails = 0; S.err = null; S.sel = null;
+    S.known.clear(); S.expanded.clear();
+    S.intro = false; S.introSessions = false;
+    S.mode = 'boot';
+    S.mainScroll = 0;
+    if (S.view === 'detail') goBack(true);
+    window.scrollTo(0, 0);
+    render();
+    poll();
+  }
+  function pickMachine(id) {
+    closeMenu(false);
+    if (id !== S.machine && S.machines.some(m => m.id === id)) {
+      haptic();
+      useMachine(id);
+      saveMachine();
+      announce('Showing ' + machineName());
+    }
+    const b = $(S.view === 'detail' ? '#d-mbtn' : '#mbtn');
+    if (b && !b.hidden) b.focus({ preventScroll: true });
   }
 
   /* ================= Tiles ================= */
@@ -908,7 +1081,7 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
     setText($('#s-count'), list.length ? `${list.length} open` : '');
     if (!list.length) {
       box.dataset.kind = 'empty'; box._map = null;
-      setHTML(box, `<div class="empty">${svg('term')}<p class="empty-title">No Claude Code sessions on this Mac</p><p class="empty-sub">Start <code>claude</code> in a terminal and it shows up here.</p></div>`);
+      setHTML(box, `<div class="empty">${svg('term')}<p class="empty-title">No Claude Code sessions on ${multiMachine() ? esc(machineName()) : 'this Mac'}</p><p class="empty-sub">Start <code>claude</code> in a terminal and it shows up here.</p></div>`);
       return;
     }
     if (box.dataset.kind !== 'list') { box.dataset.kind = 'list'; box._h = null; box.innerHTML = ''; box._map = new Map(); }
@@ -996,6 +1169,16 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
         <h1 class="state-title">Open this from your bot with <code>/agents</code></h1>
         <p class="state-sub">This board shows live Claude Code activity from your Mac. It only opens inside Telegram, from your own bot.</p>
       </div>`);
+    } else if (S.err === 'machine') {
+      setHTML(st, `<div class="state">
+        <div class="state-ico bad">${svg('wifiOff')}</div>
+        <h2 class="state-title"><span class="state-name">${esc(machineName())}</span> is not reachable</h2>
+        <p class="state-sub">The bot can't connect to this machine. Check that it's awake and online. Retrying every few seconds.</p>
+        <div class="state-acts">
+          <button type="button" class="btn" data-retry>${svg('refresh')}Try again</button>
+          <button type="button" class="btn-link" data-mpick="main" aria-haspopup="menu">Switch machine</button>
+        </div>
+      </div>`);
     } else {
       setHTML(st, `<div class="state">
         <div class="state-ico bad">${svg('wifiOff')}</div>
@@ -1035,7 +1218,7 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
   function detailShell() {
     return `<nav class="dnav" aria-label="Detail navigation">
         <button type="button" class="back" data-back>${svg('chevL')}<span>Sessions</span></button>
-        <span id="d-pill"></span>
+        <span class="dnav-r"><span class="d-mach" id="d-mach"></span><span id="d-pill"></span></span>
       </nav>
       <div id="d-ended"></div>
       <section class="card d-hero" aria-labelledby="d-title">
@@ -1165,6 +1348,7 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
   }
   function goBack(silent) {
     if (S.view !== 'detail') return;
+    closeMenu(false);
     if (!silent) haptic();
     const id = S.detailId;
     S.view = 'main'; S.detailId = null;
@@ -1189,11 +1373,12 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
     let upd = 'connecting…';
     if (S.mode === 'loading') upd = 'starting up…';
     else if (S.snap) upd = 'updated ' + fmtAgo(age, 'ago');
-    else if (S.mode === 'unreachable') upd = 'no connection';
+    else if (S.mode === 'unreachable') upd = S.err === 'machine' ? 'not reachable' : 'no connection';
     setText($('#updated'), upd);
     const toast = $('#toast');
     if (S.mode === 'stale') {
-      const html = `${svg('wifiOff')}<span>Mac unreachable · data from ${esc(fmtAgo(age, 'ago'))}</span>`;
+      const who = S.err === 'machine' ? machineName() : 'Mac';
+      const html = `${svg('wifiOff')}<span>${esc(who)} unreachable · data from ${esc(fmtAgo(age, 'ago'))}</span>`;
       setHTML(toast, html);
       toast.hidden = false;
     } else if (!toast.hidden) {
@@ -1217,6 +1402,7 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
     S.snap = data;
     S.at = performance.now();
     S.fails = 0;
+    S.err = null;
     S.mode = 'live';
     remember(data);
     render();
@@ -1224,33 +1410,62 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
   }
   function onError() {
     S.fails++;
+    S.err = 'net';
     const prev = S.mode;
     if (S.snap) S.mode = 'stale';
     else if (S.fails >= 2 || prev === 'unreachable') S.mode = 'unreachable';
     render();
     if (prev === 'live' && S.mode === 'stale') announce('Mac unreachable. Showing the last data.');
   }
+  // The bot answered, but the selected machine didn't. The backend has already
+  // waited for it, so go straight to the offline state.
+  function onMachineDown() {
+    S.fails++;
+    S.err = 'machine';
+    const prev = S.mode;
+    S.mode = S.snap ? 'stale' : 'unreachable';
+    render();
+    if (prev !== S.mode) announce(`${machineName()} is not reachable${S.snap ? '. Showing the last data.' : ''}`);
+  }
   async function poll() {
     clearTimeout(timer);
     if (doc.hidden || S.paused || inflight) return;
     const ctrl = new AbortController();
+    const gen = S.gen, mid = S.machine;
     inflight = ctrl; pausedAbort = false;
     const killer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     let next = POLL_MS;
     try {
-      const res = await fetch('api/state', {
+      const res = await fetch(mid === 'local' ? 'api/state' : 'api/state?machine=' + encodeURIComponent(mid), {
         headers: { Authorization: 'tma ' + ((WA && WA.initData) || '') },
         cache: 'no-store', credentials: 'same-origin', signal: ctrl.signal,
       });
+      if (gen !== S.gen) return; // the user switched machines while this was in flight
       if (res.status === 401 || res.status === 403) {
         S.mode = 'auth'; S.snap = null;
         if (S.view === 'detail') goBack(true);
         render();
         next = 0; // stop; retried when the app becomes visible again
       } else if (!res.ok) {
-        throw new Error('HTTP ' + res.status);
+        const body = await res.json().catch(() => null);
+        if (gen !== S.gen) return;
+        takeMachines(body);
+        const err = body && body.error;
+        if (res.status === 404 && err === 'unknown machine' && mid !== 'local') {
+          // The saved machine is gone from the config: forget it and show this Mac.
+          try { localStorage.removeItem('ccab.machine'); } catch (_) {}
+          next = 0;
+          useMachine('local');
+        } else if (res.status === 502 && err === 'unreachable' && mid !== 'local') {
+          onMachineDown();
+          next = S.fails > 6 ? 10000 : POLL_MS;
+        } else {
+          throw new Error('HTTP ' + res.status);
+        }
       } else {
         const data = await res.json();
+        if (gen !== S.gen) return;
+        takeMachines(data);
         if (data && data.loading) {
           if (!S.snap) { S.mode = 'loading'; render(); }
           next = LOADING_MS;
@@ -1261,18 +1476,24 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
         }
       }
     } catch (_) {
-      if (pausedAbort) next = doc.hidden || S.paused ? 0 : 50;
+      if (gen !== S.gen) next = 0; // aborted by a machine switch, which already polls the new one
+      else if (pausedAbort) next = doc.hidden || S.paused ? 0 : 50;
       else { onError(); next = S.fails > 6 ? 10000 : POLL_MS; }
     } finally {
       clearTimeout(killer);
-      inflight = null;
-      if (next) schedule(next);
+      if (inflight === ctrl) inflight = null;
+      if (next && gen === S.gen) schedule(next);
     }
   }
 
   /* ================= Events ================= */
   doc.addEventListener('click', e => {
     const t = e.target;
+    if (t.closest('#mscrim')) { closeMenu(true); return; }
+    const machine = t.closest('[data-machine]');
+    if (machine) { pickMachine(machine.dataset.machine); return; }
+    const mpick = t.closest('[data-mpick]');
+    if (mpick) { openMenu(mpick.dataset.mpick); return; }
     const back = t.closest('[data-back]');
     if (back) { goBack(); return; }
     const retry = t.closest('[data-retry]');
@@ -1344,9 +1565,33 @@ html[data-theme="dark"] .lv-warn { color: var(--warn) !important; }
     const b = bar.parentNode.children[i]; if (b) b.focus();
   });
 
+  // Machine picker: arrows move, Home/End jump, Tab and Escape close (Escape is handled below).
+  $('#mmenu').addEventListener('keydown', e => {
+    const items = $$('.mm-item', e.currentTarget);
+    const i = items.indexOf(doc.activeElement);
+    let j;
+    if (e.key === 'ArrowDown') j = (i + 1) % items.length;
+    else if (e.key === 'ArrowUp') j = (i - 1 + items.length) % items.length;
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = items.length - 1;
+    else if (e.key === 'Tab') { e.preventDefault(); closeMenu(true); return; }
+    else return;
+    e.preventDefault();
+    if (items[j]) items[j].focus();
+  });
+
   doc.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && S.menu) { e.preventDefault(); closeMenu(true); return; }
+    const mpick = e.target.closest && e.target.closest('[data-mpick]');
+    if (mpick && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      openMenu(mpick.dataset.mpick, e.key === 'ArrowDown' ? 'first' : 'last');
+      return;
+    }
     if (e.key === 'Escape' && S.view === 'detail') goBack();
   });
+  window.addEventListener('resize', () => { if (S.menu) placeMenu(); });
+  window.addEventListener('scroll', () => { if (S.menu) placeMenu(); }, { passive: true });
 
   doc.addEventListener('visibilitychange', () => {
     if (doc.hidden) {

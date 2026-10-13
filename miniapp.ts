@@ -10,6 +10,9 @@
  * the allowlist, so the public URL shows nothing to anyone else.
  * With TELEGRAM_WEBHOOK=on the same server also takes Telegram's updates at
  * POST /telegram/webhook (server.ts checks the secret token).
+ * Users that server.ts lets control sessions can also read a session's messages,
+ * send it a message, start background tasks, stop them and signal terminal
+ * sessions (POST /api/control). TELEGRAM_MINIAPP_CONTROL=off turns that off.
  *
  * Data comes from `claude agents --json` (live sessions, busy or idle) and the
  * transcripts in ~/.claude/projects (tokens, model, tool calls, subagents).
@@ -58,6 +61,8 @@ interface SessionView {
   lastActivity: number;
   agents: AgentView[];
   agentsTotal: number;
+  /** Controls that apply to this session (peek send stop logs rm interrupt terminate bot-new). */
+  actions: string[];
 }
 
 interface Activity {
@@ -84,10 +89,40 @@ interface Snapshot {
   hourly: Array<Usage & { t: number; tools: number }>;
   sessions: SessionView[];
   activity: Activity[];
+  /** Folders a new background task can start in, most recently used first. */
+  projects: Array<{ cwd: string; name: string }>;
 }
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+
+// This process and its parents: `bun run`, the Claude Code session that runs the plugin (the daemon),
+// its wrapper and the supervisor. The board never signals these, and shows the session as the bot's own.
+let ancestors: Set<number> | null = null;
+function ancestorPids(): Set<number> {
+  if (ancestors) return ancestors;
+  const pids = new Set([process.pid]);
+  let pid = process.ppid;
+  for (let i = 0; i < 16 && pid > 1 && !pids.has(pid); i++) {
+    pids.add(pid);
+    try {
+      pid = Number(
+        Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(pid)])
+          .stdout.toString()
+          .trim(),
+      );
+    } catch {
+      break;
+    }
+  }
+  ancestors = pids;
+  return pids;
+}
+
+function projectsRoot(): string {
+  const home = userInfo().homedir || homedir();
+  return join(process.env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "projects");
+}
 
 // ── Main thread: HTTP server, auth, /agents button ────────────────────
 
@@ -259,9 +294,206 @@ const HTML_HEADERS = {
     "default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
 };
 
+// ── Main thread: session controls ─────────────────────────────────────
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MODES = new Set(["plan", "acceptEdits", "default"]);
+const MAX_BODY = 16 * 1024;
+const MAX_TEXT = 8000;
+const CONTROLS_PER_MINUTE = 10;
+
+interface AgentEntry {
+  sessionId: string;
+  /** Background sessions: the short id that stop, logs and rm take. */
+  id?: string;
+  pid?: number;
+  cwd?: string;
+  kind?: string;
+  status?: string;
+  state?: string;
+  name?: string;
+}
+
+interface Task {
+  id: string;
+  userId: string;
+  project: string;
+  prompt: string;
+  startedAt: number;
+}
+
+type Reply = [status: number, body: Record<string, unknown>];
+
+// A child with these would take itself for the daemon session or reach the bot.
+const CHILD_ENV_DROP =
+  /^(TELEGRAM_|CLAUDE_PLUGIN_|CLAUDE_CODE_MESSAGING_)|^(CLAUDECODE|CLAUDE_CODE_ENTRYPOINT|CLAUDE_CODE_SESSION_ID|CLAUDE_SESSION_ID|CLAUDE_PROJECT_DIR|CLAUDE_PID|CLAUDE_CODE_CHILD_SESSION|CLAUDE_CODE_BRIDGE_SESSION_ID|CLAUDE_CODE_SESSION_ATTENDED|CLAUDE_ENV_FILE|AI_AGENT)$/;
+
+function childEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !CHILD_ENV_DROP.test(k)) env[k] = v;
+  return env;
+}
+
+/** Runs the claude CLI with an args array, never through a shell. SIGKILL after 20 s. */
+async function runClaude(args: string[], cwd?: string): Promise<{ code: number | null; stdout: string; out: string }> {
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(["claude", ...args], { cwd, env: childEnv(), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  } catch (err) {
+    return { code: null, stdout: "", out: `cannot run claude: ${err}` };
+  }
+  const text = ["", ""];
+  const readers = [proc.stdout, proc.stderr].map((s) => (s as ReadableStream<Uint8Array>).getReader());
+  const reading = Promise.all(
+    readers.map(async (r, i) => {
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await r.read();
+        if (done) break;
+        text[i] += decoder.decode(value, { stream: true });
+      }
+    }),
+  ).catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      resolve(null);
+    }, 20_000);
+  });
+  const code = await Promise.race([proc.exited, timeout]).finally(() => clearTimeout(timer));
+  // `claude --bg` can start a background service that inherits the pipes. Do not wait for it to close them.
+  await Promise.race([reading, Bun.sleep(300)]);
+  for (const r of readers) r.cancel().catch(() => {});
+  return { code, stdout: text[0], out: `${text[0]}\n${text[1]}`.trim() };
+}
+
+async function agentsList(): Promise<AgentEntry[] | null> {
+  const { code, stdout } = await runClaude(["agents", "--json", "--all"]);
+  if (code !== 0) return null;
+  try {
+    const list = JSON.parse(stdout);
+    return Array.isArray(list) ? list.filter((s) => typeof s?.sessionId === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+const ESC = String.fromCharCode(27);
+const ANSI_MOVE_LINE = new RegExp(`${ESC}\\[\\d*(?:;\\d*)?[BEFHf]`, "g");
+const ANSI_MOVE_RIGHT = new RegExp(`${ESC}\\[\\d*[CG]`, "g");
+const ANSI_REST = new RegExp(
+  `${ESC}\\][^${ESC}\\u0007]*(?:\\u0007|${ESC}\\\\)|${ESC}\\[[0-9;?<>=]*[A-Za-z~]|${ESC}[()][A-Z0-9]|${ESC}.`,
+  "g",
+);
+
+// `claude logs` replays the terminal screen. Turn cursor moves into line breaks and spaces, drop the
+// other escape codes, rules and repeated lines, so the text reads top to bottom.
+function plainLogs(raw: string): string {
+  const lines = raw
+    .replace(ANSI_MOVE_LINE, "\n")
+    .replace(ANSI_MOVE_RIGHT, " ")
+    .replace(ANSI_REST, "")
+    .split(/\r?\n|\r/)
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    // Rules, and spinner frames: lines with fewer than two letters or digits.
+    .filter((l) => l.replace(/[^\p{L}\p{N}]/gu, "").length > 1);
+  return lines.filter((l, i) => l !== lines[i - 1]).join("\n");
+}
+
+const firstLine = (s: string) => clip(s.split("\n").find((l) => l.trim()) ?? "", 300);
+
+function transcriptPath(sessionId: string): string | null {
+  const root = projectsRoot();
+  try {
+    for (const p of readdirSync(root)) {
+      const path = join(root, p, `${sessionId}.jsonl`);
+      if (existsSync(path)) return path;
+    }
+  } catch {}
+  return null;
+}
+
+type ChatMessage = { role: "user" | "assistant"; text: string; ts: number };
+
+// Text blocks of one transcript line. A tool call becomes one short line, like [Bash] git status.
+function lineMessages(e: any): ChatMessage[] {
+  if ((e.type !== "user" && e.type !== "assistant") || e.isMeta || e.isSidechain) return [];
+  const role = e.type as ChatMessage["role"];
+  const ts = Date.parse(e.timestamp) || 0;
+  const cut = (t: string) => (t.length > 4000 ? `${t.slice(0, 3999)}…` : t);
+  const content = e.message?.content;
+  if (typeof content === "string") return content.trim() ? [{ role, text: cut(content.trim()), ts }] : [];
+  const out: ChatMessage[] = [];
+  for (const c of Array.isArray(content) ? content : []) {
+    if (c?.type === "text" && typeof c.text === "string" && c.text.trim())
+      out.push({ role, text: cut(c.text.trim()), ts });
+    else if (role === "assistant" && c?.type === "tool_use" && !HIDDEN_TOOLS.has(c.name)) {
+      const target = describe(String(c.name), c.input ?? {});
+      out.push({ role, text: `[${c.name}]${target ? ` ${target}` : ""}`, ts });
+    }
+  }
+  return out;
+}
+
+// The last messages of a transcript. Reads from the end and widens the window until enough are found.
+async function readMessages(path: string, limit: number): Promise<ChatMessage[]> {
+  const size = statSync(path).size;
+  for (let window = 1 << 20; ; window *= 4) {
+    const start = Math.max(0, size - window);
+    const lines = (await Bun.file(path).slice(start, size).text()).split("\n");
+    if (start > 0) lines.shift();
+    const messages: ChatMessage[] = [];
+    for (const line of lines) {
+      if (!line.startsWith("{") || !/"type":"(?:user|assistant)"/.test(line)) continue;
+      try {
+        messages.push(...lineMessages(JSON.parse(line)));
+      } catch {}
+    }
+    if (messages.length >= limit || start === 0 || window >= 32 << 20) return messages.slice(-limit);
+  }
+}
+
+// Reads a JSON object body of at most 16 KB. A string is the error to return.
+async function readJsonBody(req: Request): Promise<Record<string, unknown> | string> {
+  if (!/^application\/json\b/i.test(req.headers.get("content-type") ?? ""))
+    return "Content-Type must be application/json";
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY) return "body too large";
+  const reader = req.body?.getReader();
+  if (!reader) return "empty body";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > MAX_BODY) {
+      reader.cancel().catch(() => {});
+      return "body too large";
+    }
+    chunks.push(value);
+  }
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return body && typeof body === "object" && !Array.isArray(body) ? body : "body must be a JSON object";
+  } catch {
+    return "invalid JSON";
+  }
+}
+
+const str = (v: unknown) => (typeof v === "string" ? v : "");
+
 export function startMiniApp(opts: {
   token: string;
   isAllowed: (userId: string) => boolean;
+  /** May this user read messages and control sessions? Without it, the board is read-only. */
+  canControl?: (userId: string) => boolean;
+  /** The "New session" button: the same as the /new command. */
+  newSession?: () => void;
+  /** Sends a Telegram message to a user: the notice when a task from the board finishes. */
+  notify?: (userId: string, text: string) => unknown;
+  /** Where the board keeps the tasks it watches, so a restart does not lose them. */
+  dataDir?: string;
   log: (msg: string) => void;
   /** TELEGRAM_WEBHOOK=on: handles POST /telegram/webhook. With TELEGRAM_MINIAPP=off the server runs for this route only. */
   webhook?: (req: Request) => Response | Promise<Response>;
@@ -304,6 +536,308 @@ export function startMiniApp(opts: {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
 
+  const telegramUser = (req: Request): string | null => {
+    const m = /^tma (.+)$/.exec(req.headers.get("authorization") ?? "");
+    const userId = m ? verifyInitData(m[1], opts.token) : null;
+    return userId && opts.isAllowed(userId) ? userId : null;
+  };
+
+  const isPeer = (req: Request) =>
+    !!peerSecret && sameSecret(req.headers.get("authorization") ?? "", `Bearer ${peerSecret}`);
+
+  const controlOff = process.env.TELEGRAM_MINIAPP_CONTROL === "off";
+  const offHere = { enabled: false, reason: "Session controls are turned off on that machine." };
+  const controlFor = (userId: string): { enabled: boolean; reason?: string } => {
+    if (controlOff)
+      return { enabled: false, reason: "Session controls are turned off (TELEGRAM_MINIAPP_CONTROL=off)." };
+    return opts.canControl?.(userId)
+      ? { enabled: true }
+      : { enabled: false, reason: "Only admins can control sessions." };
+  };
+  // Sessions keep their actions only when the user may use them.
+  const withControl = (data: any, control: { enabled: boolean; reason?: string }) => ({
+    ...data,
+    control,
+    sessions: Array.isArray(data.sessions)
+      ? data.sessions.map((s: any) => ({ ...s, actions: control.enabled && Array.isArray(s.actions) ? s.actions : [] }))
+      : data.sessions,
+  });
+
+  // Asks another machine, only one from TELEGRAM_MINIAPP_PEERS, so the board never fetches an address from the request.
+  const askPeer = async (machine: string, path: string, init: RequestInit, timeoutMs: number): Promise<Reply> => {
+    const base = peers.get(machine);
+    if (!base) return [404, { error: "unknown machine" }];
+    try {
+      const res = await globalThis.fetch(`${base}${path}`, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${peerSecret}` },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const body = await res.json();
+      // 401 means the machines do not share the secret: for the user that machine is unreachable.
+      if (res.status === 401 || !body || typeof body !== "object") throw new Error(`HTTP ${res.status}`);
+      return [res.status, body];
+    } catch {
+      return [502, { error: "unreachable", machine }];
+    }
+  };
+
+  const messages = async (url: URL): Promise<Reply> => {
+    const id = url.searchParams.get("id") ?? "";
+    if (!SESSION_ID.test(id)) return [400, { error: "id must be a session id" }];
+    const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 30, 1), 100);
+    const path = transcriptPath(id);
+    if (!path) return [404, { error: "no transcript for this session" }];
+    try {
+      return [200, { messages: await readMessages(path, limit) }];
+    } catch {
+      return [502, { error: "cannot read the transcript" }];
+    }
+  };
+
+  // Tasks started from the board: the requester gets a message when the session stops working.
+  // Kept in a file, because the daemon restarts every few hours.
+  const tasksFile = opts.dataDir ? join(opts.dataDir, "miniapp-tasks.json") : "";
+  let tasks: Task[] = [];
+  try {
+    const saved = JSON.parse(readFileSync(tasksFile, "utf8"));
+    if (Array.isArray(saved)) tasks = saved.filter((t) => typeof t?.id === "string" && Date.now() - t.startedAt < DAY);
+  } catch {}
+  let taskTimer: ReturnType<typeof setInterval> | null = null;
+  let checking = false;
+  const saveTasks = () => {
+    try {
+      if (tasksFile) writeFileSync(tasksFile, JSON.stringify(tasks));
+    } catch {}
+  };
+  const checkTasks = async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      const list = await agentsList();
+      if (!list) return;
+      const now = Date.now();
+      const done = new Set<Task>();
+      for (const t of tasks) {
+        const s = list.find((x) => x.id === t.id || x.sessionId.startsWith(t.id));
+        // A background session stays alive after its turn, in state "done". Right after the start the
+        // list may not show it yet.
+        const working = s
+          ? !!s.pid && (s.state ? s.state === "working" : s.status === "busy")
+          : now - t.startedAt < 60_000;
+        if (working) {
+          if (now - t.startedAt > DAY) done.add(t);
+          continue;
+        }
+        done.add(t);
+        try {
+          await opts.notify?.(t.userId, `Task finished in ${t.project}: ${t.prompt}. Open /agents to read it.`);
+        } catch (err) {
+          opts.log(`mini app: task notice for ${t.id} failed: ${err}`);
+        }
+      }
+      if (done.size) {
+        tasks = tasks.filter((t) => !done.has(t));
+        saveTasks();
+      }
+    } finally {
+      checking = false;
+      if (!tasks.length && taskTimer) {
+        clearInterval(taskTimer);
+        taskTimer = null;
+      }
+    }
+  };
+  const watchTasks = () => {
+    if (!taskTimer && tasks.length) taskTimer = setInterval(() => void checkTasks(), 15_000);
+  };
+
+  const backgroundId = (out: string) => /backgrounded\W+([0-9a-f]{8})/.exec(out)?.[1];
+  const cliError = (out: string) =>
+    firstLine(
+      out
+        .replace(ANSI_REST, "")
+        .split("\n")
+        .filter((l) => !/^\s*Starting background service/.test(l))
+        .join("\n"),
+    ) || "claude failed";
+
+  // One control action on this machine. fromPeer: another machine's board asked, so no task notice here.
+  const runControl = async (body: Record<string, unknown>, userId: string, fromPeer: boolean): Promise<Reply> => {
+    const action = str(body.action);
+    if (action === "bot-new") {
+      if (!opts.newSession) return [409, { error: "This board cannot start a new bot session." }];
+      try {
+        opts.newSession();
+      } catch (err) {
+        return [502, { error: `Could not signal a restart: ${err}` }];
+      }
+      return [200, { ok: true, message: "Starting a fresh bot session. Memory is kept. Back in a minute." }];
+    }
+
+    if (action === "new") {
+      const cwd = str(body.cwd);
+      const prompt = str(body.prompt);
+      const mode = str(body.mode) || "default";
+      if (!MODES.has(mode)) return [400, { error: "mode must be plan, acceptEdits or default" }];
+      if (!prompt.trim() || prompt.length > MAX_TEXT)
+        return [400, { error: `prompt needs 1 to ${MAX_TEXT} characters` }];
+      if (!snapshot) {
+        touch();
+        return [409, { error: "The board is still loading. Try again in a few seconds." }];
+      }
+      if (!snapshot.projects.some((p) => p.cwd === cwd))
+        return [400, { error: "cwd is not one of the board's projects" }];
+      // "--" ends the options, so a prompt that starts with "-" stays a prompt.
+      const r = await runClaude(["--bg", "--permission-mode", mode, "--", prompt.trim()], cwd);
+      const id = backgroundId(r.out);
+      if (!id) return [502, { error: cliError(r.out) }];
+      const project = projectName(cwd);
+      const notice = !fromPeer && !!opts.notify;
+      if (notice) {
+        tasks.push({ id, userId, project, prompt: clip(prompt, 80), startedAt: Date.now() });
+        saveTasks();
+        watchTasks();
+      }
+      return [
+        200,
+        { ok: true, id, message: `Started in ${project}.${notice ? " You get a message when it finishes." : ""}` },
+      ];
+    }
+
+    if (!["send", "stop", "logs", "rm", "interrupt", "terminate"].includes(action))
+      return [400, { error: "unknown action" }];
+    const id = str(body.id);
+    if (!SESSION_ID.test(id)) return [400, { error: "id must be a session id" }];
+    // Look the session up now, never from the snapshot: the pid and state must be current.
+    const list = await agentsList();
+    if (!list) return [502, { error: "claude agents failed" }];
+    const s = list.find((x) => x.sessionId === id);
+    if (!s) return [404, { error: "session not found" }];
+    const name = s.name || id.slice(0, 8);
+    const short = s.id || id.slice(0, 8);
+    const background = s.kind === "background";
+    const own = !!s.pid && ancestorPids().has(s.pid);
+
+    if (action === "send") {
+      if (own) return [403, { error: "This is the bot's own session. Write to the bot in Telegram instead." }];
+      const text = str(body.text);
+      if (!text.trim() || text.length > MAX_TEXT) return [400, { error: `text needs 1 to ${MAX_TEXT} characters` }];
+      if (!s.cwd || !existsSync(s.cwd)) return [409, { error: "The session's folder no longer exists." }];
+      if (background && s.pid && s.state !== "working") {
+        // A background session that finished its turn keeps running, and --resume would start a copy.
+        // Stop it first (the conversation is kept), so the message continues the same session. The list
+        // drops the pid before the process exits, so wait for the process itself.
+        await runClaude(["stop", short]);
+        for (let i = 0; i < 20 && Bun.spawnSync(["ps", "-p", String(s.pid)]).exitCode === 0; i++) await Bun.sleep(250);
+      }
+      const r = await runClaude(["--bg", "--resume", id, "--", text.trim()], s.cwd);
+      const bg = backgroundId(r.out);
+      if (!bg) return [502, { error: cliError(r.out) }];
+      const copy = /started a copy/.test(r.out);
+      const message = copy
+        ? `${name} is still running, so Claude started a copy (${bg}) with your message.`
+        : `Sent. ${name} continues in the background.`;
+      return [200, { ok: true, id: bg, message }];
+    }
+
+    if (action === "stop" || action === "rm" || action === "logs") {
+      if (!background) return [409, { error: "Only background sessions have stop, logs and remove." }];
+      if (action === "stop" && !s.pid) return [409, { error: "The session is already stopped." }];
+      if (action === "rm" && s.pid) return [409, { error: "Stop the session before you remove it." }];
+      const r = await runClaude([action, short]);
+      if (/No job matching/.test(r.out)) return [404, { error: "session not found" }];
+      if (action === "logs") {
+        if (r.code !== 0) return [502, { error: cliError(r.out) }];
+        return [
+          200,
+          { ok: true, id: short, message: `Recent output of ${name}.`, output: plainLogs(r.stdout).slice(-8000) },
+        ];
+      }
+      if (!new RegExp(`^${action === "stop" ? "stopped" : "removed"} `, "m").test(r.out))
+        return [502, { error: cliError(r.out) }];
+      const message = action === "stop" ? `Stopped ${name}. The conversation is kept.` : `Removed ${name}.`;
+      return [200, { ok: true, id: short, message }];
+    }
+
+    // interrupt, terminate: terminal sessions only, by signal.
+    if (background) return [409, { error: "Background sessions are stopped with stop, not signalled." }];
+    if (!s.pid) return [409, { error: "The session is not running." }];
+    if (own) return [403, { error: "The board never signals the bot's own session." }];
+    // The pid can be reused once the session exits: check that it still runs claude.
+    const cmd = Bun.spawnSync(["ps", "-p", String(s.pid), "-o", "command="]).stdout.toString();
+    if (!/^(\S*\/)?claude(\s|$)/.test(cmd)) return [409, { error: "The session is not running." }];
+    try {
+      process.kill(s.pid, action === "interrupt" ? "SIGINT" : "SIGTERM");
+    } catch (err) {
+      return [502, { error: `Could not signal the session: ${err}` }];
+    }
+    // Tested with Claude Code 2.1.296: SIGINT makes an interactive session quit, busy or idle, and a reply
+    // in progress is lost. SIGTERM quits at once. Either way the transcript stays and --resume continues it.
+    const message =
+      action === "interrupt"
+        ? `Sent SIGINT. ${name} quits: Claude Code exits on SIGINT, busy or idle, and a reply in progress is lost. The conversation is kept, claude --resume ${id} continues it.`
+        : `Sent SIGTERM. ${name} quits at once. The conversation is kept, claude --resume ${id} continues it.`;
+    return [200, { ok: true, message }];
+  };
+
+  const logControl = (body: Record<string, unknown>, userId: string, machine: string, status: number) => {
+    const target = str(body.id) || str(body.cwd) || "-";
+    opts.log(
+      `mini app: control ${clip(str(body.action), 20) || "-"} ${clip(target, 200)} by ${userId} on ${clip(machine, 40)} -> ${status < 300 ? "ok" : "error"}`,
+    );
+  };
+
+  const recent = new Map<string, number[]>();
+  const overRate = (userId: string) => {
+    const now = Date.now();
+    const times = (recent.get(userId) ?? []).filter((t) => now - t < 60_000);
+    const over = times.length >= CONTROLS_PER_MINUTE;
+    if (!over) times.push(now);
+    recent.set(userId, times);
+    return over;
+  };
+
+  const controlRoute = async (req: Request, url: URL): Promise<Response> => {
+    const userId = telegramUser(req);
+    if (!userId) return json({ error: "unauthorized" }, 401);
+    const body = await readJsonBody(req);
+    if (typeof body === "string") return json({ error: body }, 400);
+    const machine = url.searchParams.get("machine") || "local";
+    const control = controlFor(userId);
+    const [status, reply]: Reply = !control.enabled
+      ? [403, { error: control.reason }]
+      : overRate(userId)
+        ? [429, { error: `At most ${CONTROLS_PER_MINUTE} actions per minute. Try again shortly.` }]
+        : machine === "local"
+          ? await runControl(body, userId, false)
+          : // The CLI call on that machine can take up to 20 s, longer than the 5 s for reads.
+            await askPeer(
+              machine,
+              "/api/peer/control",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "X-Telegram-User": userId },
+                body: JSON.stringify(body),
+              },
+              25_000,
+            );
+    logControl(body, userId, machine, status);
+    return json(reply, status);
+  };
+
+  const peerControlRoute = async (req: Request): Promise<Response> => {
+    if (!isPeer(req)) return json({ error: "unauthorized" }, 401);
+    const body = await readJsonBody(req);
+    if (typeof body === "string") return json({ error: body }, 400);
+    // The user id is for the log only: the other board already checked who may control.
+    const header = req.headers.get("x-telegram-user") ?? "";
+    const userId = `peer:${/^\d{1,20}$/.test(header) ? header : "?"}`;
+    const [status, reply]: Reply = controlOff ? [403, { error: offHere.reason }] : await runControl(body, userId, true);
+    logControl(body, userId, "local", status);
+    return json(reply, status);
+  };
+
   const fetch = async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const { pathname } = url;
@@ -311,6 +845,10 @@ export function startMiniApp(opts: {
       return req.method === "POST" ? opts.webhook(req) : new Response("Method not allowed", { status: 405 });
     }
     if (!board) return new Response("Not found", { status: 404 });
+    if (pathname === "/api/control" || pathname === "/api/peer/control") {
+      if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+      return pathname === "/api/control" ? controlRoute(req, url) : peerControlRoute(req);
+    }
     if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
     if (pathname === "/" || pathname === "/index.html") {
       try {
@@ -320,34 +858,54 @@ export function startMiniApp(opts: {
       }
     }
     if (pathname === "/api/state") {
-      const m = /^tma (.+)$/.exec(req.headers.get("authorization") ?? "");
-      const userId = m ? verifyInitData(m[1], opts.token) : null;
-      if (!userId || !opts.isAllowed(userId)) return json({ error: "unauthorized" }, 401);
+      const userId = telegramUser(req);
+      if (!userId) return json({ error: "unauthorized" }, 401);
+      const control = controlFor(userId);
       const machine = url.searchParams.get("machine") || "local";
       if (machine !== "local") {
-        // Only machines from TELEGRAM_MINIAPP_PEERS, so the board never fetches an address from the request.
-        const base = peers.get(machine);
-        if (!base) return json({ error: "unknown machine" }, 404);
-        try {
-          const res = await globalThis.fetch(`${base}/api/peer/state`, {
-            headers: { Authorization: `Bearer ${peerSecret}` },
-            signal: AbortSignal.timeout(5000),
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return json({ ...(await res.json()), machine, machines });
-        } catch {
-          return json({ error: "unreachable", machine, machines }, 502);
-        }
+        const [status, data] = await askPeer(machine, "/api/peer/state", {}, 5000);
+        if (status !== 200) return json({ ...data, machine, machines }, status === 404 ? 404 : 502);
+        // A machine that runs a version without controls, or has them turned off, stays read-only.
+        const remote =
+          !control.enabled || (data.control as any)?.enabled
+            ? control
+            : {
+                enabled: false,
+                reason: str((data.control as any)?.reason) || "That machine runs a version without session controls.",
+              };
+        return json({ ...withControl(data, remote), machine, machines });
       }
       touch();
-      return json({ ...(snapshot ?? { loading: true }), machine, machines });
+      return json({ ...withControl(snapshot ?? { loading: true }, control), machine, machines });
+    }
+    if (pathname === "/api/session/messages") {
+      const userId = telegramUser(req);
+      if (!userId) return json({ error: "unauthorized" }, 401);
+      const control = controlFor(userId);
+      if (!control.enabled) return json({ error: control.reason }, 403);
+      const machine = url.searchParams.get("machine") || "local";
+      const query = new URLSearchParams({
+        id: url.searchParams.get("id") ?? "",
+        limit: url.searchParams.get("limit") ?? "30",
+      });
+      const [status, body] =
+        machine === "local"
+          ? await messages(url)
+          : await askPeer(machine, `/api/peer/messages?${query}`, { headers: { "X-Telegram-User": userId } }, 5000);
+      return json(body, status);
     }
     if (pathname === "/api/peer/state") {
-      // Another machine's board reads this machine's snapshot.
-      if (!peerSecret || !sameSecret(req.headers.get("authorization") ?? "", `Bearer ${peerSecret}`))
-        return json({ error: "unauthorized" }, 401);
+      // Another machine's board reads this machine's snapshot. Actions are there as if control were on;
+      // that board removes them for users who may not control.
+      if (!isPeer(req)) return json({ error: "unauthorized" }, 401);
       touch();
-      return json(snapshot ?? { loading: true });
+      return json(withControl(snapshot ?? { loading: true }, controlOff ? offHere : { enabled: true }));
+    }
+    if (pathname === "/api/peer/messages") {
+      if (!isPeer(req)) return json({ error: "unauthorized" }, 401);
+      if (controlOff) return json({ error: offHere.reason }, 403);
+      const [status, body] = await messages(url);
+      return json(body, status);
     }
     return new Response("Not found", { status: 404 });
   };
@@ -369,6 +927,7 @@ export function startMiniApp(opts: {
       setTimeout(() => listen(attempt + 1), attempt < 20 ? 1500 : 15_000);
     }
   };
+  if (board) watchTasks();
   listen(1);
 }
 
@@ -415,6 +974,8 @@ interface LiveSession {
   kind?: string;
   status?: string;
   startedAt?: number;
+  /** Missing for a background session that was stopped. */
+  pid?: number;
 }
 
 const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -478,6 +1039,13 @@ function projectName(cwd: string): string {
   return cwd === (userInfo().homedir || homedir()) ? "~" : basename(cwd) || "~";
 }
 
+// What the board may offer for a session, as if the user may control. The main thread removes them otherwise.
+function sessionActions(s: LiveSession): string[] {
+  if (s.pid && ancestorPids().has(s.pid)) return ["peek", "bot-new"];
+  if (s.kind === "background") return s.pid ? ["peek", "send", "stop", "logs"] : ["peek", "send", "logs", "rm"];
+  return ["peek", "send", "interrupt", "terminate"];
+}
+
 // Claude 5 models have a 1M window by default. Haiku and older models (claude-3-*, claude-opus-4-*)
 // have 200K, unless the session already used more, which means it runs with the 1M option.
 function contextWindow(model: string | null, used: number): number {
@@ -486,8 +1054,7 @@ function contextWindow(model: string | null, used: number): number {
 }
 
 function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => void): void {
-  const home = userInfo().homedir || homedir();
-  const root = join(process.env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "projects");
+  const root = projectsRoot();
   const files = new Map<string, FileState>();
   const owner = new Map<string, { sessionId: string; agent: string | null }>();
   const hourly = new Map<number, Usage & { tools: number }>();
@@ -499,6 +1066,10 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
   const decoder = new TextDecoder();
   const host = machineName();
   const metas = new Map<string, { agentType?: string; description?: string }>();
+  // The cwd of each transcript of the last 7 days, for the new-task picker.
+  const heads = new Map<string, string>();
+  let allFlag = true;
+  let fromCli = true;
 
   onTouch(() => {
     activeUntil = Date.now() + ACTIVE_MS;
@@ -521,9 +1092,21 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
     }
   }
 
+  // --all adds stopped background sessions, which can still be read or removed. Older CLIs lack the flag.
   async function listSessions(): Promise<LiveSession[] | null> {
+    const list = await runAgents(allFlag);
+    if (list || !allFlag) return list;
+    const plain = await runAgents(false);
+    if (plain) allFlag = false;
+    return plain;
+  }
+
+  async function runAgents(all: boolean): Promise<LiveSession[] | null> {
     try {
-      const proc = Bun.spawn(["claude", "agents", "--json"], { stdout: "pipe", stderr: "ignore" });
+      const proc = Bun.spawn(["claude", "agents", "--json", ...(all ? ["--all"] : [])], {
+        stdout: "pipe",
+        stderr: "ignore",
+      });
       // Limit the read itself: a child that ignores SIGTERM or leaves the pipe open must not hang the tick.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<null>((resolve) => {
@@ -797,6 +1380,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         lastActivity: lastActivity || s.startedAt || now,
         agents,
         agentsTotal: all.length,
+        actions: fromCli ? sessionActions(s) : ["peek"],
       };
     });
     // Busy first in a stable order, so cards do not jump on every poll; idle ones by last activity.
@@ -829,12 +1413,25 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
       .sort((a, b) => b.t - a.t)
       .slice(0, MAX_ACTIVITY);
 
+    const used = new Map<string, number>();
+    const use = (cwd: string, t: number) => {
+      if (cwd && t > (used.get(cwd) ?? 0)) used.set(cwd, t);
+    };
+    for (const s of sessions) use(s.cwd, s.lastActivity);
+    for (const l of idx.mains.values()) if (l.mtime > now - 7 * DAY) use(heads.get(l.path) ?? "", l.mtime);
+    const projects = [...used]
+      .sort((a, b) => b[1] - a[1])
+      .map(([cwd]) => cwd)
+      .filter((cwd) => existsSync(cwd))
+      .slice(0, 30)
+      .map((cwd) => ({ cwd, name: projectName(cwd) }));
+
     return {
       now,
       host,
       ready,
       totals: {
-        sessions: sessions.length,
+        sessions: live.filter((s) => s.kind !== "background" || s.pid).length,
         busy: sessions.filter((s) => s.status === "busy").length,
         agentsRunning: sessions.reduce((n, s) => n + s.agents.filter((a) => a.status === "running").length, 0),
         agents24h,
@@ -844,6 +1441,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
       hourly: series,
       sessions,
       activity,
+      projects,
     };
   }
 
@@ -851,6 +1449,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
     const now = Date.now();
     const idx = discover();
     let live = await listSessions();
+    fromCli = !!live;
     if (!live) {
       // No `claude` on PATH: treat transcripts written in the last 15 minutes as live sessions.
       live = [...idx.mains.entries()]
@@ -890,6 +1489,21 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
       }
     }
     ready = true;
+    for (const [, l] of idx.mains) {
+      if (l.mtime < now - 7 * DAY || heads.has(l.path)) continue;
+      let cwd = files.get(l.path)?.cwd ?? "";
+      if (!cwd) {
+        try {
+          const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(
+            await Bun.file(l.path)
+              .slice(0, 64 << 10)
+              .text(),
+          );
+          if (m) cwd = JSON.parse(`"${m[1]}"`);
+        } catch {}
+      }
+      heads.set(l.path, cwd);
+    }
     post({ type: "snapshot", snapshot: build(Date.now(), live, idx) });
     for (const path of files.keys()) {
       if (seen.has(path)) continue;

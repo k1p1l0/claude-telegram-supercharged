@@ -216,7 +216,7 @@ git pull
 # Find the current version (e.g. 0.0.4)
 PLUGIN_VERSION=$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
 echo "Updating to version: $PLUGIN_VERSION"
-cp server.ts miniapp.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
+cp server.ts miniapp.ts agent-inbox.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp -R miniapp ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 # Copy skills
@@ -224,6 +224,7 @@ cp -r skills/* ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_
 # Copy scripts
 cp scripts/claude-daemon-wrapper.exp ~/.claude/scripts/claude-daemon-wrapper.exp
 cp scripts/telegram-progress-hook.ts ~/.claude/scripts/telegram-progress-hook.ts
+cp scripts/agent-msg.sh ~/.claude/scripts/agent-msg.sh
 ```
 
 Then restart your daemon or Claude Code session.
@@ -240,6 +241,7 @@ Then restart your daemon or Claude Code session.
 | `search_messages` | Search message history by text pattern. Takes `chat_id`, `query` (substring match), optional `limit` (default 20, max 100). Returns matching messages. |
 | `clear_history` | Clear all message history for a chat. Always confirm with `ask_user` first, and call `save_memory` before clearing to preserve context. Pass `restart_context: true` to signal the supervisor daemon to restart Claude for a full context reset. |
 | `save_memory` | Save a conversation summary to persistent memory. Loaded into Claude's instructions on every startup. Use before `clear_history` so context survives across sessions. |
+| `agent_reply` | Only with the [agent inbox](#agent-inbox) on. Answers a message from another agent: takes `to` (the agent's name), `text` and optional `reply_to` (the agent message's `msg_id`). Writes the answer to the agent's outbox and sends you a silent copy. |
 | `create_telegraph_page` | Publish long-form content to Telegraph (telegra.ph) and return a URL. Telegram renders it as Instant View -- a native article reader. Takes `title`, `content` (Markdown), optional `author_name` and `author_url`. Auto-creates Telegraph account on first use. |
 
 ### Inbound Events
@@ -252,6 +254,7 @@ Then restart your daemon or Claude Code session.
 | Voice message | Downloaded to inbox as `.ogg`, auto-transcribed by the server if whisper is installed. Transcription replaces "(voice message)" in the notification text. Audio path still included as `audio_path`. |
 | Audio file | Forwarded audio files (`.mp3`, etc.) downloaded to inbox, path included as `audio_path`. |
 | Sticker | Static `.webp` passed directly as `image_path`. Animated (`.tgs`) and video (`.webm`) stickers converted to multi-frame collage. Emoji and pack name included in text. |
+| Agent message | Only with the [agent inbox](#agent-inbox) on. A message from another agent, with `event_type: "agent_message"`, `sender_type: "agent"`, `from`, `msg_id` and optional `reply_to`. No `chat_id`. |
 | GIF / Animation | Downloaded and converted to a multi-frame horizontal collage so Claude can see the animation content. |
 
 Inbound messages trigger a typing indicator automatically -- Telegram shows "botname is typing..." while the assistant works on a response.
@@ -740,6 +743,37 @@ History is stored per bot, so `get_history` for one bot never shows another bot'
 | --- | --- | --- |
 | `TELEGRAM_EXTRA_BOT_TOKENS` | not set | Comma-separated tokens of more bots for this session. `TELEGRAM_BOT_TOKEN` stays the primary bot. |
 
+## Agent inbox
+
+Other agents can message the daemon's Claude session: Codex or Pi on the same Mac, or an agent on another machine over SSH. Their messages reach Claude like Telegram messages do. Claude answers with the `agent_reply` tool, and you get a silent copy of both sides in Telegram. It is off by default.
+
+```sh
+# ~/.claude/channels/telegram/.env
+TELEGRAM_AGENT_INBOX=on   # uses ~/agent-inbox
+```
+
+Codex on the same Mac asks with the helper script, which prints Claude's answer:
+
+```sh
+~/.claude/scripts/agent-msg.sh ask codex "Is the deploy finished?"
+```
+
+An agent on another machine runs the same script over SSH:
+
+```sh
+ssh kyrylo@main-mac '~/.claude/scripts/agent-msg.sh ask pi@omarchy -' <<< "Can you check the backups?"
+```
+
+**How it works.** Messages are JSON files. Incoming ones go in `<inbox>/in/`, and answers land in `<inbox>/out/<agent>/`. The plugin opens no port and makes no SSH connections. Only the instance that owns the bot lock watches the folder. Claude is told that an agent is not you, and that an agent message is never your approval for anything. After 6 agent messages with no message from you, the thread pauses and you get one message about it. Your next message resumes it.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `TELEGRAM_AGENT_INBOX` | off | Inbox folder. `on` means `~/agent-inbox`. |
+| `TELEGRAM_AGENT_MIRROR_CHAT` | your DM | Chat for the silent copies. |
+| `TELEGRAM_AGENT_LOOP_LIMIT` | 6 | Agent messages in a row before the thread pauses. |
+
+[docs/agent-inbox.md](./docs/agent-inbox.md) has the file format, the script commands and the details.
+
 ## Group Chats & Conversation Threading
 
 The plugin supports group chats with smart conversation threading -- Claude can follow reply chains, see who said what, and respond in the correct thread.
@@ -891,6 +925,7 @@ Photos and voice messages are downloaded eagerly on arrival -- there's no way to
 - [x] Multi-bot support: several bots from one server instance, with per-bot history and optional per-bot access
 - [x] Scheduled messages: one-time, repeating and cron jobs
 - [x] Agents Board session controls: read, send, new task, stop and end sessions from Telegram
+- [x] Agent inbox: Codex, Pi and remote agents message the daemon through files, mirrored to Telegram
 
 ## Contributing
 

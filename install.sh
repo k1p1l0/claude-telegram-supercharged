@@ -34,7 +34,7 @@ TARGET="$CACHE/$VERSION"
 # Keep the official server once, so you can go back to it.
 [ -f "$TARGET/server.ts.official" ] || cp "$TARGET/server.ts" "$TARGET/server.ts.official"
 
-cp "$DIR/server.ts" "$DIR/miniapp.ts" "$TARGET/"
+cp "$DIR/server.ts" "$DIR/miniapp.ts" "$DIR/agent-inbox.ts" "$TARGET/"
 mkdir -p "$TARGET/miniapp"
 cp -R "$DIR/miniapp/." "$TARGET/miniapp/"
 mkdir -p "$TARGET/skills"
@@ -44,8 +44,8 @@ cp -R "$DIR/skills/." "$TARGET/skills/"
 
 mkdir -p "$SCRIPTS"
 cp "$DIR/supervisor.ts" "$SCRIPTS/telegram-supervisor.ts"
-cp "$DIR/scripts/claude-daemon-wrapper.exp" "$DIR/scripts/telegram-progress-hook.ts" "$SCRIPTS/"
-chmod +x "$SCRIPTS/claude-daemon-wrapper.exp"
+cp "$DIR/scripts/claude-daemon-wrapper.exp" "$DIR/scripts/telegram-progress-hook.ts" "$DIR/scripts/agent-msg.sh" "$SCRIPTS/"
+chmod +x "$SCRIPTS/claude-daemon-wrapper.exp" "$SCRIPTS/agent-msg.sh"
 
 echo "Claude Telegram Supercharged $(git -C "$DIR" rev-parse --short HEAD) installed into $TARGET"
 echo "Next:"

@@ -28,6 +28,23 @@ import { basename, join } from "node:path";
 
 type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 type ToolRef = { name: string; target: string; t: number };
+/** One line of a turn's timeline: a short reply text, or a tool call when `tool` is set. */
+type Step = { t: number; text: string; tool?: string };
+
+/** The latest turn of a session: the prompt that started it and what Claude did since. */
+interface TurnView {
+  prompt: string;
+  /** The last text Claude wrote in this turn, clipped. */
+  text: string;
+  startedAt: number;
+  /** The time of the last assistant record of the turn. */
+  endedAt: number;
+  /** Read, Grep, Glob, WebSearch, WebFetch and other calls that only look. */
+  searches: number;
+  /** All other tool calls. */
+  tools: number;
+  steps: Step[];
+}
 
 interface AgentView {
   id: string;
@@ -49,8 +66,13 @@ interface SessionView {
   project: string;
   cwd: string;
   kind: string;
-  /** stopped: a background session without a process, listed by `claude agents --all`. */
-  status: "busy" | "idle" | "stopped";
+  /**
+   * waiting: Claude Code waits for the user (a permission prompt or a dialog), see waitingFor.
+   * stopped: a background session without a process, listed by `claude agents --all`.
+   */
+  status: "busy" | "waiting" | "idle" | "stopped";
+  /** What a waiting session waits for, as `claude agents --json` reports it ("input needed", "dialog open"). */
+  waitingFor: string | null;
   startedAt: number;
   model: string | null;
   contextTokens: number;
@@ -62,6 +84,7 @@ interface SessionView {
   lastActivity: number;
   agents: AgentView[];
   agentsTotal: number;
+  turn: TurnView | null;
   /** Controls that apply to this session (peek send stop logs rm interrupt terminate bot-new). */
   actions: string[];
 }
@@ -82,6 +105,7 @@ interface Snapshot {
   totals: {
     sessions: number;
     busy: number;
+    waiting: number;
     agentsRunning: number;
     agents24h: number;
     toolCalls24h: number;
@@ -939,6 +963,8 @@ const ACTIVE_MS = 5 * 60_000;
 const CHUNK = 8 << 20;
 const MAX_ACTIVITY = 30;
 const HIDDEN_TOOLS = new Set(["SubagentHandback"]);
+const LOOK_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch", "ToolSearch", "NotebookRead"]);
+const MAX_STEPS = 6;
 
 interface FileState {
   offset: number;
@@ -955,6 +981,7 @@ interface FileState {
   firstTs: number;
   lastTs: number;
   cwd: string;
+  turn: TurnView | null;
 }
 
 interface Located {
@@ -974,6 +1001,9 @@ interface LiveSession {
   cwd?: string;
   kind?: string;
   status?: string;
+  /** Background sessions: working, done or stopped. */
+  state?: string;
+  waitingFor?: string;
   startedAt?: number;
   /** Missing for a background session that was stopped. */
   pid?: number;
@@ -992,6 +1022,19 @@ function clip(s: unknown, n: number): string {
     .replace(/\s+/g, " ")
     .trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+}
+
+// The text of a prompt as a person reads it: a Telegram message without the channel tag and the
+// history the plugin appends, a slash command as "/name args".
+function promptText(content: unknown): string {
+  let text = typeof content === "string" ? content : "";
+  if (Array.isArray(content)) {
+    for (const c of content) if (c?.type === "text" && typeof c.text === "string") text += `${c.text} `;
+  }
+  const cmd = /<command-name>([^<]*)<\/command-name>/.exec(text);
+  if (cmd) text = `${cmd[1]} ${/<command-args>([^<]*)<\/command-args>/.exec(text)?.[1] ?? ""}`;
+  text = text.split("\n\n[Recent history")[0].replace(/<[^>]+>/g, " ");
+  return clip(text, 200);
 }
 
 // Short target for a tool call, the same idea as scripts/telegram-progress-hook.ts.
@@ -1020,7 +1063,8 @@ function describe(tool: string, input: Record<string, unknown>): string {
     case "Skill":
       return clip(input.skill, 40);
     default:
-      return "";
+      // The Telegram reply tools: the message text says more than the tool name.
+      return /__(reply|voice_reply)$/.test(tool) ? clip(input.text, 60) : "";
   }
 }
 
@@ -1038,6 +1082,12 @@ function machineName(): string {
 
 function projectName(cwd: string): string {
   return cwd === (userInfo().homedir || homedir()) ? "~" : basename(cwd) || "~";
+}
+
+function sessionStatus(s: LiveSession): SessionView["status"] {
+  if (s.kind === "background" && !s.pid) return "stopped";
+  if (s.status === "waiting") return "waiting";
+  return s.status === "busy" || s.state === "working" ? "busy" : "idle";
 }
 
 // What the board may offer for a session, as if the user may control. The main thread removes them otherwise.
@@ -1198,7 +1248,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
 
   function ingest(path: string, f: FileState, line: string, now: number) {
     const isAssistant = line.includes('"type":"assistant"');
-    if (!isAssistant && !line.includes('"tool_result"')) return;
+    if (!isAssistant && !line.includes('"type":"user"')) return;
     let e: any;
     try {
       e = JSON.parse(line);
@@ -1242,9 +1292,15 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         if (seen.t > now - DAY) addUsage(bucket(seen.t), growth);
         f.contextTokens = seen.u.input + seen.u.cacheRead + seen.u.cacheWrite;
       }
+      const turn = f.turn;
+      if (turn && t) turn.endedAt = Math.max(turn.endedAt, t);
       for (const c of Array.isArray(m.content) ? m.content : []) {
         if (!c || typeof c !== "object") continue;
         f.lastKind = c.type;
+        if (c.type === "text" && turn && typeof c.text === "string" && c.text.trim()) {
+          turn.text = clip(c.text, 240);
+          step(turn, { t, text: clip(c.text, 120) });
+        }
         if (c.type !== "tool_use" || !c.id || f.pending.has(c.id)) continue;
         if (c.name === "SubagentHandback") f.handback = true;
         if (HIDDEN_TOOLS.has(c.name)) continue;
@@ -1252,6 +1308,11 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         f.pending.set(c.id, ref);
         f.lastTool = ref;
         f.toolCalls++;
+        if (turn) {
+          if (LOOK_TOOLS.has(ref.name) || /__(search|get|read|list|fetch|query)/i.test(ref.name)) turn.searches++;
+          else turn.tools++;
+          step(turn, { t, text: ref.target, tool: ref.name });
+        }
         if (recent) {
           bucket(t).tools++;
           const who = owner.get(path);
@@ -1267,9 +1328,29 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
           }
         }
       }
-    } else if (e.type === "user" && Array.isArray(m.content)) {
-      for (const c of m.content) if (c?.type === "tool_result") f.pending.delete(c.tool_use_id);
+    } else if (e.type === "user") {
+      let result = false;
+      if (Array.isArray(m.content)) {
+        for (const c of m.content) {
+          if (c?.type !== "tool_result") continue;
+          f.pending.delete(c.tool_use_id);
+          result = true;
+        }
+      }
+      // A new prompt starts a turn: typed by a person, a Telegram message, or a message from another
+      // session. Skill text, other isMeta lines without an origin and background task notices belong to
+      // the turn they are in.
+      const origin = e.origin?.kind;
+      const prompt = !result && !e.isCompactSummary && !e.isSidechain && (origin ? origin !== "task-notification" : !e.isMeta);
+      if (prompt && t) {
+        f.turn = { prompt: promptText(m.content), text: "", startedAt: t, endedAt: t, searches: 0, tools: 0, steps: [] };
+      }
     }
+  }
+
+  function step(turn: TurnView, s: Step) {
+    turn.steps.push(s);
+    if (turn.steps.length > MAX_STEPS) turn.steps.shift();
   }
 
   async function readNew(path: string, now: number) {
@@ -1296,6 +1377,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         firstTs: 0,
         lastTs: 0,
         cwd: "",
+        turn: null,
       };
       files.set(path, f);
     }
@@ -1369,24 +1451,26 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
         project: projectName(cwd),
         cwd,
         kind: s.kind ?? "interactive",
-        status: s.kind === "background" && !s.pid ? "stopped" : s.status === "busy" ? "busy" : "idle",
+        status: sessionStatus(s),
+        waitingFor: sessionStatus(s) === "waiting" ? clip(s.waitingFor || "input needed", 40) : null,
         startedAt: s.startedAt ?? f?.firstTs ?? now,
         model: f?.model ?? null,
         contextTokens: f?.contextTokens ?? 0,
         contextWindow: contextWindow(f?.model ?? null, f?.contextTokens ?? 0),
         tokens: f?.tokens ?? zero(),
         toolCalls: f?.toolCalls ?? 0,
-        currentTool: s.status === "busy" ? currentTool(f, now) : null,
+        currentTool: sessionStatus(s) === "busy" ? currentTool(f, now) : null,
         lastTool: f?.lastTool ?? null,
         lastActivity: lastActivity || s.startedAt || now,
         agents,
         agentsTotal: all.length,
+        turn: f?.turn ? { ...f.turn, steps: [...f.turn.steps] } : null,
         actions: fromCli ? sessionActions(s) : ["peek"],
       };
     });
     // Busy first in a stable order, so cards do not jump on every poll; idle ones by last activity,
     // stopped ones last.
-    const rank = { busy: 0, idle: 1, stopped: 2 };
+    const rank = { waiting: 0, busy: 1, idle: 2, stopped: 3 };
     sessions.sort((a, b) =>
       a.status !== b.status
         ? rank[a.status] - rank[b.status]
@@ -1436,6 +1520,7 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
       totals: {
         sessions: sessions.filter((s) => s.status !== "stopped").length,
         busy: sessions.filter((s) => s.status === "busy").length,
+        waiting: sessions.filter((s) => s.status === "waiting").length,
         agentsRunning: sessions.reduce((n, s) => n + s.agents.filter((a) => a.status === "running").length, 0),
         agents24h,
         toolCalls24h,

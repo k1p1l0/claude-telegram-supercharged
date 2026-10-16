@@ -78,7 +78,7 @@ html[data-theme="dark"] {
 /* ---------- Base ---------- */
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--bg); }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--bg); overscroll-behavior-y: none; /* no bounce at the page ends */ }
 body {
   margin: 0; min-height: 100vh; min-height: 100dvh;
   background: var(--bg); color: var(--text);
@@ -2135,8 +2135,6 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     $('#sheet').inert = !!C.cfm;
     root.style.overflow = modal ? 'hidden' : '';
     syncBack();
-    // A scrolled sheet must not drag the whole Mini App closed.
-    if (WA && ver('7.7')) { try { if (modal) WA.disableVerticalSwipes(); else WA.enableVerticalSwipes(); } catch (_) {} }
   }
   function onBack() {
     if (C.cfm) C.cfm(false);
@@ -2835,13 +2833,13 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (t.id === 'nt-proj') { C.newCwd = t.value; setText($('#nt-cwd'), t.value); }
     else if (t.name === 'nt-mode') { C.newMode = t.value; setHTML($('#nt-mode-hint'), modeHint(t.value)); }
   });
-  let kRaf = 0, kSettle = 0;
+  let kSettle = 0;
   const boardSettled = () => { clearTimeout(kSettle); fitBoard(); };
   $('#board').addEventListener('scroll', e => {
     const b = e.currentTarget;
     if (b.hidden || !b.getClientRects().length) return;
     S.kScroll = b.scrollLeft;
-    if (!kRaf) kRaf = requestAnimationFrame(() => { kRaf = 0; fitBoard(); });
+    // The height changes only after the swipe stops: a height that follows the finger moves the page under it.
     // scrollend where supported; a short debounce elsewhere (iOS Safari)
     clearTimeout(kSettle); kSettle = setTimeout(boardSettled, 140);
   }, { passive: true });
@@ -2867,6 +2865,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   if (WA) {
     try { WA.ready(); } catch (_) {}
     try { WA.expand(); } catch (_) {}
+    // A sideways board swipe that drifts down must not minimize the Mini App. It closes with X or Back.
+    if (ver('7.7')) { try { WA.disableVerticalSwipes(); } catch (_) {} }
     try { WA.onEvent('themeChanged', applyTheme); } catch (_) {}
     if (ver('6.1')) { try { WA.BackButton.onClick(onBack); WA.BackButton.hide(); } catch (_) {} }
     if (ver('8.0')) {

@@ -10,7 +10,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { execFileSync, execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -2649,12 +2649,15 @@ function videoToCollage(srcPath: string, outPath: string, maxFrames = 6): string
 
 // ── Voice/audio transcription ──────────────────────────────────────
 // Provider fallback chain (OpenClaw-inspired):
-//   (1) OpenAI Whisper API → (2) Groq Whisper → (3) Deepgram →
-//   (4) local whisper-cli → (5) local whisper (pip)
+//   (1) OpenAI Whisper API → (2) ElevenLabs Scribe → (3) Groq Whisper →
+//   (4) Deepgram → (5) local whisper-cli → (6) local whisper (pip)
 // Returns the transcription text, or undefined if no transcriber is available.
 
+// 60s total budget for the entire chain: room for one slow cloud provider (OpenAI 15s,
+// Scribe 30s) plus a short local whisper run. Local tools are killed when it runs out.
+const TRANSCRIPTION_TIMEOUT_MS = 60_000;
+
 /** Race a promise against a timeout. Returns undefined (not an error) on timeout. */
-const TRANSCRIPTION_TIMEOUT_MS = 30_000; // 30s total budget for the entire transcription chain
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<undefined>((resolve) => {
@@ -2696,6 +2699,42 @@ async function transcribeViaOpenAI(audioPath: string): Promise<string | undefine
   } catch (err) {
     process.stderr.write(`telegram channel: OpenAI Whisper failed: ${err}\n`);
     return undefined;
+  }
+}
+
+/**
+ * Transcribe via ElevenLabs Scribe (reuses ELEVENLABS_API_KEY from TTS).
+ */
+async function transcribeViaElevenLabs(audioPath: string): Promise<string | undefined> {
+  if (!ELEVENLABS_API_KEY) return undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const audioData = readFileSync(audioPath);
+    // Telegram voice notes are .oga (Ogg/Opus); send them as .ogg.
+    const ext = (extname(audioPath).slice(1) || "ogg").replace(/^oga$/, "ogg");
+    const formData = new FormData();
+    formData.append("model_id", "scribe_v1");
+    formData.append("file", new Blob([audioData]), `voice.${ext}`);
+    const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_API_KEY },
+      body: formData,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      process.stderr.write(
+        `telegram channel: ElevenLabs Scribe error ${res.status}: ${await res.text().catch(() => "")}\n`,
+      );
+      return undefined;
+    }
+    const data = (await res.json()) as { text?: string };
+    return data.text?.trim() || undefined;
+  } catch (err) {
+    process.stderr.write(`telegram channel: ElevenLabs Scribe failed: ${err}\n`);
+    return undefined;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -2847,14 +2886,57 @@ function hasFfmpeg(): boolean {
 }
 
 /**
- * Transcribe an audio file. Returns the transcription text or undefined.
- * Provider fallback chain: OpenAI → Groq → Deepgram → local whisper-cli → local whisper.
- * Uses spawnSync (array args) for local tools to prevent shell injection.
+ * Run a local tool without blocking the event loop (spawnSync froze the whole bot
+ * while whisper ran). Array args, no shell. Killed on timeout or when `signal` aborts;
+ * `code` is null in that case.
  */
-async function transcribeAudioInner(audioPath: string): Promise<string | undefined> {
+function runTool(
+  cmd: string,
+  args: string[],
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve({ code: null, stdout: "", stderr: "aborted" });
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const kill = () => {
+      killed = true;
+      child.kill("SIGKILL");
+    };
+    const timer = setTimeout(kill, timeoutMs);
+    signal.addEventListener("abort", kill, { once: true });
+    const done = (code: number | null, err?: unknown) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", kill);
+      resolve({ code: killed ? null : code, stdout, stderr: err && !stderr ? String(err) : stderr });
+    };
+    child.stdout?.on("data", (d) => {
+      stdout += d;
+    });
+    child.stderr?.on("data", (d) => {
+      stderr += d;
+    });
+    // A spawn failure emits "error" and may skip "close"; resolving twice is harmless.
+    child.on("error", (err) => done(null, err));
+    child.on("close", (code) => done(code));
+  });
+}
+
+/**
+ * Transcribe an audio file. Returns the transcription text or undefined.
+ * Provider fallback chain: OpenAI → ElevenLabs Scribe → Groq → Deepgram → local whisper-cli → local whisper.
+ * Local tools run through async spawn (array args) to keep the event loop free and prevent shell injection.
+ */
+async function transcribeAudioInner(audioPath: string, signal: AbortSignal): Promise<string | undefined> {
   // Cloud provider fallback chain (each returns undefined if key not set or on failure)
   const openaiResult = await transcribeViaOpenAI(audioPath);
   if (openaiResult) return openaiResult;
+
+  const scribeResult = await transcribeViaElevenLabs(audioPath);
+  if (scribeResult) return scribeResult;
 
   const groqResult = await transcribeViaGroq(audioPath);
   if (groqResult) return groqResult;
@@ -2862,9 +2944,9 @@ async function transcribeAudioInner(audioPath: string): Promise<string | undefin
   const deepgramResult = await transcribeViaDeepgram(audioPath);
   if (deepgramResult) return deepgramResult;
 
-  // Fall back to local whisper binaries
+  // Fall back to local whisper binaries (skip if the budget already ran out)
   const bin = findWhisperBin();
-  if (!bin) return undefined;
+  if (!bin || signal.aborted) return undefined;
 
   try {
     if (bin === "whisper-cli") {
@@ -2876,12 +2958,17 @@ async function transcribeAudioInner(audioPath: string): Promise<string | undefin
       // whisper-cli needs wav input — convert via ffmpeg
       const wavPath = audioPath.replace(/\.[^.]+$/, ".wav");
       if (hasFfmpeg()) {
-        const ffResult = spawnSync("ffmpeg", ["-i", audioPath, "-ar", "16000", "-ac", "1", wavPath, "-y"], {
-          timeout: 30_000,
-          stdio: "pipe",
-        });
-        if (ffResult.status !== 0) {
-          process.stderr.write(`telegram channel: ffmpeg conversion failed: ${ffResult.stderr?.toString()}\n`);
+        const ffResult = await runTool(
+          "ffmpeg",
+          ["-i", audioPath, "-ar", "16000", "-ac", "1", wavPath, "-y"],
+          30_000,
+          signal,
+        );
+        if (ffResult.code !== 0) {
+          process.stderr.write(`telegram channel: ffmpeg conversion failed: ${ffResult.stderr}\n`);
+          try {
+            rmSync(wavPath);
+          } catch {}
           return undefined;
         }
       } else {
@@ -2889,16 +2976,19 @@ async function transcribeAudioInner(audioPath: string): Promise<string | undefin
         return undefined;
       }
       try {
-        const result = spawnSync("whisper-cli", ["-m", model, "-l", "auto", "--no-timestamps", "-f", wavPath], {
-          timeout: 60_000,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        if (result.status !== 0) {
-          process.stderr.write(`telegram channel: whisper-cli failed: ${result.stderr}\n`);
+        const result = await runTool(
+          "whisper-cli",
+          ["-m", model, "-l", "auto", "--no-timestamps", "-f", wavPath],
+          60_000,
+          signal,
+        );
+        if (result.code !== 0) {
+          process.stderr.write(
+            `telegram channel: whisper-cli failed${result.code === null ? " (timed out)" : ""}: ${result.stderr.slice(-500)}\n`,
+          );
           return undefined;
         }
-        const output = result.stdout ?? "";
+        const output = result.stdout;
         const lines = output
           .split("\n")
           .filter((l) => l.trim() && !l.startsWith("whisper_") && !l.startsWith("load_backend"));
@@ -2913,12 +3003,16 @@ async function transcribeAudioInner(audioPath: string): Promise<string | undefin
 
     if (bin === "whisper") {
       // openai-whisper: outputs to /tmp/<filename>.txt
-      const result = spawnSync("whisper", [audioPath, "--output_format", "txt", "--output_dir", "/tmp"], {
-        timeout: 60_000,
-        stdio: "pipe",
-      });
-      if (result.status !== 0) {
-        process.stderr.write(`telegram channel: whisper failed: ${result.stderr?.toString()}\n`);
+      const result = await runTool(
+        "whisper",
+        [audioPath, "--output_format", "txt", "--output_dir", "/tmp"],
+        60_000,
+        signal,
+      );
+      if (result.code !== 0) {
+        process.stderr.write(
+          `telegram channel: whisper failed${result.code === null ? " (timed out)" : ""}: ${result.stderr.slice(-500)}\n`,
+        );
         return undefined;
       }
       const baseName =
@@ -2941,7 +3035,10 @@ async function transcribeAudioInner(audioPath: string): Promise<string | undefin
 
 /** Transcribe with a global timeout. Returns "[timed out]" sentinel on timeout so callers can inform the user. */
 async function transcribeAudio(audioPath: string): Promise<string | undefined> {
-  const result = await withTimeout(transcribeAudioInner(audioPath), TRANSCRIPTION_TIMEOUT_MS);
+  // Aborting kills a local whisper/ffmpeg still running when the budget ends.
+  const controller = new AbortController();
+  const result = await withTimeout(transcribeAudioInner(audioPath, controller.signal), TRANSCRIPTION_TIMEOUT_MS);
+  controller.abort();
   if (result === undefined) {
     process.stderr.write(`telegram channel: transcription returned no result (may have timed out after ${TRANSCRIPTION_TIMEOUT_MS / 1000}s)\n`);
   }
@@ -3105,9 +3202,20 @@ bot.on("message", async (ctx, next) => {
                 ? "animation"
                 : undefined;
 
+    const access = loadAccess();
+    // Instant 👀 on voice/audio from an allowlisted DM, before the download and transcription
+    // below, so the sender sees it arrived. Fire and forget; ✍ replaces it once the handler runs.
+    if (
+      (msg.voice || msg.audio) &&
+      ctx.chat.type === "private" &&
+      from &&
+      botAccess(access, botOf(ctx)).allowFrom.includes(String(from.id))
+    ) {
+      void ctx.api.setMessageReaction(ctx.chat.id, msg.message_id, [{ type: "emoji", emoji: "👀" }]).catch(() => {});
+    }
+
     // Auto-transcribe voice/audio for history — even if the bot isn't mentioned.
     // Opt-out via `"autoTranscribe": false` in access.json.
-    const access = loadAccess();
     if ((access.autoTranscribe ?? true) && (msg.voice || msg.audio) && !text) {
       try {
         const fileObj = msg.voice ?? msg.audio;
@@ -4893,6 +5001,7 @@ function botStarted(b: BotEntry, username: string, mode: string): void {
   setInterval(refreshCustomCommands, 30_000);
   const chain = [
     OPENAI_API_KEY && `OpenAI(${OPENAI_WHISPER_MODEL})`,
+    ELEVENLABS_API_KEY && "ElevenLabs Scribe",
     GROQ_API_KEY && "Groq",
     DEEPGRAM_API_KEY && "Deepgram",
     findWhisperBin() || null,

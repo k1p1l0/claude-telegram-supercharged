@@ -58,7 +58,7 @@ https://github.com/user-attachments/assets/4c5a5968-b5cc-43f1-a756-4282d3eedae9
 | --- | --- | --- |
 | Text, photos, files, stickers | ✅ | ✅ |
 | Formatted replies, long-message splitting | ✅ | ✅ |
-| Voice messages | Raw audio file | ✅ Transcribed (OpenAI, Groq, Deepgram or local Whisper) |
+| Voice messages | Raw audio file | ✅ Transcribed (OpenAI, ElevenLabs Scribe, Groq, Deepgram or local Whisper) |
 | Voice replies | ❌ | ✅ ElevenLabs |
 | Live progress while Claude works | ❌ | ✅ [Agentic Mode](#agentic-mode) |
 | History and memory that survive restarts | ❌ | ✅ SQLite + memory file |
@@ -78,7 +78,7 @@ https://github.com/user-attachments/assets/4c5a5968-b5cc-43f1-a756-4282d3eedae9
 
 | Feature | What it does |
 | --- | --- |
-| **🎤 Voice Messages** | Talk to Claude. Provider fallback chain: OpenAI Whisper → Groq → Deepgram → local whisper-cli. Works from your phone while walking. |
+| **🎤 Voice Messages** | Talk to Claude. Provider fallback chain: OpenAI Whisper → ElevenLabs Scribe → Groq → Deepgram → local whisper-cli. Works from your phone while walking. |
 | **🔊 Voice Replies (TTS)** | Claude replies with voice messages via ElevenLabs TTS. OGG/Opus native format. Auto-fallback to audio file if voice is restricted. |
 | **🎤 Auto-transcribe** | ALL voice messages in group chats are transcribed, even without mentioning the bot. Configurable via `autoTranscribe`. |
 
@@ -104,7 +104,7 @@ https://github.com/user-attachments/assets/4c5a5968-b5cc-43f1-a756-4282d3eedae9
 | **📋 Forum Topics** | Telegram Forum topics fully supported. Each topic isolated with persistent `thread_id`. |
 | **👥 Group Pairing** | Add bot to group, mention it, get pairing code. No hunting for numeric chat IDs. |
 | **🎯 Inline Buttons** | `ask_user` tool -- tappable buttons for confirmations and choices. |
-| **👍 Reaction Status** | 👀 read → 🔥 working → 👍 done. Voice messages get ✍ for transcription. |
+| **👍 Reaction Status** | 👀 read → 🔥 working → 👍 done. Voice messages get 👀 the moment they arrive, then ✍ for transcription. |
 
 ### Daemon & Infrastructure
 
@@ -276,17 +276,25 @@ The server tries transcription methods in this order:
    ```
    No local install needed. The active transcription method is logged at startup.
 
-2. **[whisper.cpp](https://github.com/ggml-org/whisper.cpp)** (local fallback) -- `brew install whisper-cpp`. Fast C++ port, runs fully offline. Requires a model file:
+2. **ElevenLabs Scribe** -- cloud fallback, good with mixed languages. Uses the same key as voice replies (TTS):
+   ```
+   ELEVENLABS_API_KEY=sk_...
+   ```
+   Sends the file to `https://api.elevenlabs.io/v1/speech-to-text` with model `scribe_v1`, 30 second timeout.
+
+   `GROQ_API_KEY` and `DEEPGRAM_API_KEY` also work and are tried next, in that order.
+
+3. **[whisper.cpp](https://github.com/ggml-org/whisper.cpp)** (local fallback) -- `brew install whisper-cpp`. Fast C++ port, runs fully offline. Requires a model file:
    ```sh
    # Download the small multilingual model (465MB, good quality/speed balance)
    mkdir -p /usr/local/share/whisper-cpp/models
    curl -L -o /usr/local/share/whisper-cpp/models/ggml-small.bin \
      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
    ```
-3. **[openai-whisper](https://github.com/openai/whisper)** (local fallback) -- `pip install openai-whisper`. Python-based, slower but also works offline.
-4. **No transcriber** -- voice messages are still downloaded and the `audio_path` is included in the notification, but no transcription is provided.
+4. **[openai-whisper](https://github.com/openai/whisper)** (local fallback) -- `pip install openai-whisper`. Python-based, slower but also works offline.
+5. **No transcriber** -- voice messages are still downloaded and the `audio_path` is included in the notification, but no transcription is provided.
 
-Local options (2 & 3) require **ffmpeg** (`brew install ffmpeg`) for audio format conversion. If you have an OpenAI API key, option 1 is recommended -- it's async (doesn't block the event loop), faster, and more accurate.
+Local options (3 & 4) require **ffmpeg** (`brew install ffmpeg`) for audio format conversion. They run as async child processes, so the bot keeps answering while they work, and they are killed when the 60 second transcription budget runs out. On slow machines (Intel or Rosetta) `ggml-small` can take minutes per note, so set a cloud key (option 1 or 2) if you can: cloud transcription is faster and more accurate.
 
 ### Auto-transcription in history
 
@@ -863,6 +871,7 @@ The bot can react to incoming messages with an emoji to signal it received and i
 | Stage | Emoji | When |
 | --- | --- | --- |
 | **Received** | `👀` (configurable via `ackReaction`) | Immediately on receipt |
+| **Voice received** | `👀` | As soon as a voice or audio message arrives in a DM, before transcription |
 | **Processing voice** | `✍` | When transcribing a voice message |
 | **Working** | `🔥` | During long tasks (multiple tool calls, research, code generation) |
 | **Done** | `👍` | After the reply is sent |

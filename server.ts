@@ -32,7 +32,16 @@ import { extname, isAbsolute, join, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
+import {
+  Bot,
+  BotError,
+  type Context,
+  GrammyError,
+  HttpError,
+  InlineKeyboard,
+  InputFile,
+  webhookCallback,
+} from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 
@@ -314,13 +323,17 @@ function piBridgeTarget(chatId: string, chatType: string | undefined): boolean {
   return cfg.state === "on" && !!cfg.chatIds?.includes(chatId);
 }
 
+type PiBridgeModule = {
+  createTelegramPiBridge(o: { inbox: string; log: (m: string) => void }): PiBridge;
+  [exported: string]: unknown;
+};
 let piBridge: PiBridge | undefined;
+let piBridgeModule: PiBridgeModule | undefined;
 async function getPiBridge(): Promise<PiBridge> {
   checkOrchestraPin();
   if (piBridge) return piBridge;
-  const mod = await loadOrchestra<{ createTelegramPiBridge(o: { inbox: string; log: (m: string) => void }): PiBridge }>(
-    "telegram-pi-bridge.ts",
-  );
+  const mod = await loadOrchestra<PiBridgeModule>("telegram-pi-bridge.ts");
+  piBridgeModule = mod;
   piBridge = mod.createTelegramPiBridge({
     inbox: ORCHESTRA_INBOX,
     log: (m) => process.stderr.write(`telegram channel: pi bridge: ${m}\n`),
@@ -4885,14 +4898,41 @@ async function orchestraIntercept(
   return true;
 }
 
+// How a failed Telegram send ended. definitive: the Bot API answered with an error, so nothing was
+// posted and a retry is safe. ambiguous: a timeout, a dropped connection or anything else, where
+// the message may have been posted; the bridge holds it instead of retrying, to avoid a duplicate.
+function classifyTelegramSendError(err: unknown): "definitive" | "ambiguous" {
+  if (err instanceof GrammyError) return "definitive";
+  if (err instanceof HttpError) return "ambiguous";
+  return "ambiguous";
+}
+
+// The bridge's error classes for the two outcomes. Their names are set here when the harness
+// exports them; until then the original error is passed on (the bridge then retries as before).
+const PI_SEND_ERRORS = { definitive: "TelegramSendDefinitiveError", ambiguous: "TelegramSendAmbiguousError" } as const;
+function piSendError(err: unknown): unknown {
+  const kind = classifyTelegramSendError(err);
+  const Cls = piBridgeModule?.[PI_SEND_ERRORS[kind]];
+  if (typeof Cls !== "function") return err;
+  const msg = err instanceof Error ? err.message : String(err);
+  return new (Cls as new (message: string, options?: { cause?: unknown }) => Error)(msg, { cause: err });
+}
+
 // Sends Pi's replies and the consumed-acks. The bridge marks a reply sent only after this resolves.
 const piBridgeIO = {
   async send(m: PiBridgeOut): Promise<void> {
     const b = bots[0];
-    const sent = await b.bot.api.sendMessage(m.chatId, m.text, {
-      ...(m.replyTo ? { reply_parameters: { message_id: Number(m.replyTo), allow_sending_without_reply: true } } : {}),
-      ...(m.threadId ? { message_thread_id: Number(m.threadId) } : {}),
-    });
+    let sent: Awaited<ReturnType<typeof b.bot.api.sendMessage>>;
+    try {
+      sent = await b.bot.api.sendMessage(m.chatId, m.text, {
+        ...(m.replyTo
+          ? { reply_parameters: { message_id: Number(m.replyTo), allow_sending_without_reply: true } }
+          : {}),
+        ...(m.threadId ? { message_thread_id: Number(m.threadId) } : {}),
+      });
+    } catch (err) {
+      throw piSendError(err);
+    }
     // History, so the restart replay sees the chat as answered. A failure here must not cause a resend.
     try {
       messageStore.store({

@@ -727,6 +727,8 @@ Two opt-in hooks let a separate agent harness take over some messages before the
 - **Restart replay** skips bridged chats, and skips everything while the router is on, because the replay goes straight to Claude.
 - **Reactions** are not forwarded to Claude while the router is on: a reaction carries no forum topic.
 - Only the instance that polls the primary bot sends Pi's answers.
+- Attachments are passed as the real paths of the files the plugin saved in `~/.claude/channels/telegram/inbox`; the bridge accepts files from that folder only.
+- On SIGINT or SIGTERM the plugin first closes the bridge (stops its passes and waits up to 5 s for the current one), then shuts down as before. When Claude disconnects (stdin closes), the bridge stops and further messages for Pi are held with a notice.
 
 ### Turning it off
 

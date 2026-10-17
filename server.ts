@@ -219,6 +219,8 @@ type PiBridge = {
     send(m: PiBridgeOut): Promise<unknown>;
     ack(m: { chatId: string; messageId: string }): Promise<unknown>;
   }): Promise<unknown>;
+  /** Stops ticks and waits for the one in flight. Optional: older harness bridges lack it. */
+  close?(): Promise<void>;
 };
 
 /** off: no file or not enabled. error: the file exists but is unreadable (callers fail closed). */
@@ -324,21 +326,68 @@ function piBridgeTarget(chatId: string, chatType: string | undefined): boolean {
 }
 
 type PiBridgeModule = {
-  createTelegramPiBridge(o: { inbox: string; log: (m: string) => void }): PiBridge;
+  createTelegramPiBridge(o: {
+    inbox: string;
+    log: (m: string) => void;
+    /** Handoff accepts only regular files whose realpath is inside this folder. */
+    attachmentRoot?: string;
+  }): PiBridge;
   [exported: string]: unknown;
 };
 let piBridge: PiBridge | undefined;
 let piBridgeModule: PiBridgeModule | undefined;
+let piBridgeClosed = false;
 async function getPiBridge(): Promise<PiBridge> {
+  if (piBridgeClosed) throw new Error("the Pi bridge is shut down");
   checkOrchestraPin();
   if (piBridge) return piBridge;
   const mod = await loadOrchestra<PiBridgeModule>("telegram-pi-bridge.ts");
+  if (piBridgeClosed) throw new Error("the Pi bridge is shut down");
   piBridgeModule = mod;
   piBridge = mod.createTelegramPiBridge({
     inbox: ORCHESTRA_INBOX,
     log: (m) => process.stderr.write(`telegram channel: pi bridge: ${m}\n`),
+    // Downloads are saved here (INBOX_DIR); attachment paths are these real files.
+    attachmentRoot: INBOX_DIR,
   });
+  installPiBridgeShutdown();
   return piBridge;
+}
+
+// Orderly shutdown: stop the bridge's ticks and wait for the one in flight, at most 5 s.
+let piBridgeClosing: Promise<void> | undefined;
+function closePiBridge(): Promise<void> {
+  piBridgeClosed = true;
+  if (piBridgeLoop) clearInterval(piBridgeLoop);
+  piBridgeClosing ??= (async () => {
+    const close = piBridge?.close?.();
+    if (!close) return;
+    await Promise.race([close, new Promise((r) => setTimeout(r, 5000))]).catch((err) =>
+      process.stderr.write(`telegram channel: pi bridge close failed: ${err}\n`),
+    );
+  })();
+  return piBridgeClosing;
+}
+
+// The existing SIGINT/SIGTERM handlers exit synchronously. Once a bridge exists, a signal first
+// closes it, then runs those handlers in their original order, so shutdown otherwise stays the same.
+let piShutdownInstalled = false;
+function installPiBridgeShutdown(): void {
+  if (piShutdownInstalled) return;
+  piShutdownInstalled = true;
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    const earlier = process.listeners(sig);
+    process.removeAllListeners(sig);
+    process.on(sig, () => {
+      void closePiBridge().finally(() => {
+        for (const listener of earlier) (listener as (s: NodeJS.Signals) => void)(sig);
+        process.exit(0);
+      });
+    });
+  }
+  // Claude went away (stdin closed): stop the bridge. Messages for Pi are then held with a notice.
+  process.stdin.once("end", () => void closePiBridge());
+  process.stdin.once("close", () => void closePiBridge());
 }
 
 // --- Single-instance lock ---
@@ -4977,10 +5026,11 @@ const piBridgeIO = {
 };
 
 // One bridge pass a second, only in the instance that polls the primary bot.
+let piBridgeLoop: ReturnType<typeof setInterval> | undefined;
 function startPiBridgeLoop(): void {
   if (!ORCHESTRA_DIR) return;
-  setInterval(() => {
-    if (isSecondary || !ownsLock(bots[0].lockFile)) return;
+  piBridgeLoop = setInterval(() => {
+    if (piBridgeClosed || isSecondary || !ownsLock(bots[0].lockFile)) return;
     if (orchestraConfig(PI_BRIDGE_CONFIG).state !== "on") return;
     void getPiBridge()
       .then((bridge) => bridge.tick(piBridgeIO))

@@ -702,6 +702,38 @@ launchd (OS-level)
 
 > **Note:** `caffeinate -s` prevents sleep only when connected to power. On battery with the lid closed, macOS will eventually sleep regardless. For true 24/7 uptime on battery, consider running on a server instead.
 
+## Agent orchestra hooks (optional)
+
+Two opt-in hooks let a separate agent harness take over some messages before they reach Claude. Both are off unless their config file exists, and the plugin loads their code only from a pinned checkout of the harness that you name. With neither config file present, nothing changes.
+
+| Hook | Turned on by | What it does |
+|---|---|---|
+| Router (`telegram-router.ts`) | `<inbox>/telegram-router.json` with `"enabled": true` | Runs after the access gate and before any model sees the message. Drops, holds or dispatches by chat and forum topic, and handles `/pause` and `/resume`. |
+| Pi bridge (`telegram-pi-bridge.ts`) | `<inbox>/telegram-pi-bridge.json` with `"enabled": true` and the chat in `chat_ids` | Hands owner messages from those chats (text, voice transcription, attached files as paths) to a Pi session through its file inbox, and sends Pi's answers back as replies to the original message. |
+
+### Settings (in `~/.claude/channels/telegram/.env` or the daemon's environment)
+
+| Variable | Meaning |
+|---|---|
+| `TELEGRAM_ORCHESTRA_HARNESS_DIR` | Absolute path of a pinned harness checkout, for example a detached `git worktree` at a merged commit. Not your working copy. |
+| `TELEGRAM_ORCHESTRA_HARNESS_COMMIT` | Optional, recommended. The commit that checkout must be at (7 or more hex characters). On a mismatch the hooks refuse to load. |
+| `TELEGRAM_ORCHESTRA_INBOX` | The harness inbox with the config files. Default: `AGENT_INBOX`, else `~/agent-inbox`. |
+
+### Behavior
+
+- **Fail closed.** When a config file is on but the code can't load (variable unset, wrong commit, import error, broken config file), the message is held and the sender gets a short notice. It never falls through to Claude.
+- **Still Claude's:** `/claude <text>`, messages that match a custom command, `yes/no <code>` permission replies, the built-in commands (`/agents`, `/status`, `/new`, `/verbose`, `/usage`), chats not listed in `chat_ids` (groups included), and extra bots.
+- **Acks.** For bridged messages the ack reaction (`ackReaction`, else 👀) appears only after Pi has picked the message up. Pi's answers are stored in the message history like any bot reply.
+- **Restart replay** skips bridged chats, and skips everything while the router is on, because the replay goes straight to Claude.
+- **Reactions** are not forwarded to Claude while the router is on: a reaction carries no forum topic.
+- Only the instance that polls the primary bot sends Pi's answers.
+- Attachments are passed as the real paths of the files the plugin saved in `~/.claude/channels/telegram/inbox`; the bridge accepts files from that folder only.
+- On SIGINT or SIGTERM the plugin first closes the bridge (stops its passes and waits up to 5 s for the current one), then shuts down as before. When Claude disconnects (stdin closes), the bridge stops and further messages for Pi are held with a notice.
+
+### Turning it off
+
+Delete or disable the config file (`"enabled": false`) and restart. To go back to a server without the hooks, copy the previous `server.ts` back into the plugin cache folder and restart the daemon. The hooks add no files to the cache folder.
+
 ## Multiple bots
 
 One session can run several bots, for example a personal bot and a team bot. Each bot keeps its own chats and history, and Claude answers through the bot that got the message.

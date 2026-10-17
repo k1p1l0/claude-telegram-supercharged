@@ -4898,29 +4898,47 @@ async function orchestraIntercept(
   return true;
 }
 
-// How a failed Telegram send ended. definitive: the Bot API answered with an error, so nothing was
-// posted and a retry is safe. ambiguous: a timeout, a dropped connection or anything else, where
-// the message may have been posted; the bridge holds it instead of retrying, to avoid a duplicate.
-function classifyTelegramSendError(err: unknown): "definitive" | "ambiguous" {
-  if (err instanceof GrammyError) return "definitive";
-  if (err instanceof HttpError) return "ambiguous";
-  return "ambiguous";
+// The two ways a Telegram send can fail, mirrored from the harness bridge (telegram-pi-bridge.ts,
+// TelegramSendRejectedError and TelegramSendUncertainError). When the loaded harness exports them,
+// its classes are used, so the bridge's instanceof checks match; these local copies are the
+// fallback for a harness that does not export them yet.
+class TelegramSendRejectedError extends Error {
+  override name = "TelegramSendRejectedError";
+}
+class TelegramSendUncertainError extends Error {
+  override name = "TelegramSendUncertainError";
 }
 
-// The bridge's error classes for the two outcomes. Their names are set here when the harness
-// exports them; until then the original error is passed on (the bridge then retries as before).
-const PI_SEND_ERRORS = { definitive: "TelegramSendDefinitiveError", ambiguous: "TelegramSendAmbiguousError" } as const;
-function piSendError(err: unknown): unknown {
+// How a failed Telegram send ended. rejected: the Bot API answered with a parsed error (4xx such as
+// 400, 403 or 429), so nothing was posted and a retry is safe. uncertain: a timeout, a dropped
+// connection, an unparseable answer, a 5xx gateway error or anything else, where the message may
+// have been posted; the bridge holds it instead of retrying, to avoid a duplicate.
+function classifyTelegramSendError(err: unknown): "rejected" | "uncertain" {
+  if (err instanceof GrammyError && err.error_code >= 400 && err.error_code < 500) return "rejected";
+  if (err instanceof HttpError) return "uncertain";
+  return "uncertain";
+}
+
+function piSendError(err: unknown): Error {
   const kind = classifyTelegramSendError(err);
-  const Cls = piBridgeModule?.[PI_SEND_ERRORS[kind]];
-  if (typeof Cls !== "function") return err;
-  const msg = err instanceof Error ? err.message : String(err);
-  return new (Cls as new (message: string, options?: { cause?: unknown }) => Error)(msg, { cause: err });
+  const name = kind === "rejected" ? "TelegramSendRejectedError" : "TelegramSendUncertainError";
+  const exported = piBridgeModule?.[name];
+  const Cls = (
+    typeof exported === "function"
+      ? exported
+      : kind === "rejected"
+        ? TelegramSendRejectedError
+        : TelegramSendUncertainError
+  ) as new (
+    message: string,
+    options?: { cause?: unknown },
+  ) => Error;
+  return new Cls(err instanceof Error ? err.message : String(err), { cause: err });
 }
 
 // Sends Pi's replies and the consumed-acks. The bridge marks a reply sent only after this resolves.
 const piBridgeIO = {
-  async send(m: PiBridgeOut): Promise<void> {
+  async send(m: PiBridgeOut): Promise<{ message_id: number }> {
     const b = bots[0];
     let sent: Awaited<ReturnType<typeof b.bot.api.sendMessage>>;
     try {
@@ -4949,6 +4967,7 @@ const piBridgeIO = {
     } catch (err) {
       process.stderr.write(`telegram channel: pi bridge: could not store reply in history: ${err}\n`);
     }
+    return sent;
   },
   async ack(m: { chatId: string; messageId: string }): Promise<void> {
     const want = loadAccess().ackReaction;

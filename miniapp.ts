@@ -527,6 +527,8 @@ interface TownRoom {
 }
 interface TownAgent {
   name: string;
+  /** The name Kyrylo knows the agent by (Veyra, Soren); "" when the feed has none. */
+  display_name: string;
   room: string;
   department: string;
   role: string;
@@ -620,6 +622,7 @@ export function parseTownFeed(raw: unknown): TownFeed | null {
     names.add(name);
     agents.push({
       name,
+      display_name: townText(a.display_name, 40),
       room: townText(a.room, 64),
       department: townText(a.department, 64),
       role: townText(a.role, 80),

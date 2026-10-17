@@ -2282,6 +2282,11 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   // One button per agent, reused across polls. Its class changes only when its state does, so the
   // animations of unchanged agents never restart.
   // "sales@shop" in the room "shop" is just "sales" on its name tag; the full name stays in the label and the sheet.
+  // The name Kyrylo knows an agent by (display_name from the feed), else its inbox name.
+  function twWho(name) {
+    const a = name && T.data ? T.data.agents.find(x => x.name === name) : null;
+    return (a && a.display_name) || name;
+  }
   function twShort(name, room) {
     const at = name.lastIndexOf('@');
     const suf = at > 0 ? name.slice(at + 1).toLowerCase() : '';
@@ -2315,8 +2320,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       A.el.className = cls; A.cls = cls;
       A.bub.innerHTML = a.state === 'waiting' ? TW_BANG : a.state === 'busy' ? TW_TALK : '';
     }
-    setText(A.name, twShort(a.name, room));
-    const label = `${a.name}, ${TW_STATE[a.state] || 'Idle'}${a.role ? ', ' + a.role : ''}${a.state === 'waiting' && a.waiting_for ? ', waiting for ' + a.waiting_for : ''}`;
+    setText(A.name, a.display_name || twShort(a.name, room));
+    const label = `${a.display_name || a.name}, ${TW_STATE[a.state] || 'Idle'}${a.role ? ', ' + a.role : ''}${a.state === 'waiting' && a.waiting_for ? ', waiting for ' + a.waiting_for : ''}`;
     if (A.el.getAttribute('aria-label') !== label) A.el.setAttribute('aria-label', label);
     return A.el;
   }
@@ -2339,7 +2344,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     box.hidden = !list.length;
     setText($('#tw-mail-count'), list.length ? `latest ${list.length}` : '');
     setHTML(box, list.length ? `<ul class="card feed">${list.map(m => `<li><button type="button" class="f-row tw-mrow" data-town-msg="${esc(m.id)}" aria-haspopup="dialog">
-        <span class="f-l1"><span class="tgt">${esc(m.from || '?')} <span class="tw-arrow" aria-hidden="true">→</span><span class="sr-only"> to </span> ${esc(m.to || '?')}</span>${m.ts ? `<span class="ago" data-ago="${m.ts}"></span>` : ''}</span>
+        <span class="f-l1"><span class="tgt">${esc(twWho(m.from) || '?')} <span class="tw-arrow" aria-hidden="true">→</span><span class="sr-only"> to </span> ${esc(twWho(m.to) || '?')}</span>${m.ts ? `<span class="ago" data-ago="${m.ts}"></span>` : ''}</span>
         ${m.preview ? `<span class="tw-prev">${esc(m.preview)}</span>` : ''}</button></li>`).join('')}</ul>` : '');
   }
 
@@ -2400,12 +2405,12 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   const twState = v => String(v || '').replace(/[_-]+/g, ' ');
   function twMsgItem(m, who, tasks) {
     const task = m.task_id && tasks ? tasks.find(t => t.id === m.task_id) : null;
-    const dir = who == null ? `${esc(m.from)} → ${esc(m.to)}` : m.from === who ? `To ${esc(m.to)}` : `From ${esc(m.from)}`;
+    const dir = who == null ? `${esc(twWho(m.from))} → ${esc(twWho(m.to))}` : m.from === who ? `To ${esc(twWho(m.to))}` : `From ${esc(twWho(m.from))}`;
     return `<li class="tw-li"><span class="tw-li-1"><b>${dir}</b>${m.ts ? `<span data-ago="${m.ts}" data-f="ago"></span>` : ''}</span>
       ${m.preview ? `<p>${esc(m.preview)}</p>` : ''}${m.task_id ? `<span class="sub">Task: ${esc(task ? task.title : m.task_id)}</span>` : ''}</li>`;
   }
   function twTaskItem(t) {
-    const sub = [twState(t.state), t.owner].filter(Boolean).map(esc).join(' · ');
+    const sub = [twState(t.state), t.owner && twWho(t.owner)].filter(Boolean).map(esc).join(' · ');
     return `<li class="tw-li"><span class="tw-li-1"><b>${esc(t.title)}</b>${t.updated_at ? `<span data-ago="${t.updated_at}" data-f="ago"></span>` : ''}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</li>`;
   }
   function renderTownSheet() {
@@ -2426,7 +2431,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       const wait = a.waiting_for ? (/^waiting\b/i.test(a.waiting_for) ? a.waiting_for : 'Waiting for ' + a.waiting_for) : 'Waiting';
       setHTML(el, (live ? '' : gone('This agent left the feed. Showing the last data seen.')) +
         `<div class="tw-hero"><span class="tw-hero-art${a.state === 'offline' ? ' off' : ''}" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><use href="#tws-${sk}"/></svg></span>
-          <div class="tw-hero-t">${twPill(a.state)}${a.role ? `<p class="tw-hero-role">${esc(a.role)}</p>` : ''}<p class="tw-hero-sub">${[a.department, TW_KIND_LABEL[a.kind] || 'Agent'].filter(Boolean).map(esc).join(' · ')}</p></div></div>` +
+          <div class="tw-hero-t">${twPill(a.state)}${a.display_name ? `<p class="tw-hero-sub">${esc(a.name)}</p>` : ''}${a.role ? `<p class="tw-hero-role">${esc(a.role)}</p>` : ''}<p class="tw-hero-sub">${[a.department, TW_KIND_LABEL[a.kind] || 'Agent'].filter(Boolean).map(esc).join(' · ')}</p></div></div>` +
         (a.state === 'waiting' ? `<div class="tw-wait">${svg('alert')}<span>${esc(wait)}</span></div>` : '') +
         `<dl class="d-grid">
           <div><dt>Room</dt><dd>${esc(L.title(L.agents.has(a.room) ? a.room : L.rooms[0].id))}</dd></div>
@@ -2444,8 +2449,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       Z.last = m;
       const task = m.task_id ? d.tasks.find(t => t.id === m.task_id) : null;
       setHTML(el, `<dl class="d-grid">
-          <div><dt>From</dt><dd>${esc(m.from || '—')}</dd></div>
-          <div><dt>To</dt><dd>${esc(m.to || '—')}</dd></div>
+          <div><dt>From</dt><dd>${esc(twWho(m.from) || '—')}</dd></div>
+          <div><dt>To</dt><dd>${esc(twWho(m.to) || '—')}</dd></div>
           <div><dt>Sent</dt><dd>${m.ts ? `${esc(clockTime(m.ts, now))} <small>· <span data-ago="${m.ts}" data-f="ago"></span></small>` : '—'}</dd></div>
           <div><dt>Task</dt><dd>${m.task_id ? esc(task ? task.title : m.task_id) : '—'}</dd></div>
         </dl>
@@ -3452,7 +3457,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     const retry = t.closest('[data-retry]');
     if (retry) { haptic(); S.fails = 0; poll(); return; }
     const tag = t.closest('[data-town-ag]');
-    if (tag) { openTownSheet('town-agent', tag.dataset.townAg, tag.dataset.townAg, tag); return; }
+    if (tag) { openTownSheet('town-agent', tag.dataset.townAg, twWho(tag.dataset.townAg), tag); return; }
     const tmsg = t.closest('[data-town-msg]');
     if (tmsg) { openTownSheet('town-msg', 'Message', tmsg.dataset.townMsg, tmsg); return; }
     const ttask = t.closest('[data-town-tasks]');

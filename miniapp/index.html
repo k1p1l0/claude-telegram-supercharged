@@ -337,24 +337,31 @@ button.f-row:active { background: var(--press); }
 .block-head.sh, .block-head.sh .bh-r { align-items: center; }
 /* Board | List: equal halves, so one thumb slides between them. The active label colour comes from
    a clipped copy of the labels, so text and thumb change in one motion instead of two crossfades. */
-.seg-v { position: relative; display: inline-grid; grid-template-columns: 1fr 1fr; margin: -4px 0; isolation: isolate; }
+.seg-v { --n: 2; --i: 0; position: relative; display: inline-grid; grid-template-columns: repeat(var(--n), 1fr); margin: -4px 0; isolation: isolate; }
 .seg-v button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px 0 8px; transition: transform 160ms var(--ease-out); }
 .seg-v button[aria-pressed] { background: none; box-shadow: none; color: var(--hint); }
 .seg-v button:active { transform: scale(.96); }
 .seg-v .ico { width: 14px; height: 14px; }
 .seg-thumb, .seg-copy { position: absolute; top: 2px; bottom: 2px; left: 2px; pointer-events: none; }
 .seg-thumb {
-  z-index: -1; width: calc(50% - 2px); border-radius: 7px; background: var(--card);
+  z-index: -1; width: calc((100% - 4px) / var(--n)); border-radius: 7px; background: var(--card);
   box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04);
+  transform: translateX(calc(var(--i) * 100%));
   transition: transform 250ms var(--ease-in-out);
 }
 .seg-copy {
-  right: 2px; display: grid; grid-template-columns: 1fr 1fr; color: var(--text);
-  clip-path: inset(0 50% 0 0 round 7px); transition: clip-path 250ms var(--ease-in-out);
+  right: 2px; display: grid; grid-template-columns: repeat(var(--n), 1fr); color: var(--text);
+  clip-path: inset(0 calc(100% - (var(--i) + 1) * 100% / var(--n)) 0 calc(var(--i) * 100% / var(--n)) round 7px);
+  transition: clip-path 250ms var(--ease-in-out);
 }
 .seg-copy > span { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px 0 8px; font-size: 12.5px; font-weight: 600; }
-.seg-v[data-v="list"] .seg-thumb { transform: translateX(100%); }
-.seg-v[data-v="list"] .seg-copy { clip-path: inset(0 0 0 50% round 7px); }
+/* Three views on a phone: icons only, the label stays for screen readers */
+@media (max-width: 439.98px) {
+  .seg-v.n3 button { padding: 0 11px; }
+  .seg-v.n3 button .seg-l { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .seg-v.n3 .seg-copy > span { padding: 0 11px; }
+  .seg-v.n3 .seg-copy .seg-l { display: none; }
+}
 /* Keyboard-driven changes happen instantly: animation there only adds delay */
 .k-instant .seg-thumb, .k-instant .seg-copy, .k-instant .kc-wrap, .k-instant .kc-inner, .k-instant .kc-reveal { transition: none !important; }
 .wait-line { color: var(--bad-fg); }
@@ -443,12 +450,174 @@ button.f-row:active { background: var(--press); }
 @media (max-width: 439.98px) { #s-count { display: none; } }
 /* Wide: three columns side by side; the sessions block widens past the page column */
 @media (min-width: 720px) {
-  .block.is-board {
+  .block.is-board, .block.is-town {
     --bw: min(1040px, calc(100vw - 48px - var(--sal) - var(--sar)));
     width: var(--bw); margin-left: calc((100% - var(--bw)) / 2);
   }
   .board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; overflow: visible; }
   .kcol { padding: 8px 8px 8px; }
+}
+
+/* ---------- Town (pixel art; only when a town feed is configured) ----------
+   Art is drawn on a 3px grid: one art pixel = 3 CSS px, sprites are 16x16 art px (48px).
+   Motion: idle characters breathe (one art pixel, stepped), busy ones nod over a laptop with
+   typing dots, waiting ones show a "!" that pops in once. Only transform and opacity animate. */
+html[data-theme="light"] {
+  --tw-k: #2a2135; --tw-wall: #eee3cf; --tw-wall-2: #e7dac2; --tw-base: #9c7650;
+  --tw-floor: #d4b081; --tw-floor-2: #caa474;
+  --tw-hub-wall: #dfe7f0; --tw-hub-wall-2: #d6e0ec; --tw-hub-floor: #c3ccd6; --tw-hub-floor-2: #b8c2cd;
+  --tw-sky: #a6d8f5; --tw-sky-2: #d6f0fc; --tw-frame: #fdfaf2;
+  --tw-plate: #87552c; --tw-plate-hi: #a7703e; --tw-plate-text: #fff4de;
+  --tw-cork: #b8834f; --tw-paper: #fffbea; --tw-ink: #3b2f22; --tw-ink-2: #6f5c47;
+  --tw-tag: rgba(42, 33, 53, .84); --tw-rug: rgba(255, 255, 255, .2); --tw-rug-line: rgba(42, 33, 53, .14);
+  --tw-shadow: rgba(42, 33, 53, .2);
+}
+html[data-theme="dark"] {
+  --tw-k: #07060c; --tw-wall: #3b3651; --tw-wall-2: #36314b; --tw-base: #4d3b2e;
+  --tw-floor: #4b3c30; --tw-floor-2: #44362b;
+  --tw-hub-wall: #303b50; --tw-hub-wall-2: #2c3649; --tw-hub-floor: #3b4352; --tw-hub-floor-2: #353c4a;
+  --tw-sky: #1c2647; --tw-sky-2: #2a3762; --tw-frame: #6c7088;
+  --tw-plate: #6c4424; --tw-plate-hi: #845530; --tw-plate-text: #ffe8c2;
+  --tw-cork: #7d5a37; --tw-paper: #ece4c8; --tw-ink: #2c2318; --tw-ink-2: #5e4e3b;
+  --tw-tag: rgba(0, 0, 0, .6); --tw-rug: rgba(255, 255, 255, .05); --tw-rug-line: rgba(255, 255, 255, .08);
+  --tw-shadow: rgba(0, 0, 0, .38);
+}
+.town { position: relative; }
+.tw-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px; margin: 0 2px 16px; }
+.tw-bar .pill { height: 22px; font-size: 11.5px; }
+.tw-age { margin-left: auto; font-size: 12px; color: var(--hint); white-space: nowrap; }
+.tw-age.bad { color: var(--bad-fg); font-weight: 500; }
+/* Pixel frame: four hard shadows leave the corners notched, the classic pixel-art box */
+.tw-px { box-shadow: 0 -3px 0 0 var(--tw-k), 0 3px 0 0 var(--tw-k), -3px 0 0 0 var(--tw-k), 3px 0 0 0 var(--tw-k); }
+.tw-rooms { display: grid; grid-template-columns: minmax(0, 1fr); gap: 21px; padding: 3px; }
+.room { position: relative; display: flex; flex-direction: column; min-width: 0; background: var(--tw-floor); }
+.room.enter { animation: rise .3s var(--ease-out) both; }
+.room-wall {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px 15px;
+  padding: 9px 12px 15px;
+  background: linear-gradient(transparent calc(100% - 6px), var(--tw-base) 0),
+    repeating-linear-gradient(90deg, var(--tw-wall) 0 12px, var(--tw-wall-2) 12px 24px);
+}
+.room.hub .room-wall {
+  background: linear-gradient(transparent calc(100% - 6px), var(--tw-base) 0),
+    repeating-linear-gradient(90deg, var(--tw-hub-wall) 0 12px, var(--tw-hub-wall-2) 12px 24px);
+}
+.plate {
+  grid-column: 1 / -1; justify-self: center; display: flex; align-items: center; gap: 6px; max-width: calc(100% - 6px);
+  margin: 3px 0 0; padding: 3px 10px; background: var(--tw-plate); color: var(--tw-plate-text);
+  font: 700 12px/18px var(--font); letter-spacing: .07em; text-transform: uppercase;
+}
+.plate.tw-px { box-shadow: inset 0 3px 0 var(--tw-plate-hi), 0 -3px 0 0 var(--tw-k), 0 3px 0 0 var(--tw-k), -3px 0 0 0 var(--tw-k), 3px 0 0 0 var(--tw-k); }
+.plate-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plate svg { width: 14px; height: 14px; flex: none; shape-rendering: crispEdges; }
+.win {
+  width: 42px; height: 33px; margin: 6px 0 0 6px;
+  background:
+    linear-gradient(var(--tw-frame), var(--tw-frame)) 50% 0 / 3px 100% no-repeat,
+    linear-gradient(var(--tw-frame), var(--tw-frame)) 0 50% / 100% 3px no-repeat,
+    linear-gradient(var(--tw-sky-2) 0 33%, var(--tw-sky) 0);
+  box-shadow: 0 0 0 3px var(--tw-frame), 0 0 0 6px var(--tw-k);
+}
+.tboard {
+  justify-self: end; display: flex; flex-direction: column; gap: 2px; width: min(100%, 230px); min-width: 0; margin: 6px 6px 0 0;
+  padding: 6px 9px 7px; background: var(--tw-paper); color: var(--tw-ink);
+  box-shadow: 0 0 0 3px var(--tw-cork), 0 0 0 6px var(--tw-k); transition: transform 160ms var(--ease-out);
+  touch-action: manipulation;
+}
+.tboard:active { transform: scale(.97); }
+.tboard:focus-visible { outline-offset: 7px; border-radius: 0; }
+.tb-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 700 10px/14px var(--font); letter-spacing: .09em; text-transform: uppercase; color: var(--tw-ink-2); }
+.tb-n { min-width: 18px; padding: 0 4px; text-align: center; background: var(--tw-ink); color: var(--tw-paper); letter-spacing: 0; }
+.tb-l { display: block; min-width: 0; font-size: 12px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-l::before { content: ""; display: inline-block; width: 4px; height: 4px; margin: 0 6px 2px 0; background: var(--tw-ink-2); }
+.tb-more, .tb-none { font-size: 11.5px; line-height: 16px; color: var(--tw-ink-2); }
+.room-floor {
+  flex: 1; display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start; gap: 12px 6px;
+  min-height: 114px; padding: 14px 5px 12px; border-top: 3px solid var(--tw-k);
+  background: conic-gradient(var(--tw-floor) 25%, var(--tw-floor-2) 0 50%, var(--tw-floor) 0 75%, var(--tw-floor-2) 0) 0 0 / 24px 24px;
+}
+.room.hub .room-floor {
+  background: conic-gradient(var(--tw-hub-floor) 25%, var(--tw-hub-floor-2) 0 50%, var(--tw-hub-floor) 0 75%, var(--tw-hub-floor-2) 0) 0 0 / 24px 24px;
+}
+.room-empty { align-self: center; padding: 6px 9px; font-size: 12px; color: #fff; background: var(--tw-tag); }
+.zone { position: relative; display: flex; flex-wrap: wrap; justify-content: center; min-width: 0; }
+.zone.lab { padding: 12px 3px 3px; background: var(--tw-rug); box-shadow: inset 0 0 0 3px var(--tw-rug-line); }
+.zone-l { position: absolute; top: -7px; left: 9px; max-width: calc(100% - 18px); padding: 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 9.5px/15px var(--font); letter-spacing: .08em; text-transform: uppercase; color: #fff; background: var(--tw-tag); }
+.ag { position: relative; display: flex; flex-direction: column; align-items: center; width: 70px; padding: 20px 2px 4px; transition: transform 160ms var(--ease-out); touch-action: manipulation; }
+.ag:active { transform: scale(.96); }
+.ag:focus-visible { outline: 3px solid var(--link); outline-offset: -2px; border-radius: 0; }
+.ag-stand { position: relative; display: block; width: 48px; height: 48px; }
+.ag-stand::before { content: ""; position: absolute; left: 9px; right: 9px; bottom: -3px; height: 6px; background: var(--tw-shadow); }
+.ag-fig { position: relative; display: block; width: 48px; height: 48px; }
+.spr { display: block; width: 48px; height: 48px; shape-rendering: crispEdges; overflow: visible; }
+.ag-lap { position: absolute; inset: 0; display: none; width: 48px; height: 48px; shape-rendering: crispEdges; }
+.ag-name { max-width: 66px; margin-top: 6px; padding: 0 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 11px/16px var(--font); color: #fff; background: var(--tw-tag); }
+.ag-bub { position: absolute; top: 2px; left: calc(50% + 7px); transform-origin: 0 100%; pointer-events: none; }
+.ag-bub svg { display: block; shape-rendering: crispEdges; }
+.ag-bub .d { fill: #2a2135; }
+/* Idle and waiting: breathe up one art pixel for a moment every 3 s, each on its own phase */
+.st-idle .ag-fig, .st-waiting .ag-fig { animation: tw-breathe 3.2s steps(1, end) infinite; animation-delay: var(--ad, 0ms); }
+@keyframes tw-breathe { 0% { transform: none; } 78% { transform: translateY(-3px); } 100% { transform: translateY(-3px); } }
+.blink { opacity: 0; animation: tw-blink 5.2s steps(1, end) infinite; animation-delay: var(--bd, 0ms); }
+@keyframes tw-blink { 0% { opacity: 0; } 96.5% { opacity: 1; } 99.5% { opacity: 0; } 100% { opacity: 0; } }
+/* Busy: seated behind a laptop, nodding as it types */
+.st-busy .ag-lap { display: block; }
+.st-busy .ag-stand { overflow: hidden; } /* seated: the legs stay under the desk */
+.st-busy .ag-fig { animation: tw-nod 1.3s steps(1, end) infinite; animation-delay: var(--ad, 0ms); }
+@keyframes tw-nod { 0% { transform: translateY(3px); } 55% { transform: translateY(6px); } 100% { transform: translateY(6px); } }
+.st-busy .d { animation: tw-dot 1.2s steps(1, end) infinite; }
+.st-busy .d2 { animation-delay: .4s; }
+.st-busy .d3 { animation-delay: .8s; }
+@keyframes tw-dot { 0% { opacity: 1; } 33.3% { opacity: .25; } 100% { opacity: .25; } }
+/* Waiting: the "!" pops in once from its tail, then hops gently */
+.st-waiting .ag-bub { animation: tw-pop 220ms var(--ease-out) both; }
+.st-waiting .ag-bub svg { animation: tw-hop 1.8s steps(1, end) 220ms infinite; }
+@keyframes tw-pop { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: none; } }
+@keyframes tw-hop { 0% { transform: none; } 70% { transform: translateY(-2px); } 100% { transform: translateY(-2px); } }
+.st-offline .ag-stand { filter: grayscale(1); opacity: .42; }
+.st-offline .blink { animation: none; }
+.st-offline .ag-name { opacity: .7; }
+/* Messages: an envelope flies from sender to receiver, then waits there a few seconds (tap: the preview) */
+.tw-layer { position: absolute; inset: 0; pointer-events: none; }
+.mail { position: absolute; left: 0; top: 0; z-index: 3; width: 24px; height: 18px; pointer-events: auto; touch-action: manipulation; }
+.mail::after { content: ""; position: absolute; inset: -13px -10px; }
+.mail-i { display: block; }
+.mail svg { display: block; width: 24px; height: 18px; shape-rendering: crispEdges; filter: drop-shadow(0 3px 0 var(--tw-shadow)); }
+.tw-mail-head { margin-top: 26px; }
+.tw-mail-head h3 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+.tw-mrow .f-l1 { font-weight: 600; }
+.tw-mrow .tw-arrow { color: var(--hint); font-weight: 400; }
+.tw-prev { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 13px; line-height: 1.4; opacity: .82; overflow-wrap: anywhere; }
+.tw-sk { height: 236px; }
+.tw-sk + .tw-sk { margin-top: 21px; }
+/* Agent sheet */
+.tw-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+.tw-hero-art { flex: none; display: grid; place-items: end center; width: 76px; height: 76px; padding-bottom: 6px; background: conic-gradient(var(--tw-floor) 25%, var(--tw-floor-2) 0 50%, var(--tw-floor) 0 75%, var(--tw-floor-2) 0) 0 0 / 24px 24px; }
+.tw-hero-art svg { width: 64px; height: 64px; shape-rendering: crispEdges; }
+.tw-hero-art.off svg { filter: grayscale(1); opacity: .5; }
+.tw-hero-t { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.tw-hero-role { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.tw-hero-sub { font-size: 13px; color: var(--hint); overflow-wrap: anywhere; }
+.tw-wait { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 12px; padding: 10px 12px; border-radius: 12px; background: rgb(239 68 68 / .12); color: var(--bad-fg); font-size: 13.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.tw-wait .ico { width: 16px; height: 16px; margin-top: 1px; }
+.tw-sheet .d-grid { margin-top: 0; padding-top: 0; border-top: 0; }
+.tw-sheet .d-now { margin-top: 12px; }
+.tw-sh-h { margin: 20px 2px 8px; font-size: 13px; font-weight: 650; color: var(--hint); letter-spacing: .02em; }
+.tw-list { list-style: none; margin: 0; padding: 0; border-radius: 12px; background: var(--fill); overflow: hidden; }
+.tw-li { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; font-size: 13.5px; line-height: 1.4; }
+.tw-li + .tw-li { border-top: 1px solid var(--sep); }
+.tw-li-1 { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-width: 0; }
+.tw-li-1 b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tw-li-1 span { flex: none; font-size: 12px; color: var(--hint); }
+.tw-li p { overflow-wrap: anywhere; }
+.tw-li .sub { font-size: 12px; color: var(--hint); }
+.tw-none { padding: 12px; font-size: 13px; color: var(--hint); }
+.tw-bubble { padding: 10px 13px; border-radius: 16px; border-bottom-left-radius: 6px; background: var(--fill); font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (min-width: 720px) {
+  .tw-rooms { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 21px 15px; }
+  .room.hub { grid-column: 1 / -1; }
+  /* Same wall height in every project room (fits a full task board), so the floors line up */
+  .room:not(.hub) .room-wall { min-height: 168px; align-content: start; }
 }
 
 /* ---------- Empty & centred states ---------- */
@@ -764,6 +933,10 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   /* A frozen spinner looks broken: show a still, full ring instead */
   .kc-spin { border-right-color: var(--kc); opacity: .6; }
   .kcard:has(> .kc-main:active), .seg-v button:active { transform: none; }
+  /* Town: characters stand still, the "!" and the typing dots stay visible without moving */
+  .ag-fig, .blink, .st-busy .d, .ag-bub, .ag-bub svg { animation: none !important; }
+  .st-busy .d { opacity: 1; }
+  .ag:active, .tboard:active { transform: none; }
 }
 </style>
 </head>
@@ -785,9 +958,10 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       <section class="tiles" id="tiles" aria-label="Summary"></section>
       <section class="card chart" id="chart" aria-labelledby="chart-title"></section>
       <section class="block" id="sessions-block" aria-labelledby="sessions-title">
-        <div class="block-head sh"><h2 id="sessions-title">Sessions</h2><span class="bh-r"><span class="count" id="s-count"></span><button type="button" class="add" id="new-btn" data-new aria-haspopup="dialog" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5.5v13M5.5 12h13"/></svg>New task</button><span class="seg seg-v" id="view-seg" role="group" aria-label="Sessions view"></span></span></div>
+        <div class="block-head sh"><h2 id="sessions-title">Sessions</h2><span class="bh-r"><span class="count" id="s-count"></span><button type="button" class="add" id="new-btn" data-new aria-haspopup="dialog" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5.5v13M5.5 12h13"/></svg>New task</button><span class="seg seg-v" id="view-seg" role="group" aria-label="View"></span></span></div>
         <div id="board" class="board" hidden></div>
         <div id="sessions" class="sessions"></div>
+        <div id="town" class="town" hidden></div>
       </section>
       <section class="block" aria-labelledby="feed-title">
         <div class="block-head"><h2 id="feed-title">Recent tool calls</h2><span class="count" id="f-count"></span></div>
@@ -853,9 +1027,10 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     sview: 'board',        // sessions view: 'board' | 'list'
     kOpen: null,           // id of the expanded board card (one at a time)
     kScroll: 0,            // board's horizontal scroll, restored after it was hidden
+    townOn: null,          // does the selected machine have a town feed? null until the bot says
   };
   try { const m = localStorage.getItem('ccab.metric'); if (m === 'all' || m === 'out') S.metric = m; } catch (_) {}
-  try { const v = localStorage.getItem('ccab.view'); if (v === 'board' || v === 'list') S.sview = v; } catch (_) {}
+  try { const v = localStorage.getItem('ccab.view'); if (v === 'board' || v === 'list' || v === 'town') S.sview = v; } catch (_) {}
   try {
     const m = JSON.parse(localStorage.getItem('ccab.machine') || 'null');
     if (m && typeof m.id === 'string' && m.id) { S.machine = m.id; S.machineName = typeof m.name === 'string' ? m.name : ''; }
@@ -890,6 +1065,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     board: '<rect x="4" y="4.5" width="6.5" height="15" rx="1.75"/><rect x="13.5" y="4.5" width="6.5" height="9.5" rx="1.75"/>',
     list: '<path d="M9 7h11M9 12h11M9 17h11"/><path d="M4.5 7h.01M4.5 12h.01M4.5 17h.01"/>',
     search: '<circle cx="10.75" cy="10.75" r="6.25"/><path d="m15.5 15.5 4.5 4.5"/>',
+    town: '<path d="M3.5 11 12 4.5l8.5 6.5"/><path d="M5.5 9.5v10h13v-10"/><path d="M10 19.5v-5h4v5"/>',
     wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.4-3.4a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9l-3.4 3.4Z"/>',
   };
   // Filled four-point star with a small companion, for the board columns.
@@ -1150,6 +1326,10 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     renderHeader();
     if (refocus && btn && btn.isConnected && !btn.hidden) btn.focus({ preventScroll: true });
   }
+  // Every answer from the bot says whether that machine has a town feed (older bots say nothing).
+  function takeTown(d) {
+    if (d && typeof d.town === 'boolean') S.townOn = d.town;
+  }
   function saveMachine() {
     try { localStorage.setItem('ccab.machine', JSON.stringify({ id: S.machine, name: S.machineName })); } catch (_) {}
   }
@@ -1173,6 +1353,8 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     S.known.clear(); S.expanded.clear();
     S.intro = false; S.introSessions = false;
     S.kOpen = null; S.kScroll = 0;
+    S.townOn = null; townReset();
+    if (C.sheet && /^town-/.test(C.sheet.kind)) closeSheet();
     const board = $('#board'); board._map = null; board.innerHTML = ''; board.scrollLeft = 0;
     if (C.msgs && C.msgs.inflight) C.msgs.inflight.abort();
     C.msgs = null; C.busy = null; C.sending = null;
@@ -1648,23 +1830,45 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (instant) instantly(board, run); else run();
     haptic();
   }
-  const VIEWS = [['board', 'Board'], ['list', 'List']];
-  const viewSegHTML = () => `<span class="seg-thumb" aria-hidden="true"></span>` +
-    VIEWS.map(([v, label]) => `<button type="button" data-sview="${v}" aria-pressed="${S.sview === v}">${svg(v)}${label}</button>`).join('') +
-    `<span class="seg-copy" aria-hidden="true">${VIEWS.map(([v, label]) => `<span>${svg(v)}${label}</span>`).join('')}</span>`;
+  const VIEWS = [['board', 'Board'], ['list', 'List'], ['town', 'Town']];
+  // Town shows only when the bot has a town feed. Before the bot says, a saved Town choice keeps it.
+  const townAvail = () => S.townOn === true || (S.townOn == null && S.sview === 'town');
+  const viewNow = () => (S.sview === 'town' && !townAvail() ? 'board' : S.sview);
+  const viewSegHTML = views => `<span class="seg-thumb" aria-hidden="true"></span>` +
+    views.map(([v, label]) => `<button type="button" data-sview="${v}" aria-pressed="false">${svg(v)}<span class="seg-l">${label}</span></button>`).join('') +
+    `<span class="seg-copy" aria-hidden="true">${views.map(([v, label]) => `<span>${svg(v)}<span class="seg-l">${label}</span></span>`).join('')}</span>`;
   // Board shows only with live data and at least one session; otherwise #sessions holds skeletons or the empty state.
   function syncView() {
     const seg = $('#view-seg');
-    if (!seg.firstElementChild) seg.innerHTML = viewSegHTML();
-    $$('button', seg).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.sview === S.sview)));
-    seg.dataset.v = S.sview;
+    const views = VIEWS.filter(([v]) => v !== 'town' || townAvail());
+    const key = views.map(x => x[0]).join();
+    const v = viewNow();
+    const place = () => {
+      if (seg._k !== key) {
+        seg._k = key;
+        seg.innerHTML = viewSegHTML(views);
+        seg.style.setProperty('--n', views.length);
+        seg.classList.toggle('n3', views.length > 2);
+      }
+      $$('button', seg).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.sview === v)));
+      seg.style.setProperty('--i', Math.max(0, views.findIndex(x => x[0] === v)));
+    };
+    // A toggle that gains or loses the Town button jumps into place: sliding there would be motion nobody asked for.
+    if (seg._k !== key && seg._k != null) instantly(seg, place); else place();
     const list = S.snap && Array.isArray(S.snap.sessions) ? S.snap.sessions : [];
-    const on = S.sview === 'board' && !!S.snap && (S.mode === 'live' || S.mode === 'stale') && list.length > 0;
-    const board = $('#board');
+    const on = v === 'board' && !!S.snap && (S.mode === 'live' || S.mode === 'stale') && list.length > 0;
+    const townOn = v === 'town' && S.mode !== 'auth' && S.mode !== 'unreachable';
+    const board = $('#board'), town = $('#town');
     const wasHidden = board.hidden;
     board.hidden = !on;
-    $('#sessions').hidden = on;
-    $('#sessions-block').classList.toggle('is-board', S.sview === 'board');
+    if (town.hidden !== !townOn) {
+      town.hidden = !townOn;
+      if (!townOn) { const layer = $('#tw-layer'); if (layer) layer.innerHTML = ''; }
+    }
+    $('#sessions').hidden = on || townOn;
+    $('#sessions-block').classList.toggle('is-board', v === 'board');
+    $('#sessions-block').classList.toggle('is-town', v === 'town');
+    setText($('#sessions-title'), v === 'town' ? 'Town' : 'Sessions');
     return on && wasHidden;
   }
   /* Phone: the board is as tall as the column in view, not the tallest one.
@@ -1701,16 +1905,557 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   }
   let viewFade = null;
   function setView(v, instant) {
-    if (v === S.sview || (v !== 'board' && v !== 'list')) return;
+    if (!VIEWS.some(x => x[0] === v) || (v === 'town' && !townAvail()) || v === S.sview) return;
     S.sview = v;
     try { localStorage.setItem('ccab.view', v); } catch (_) {}
     haptic();
     if (instant) instantly($('#view-seg'), render); else render();
     // The incoming view fades in (opacity only), so the swap under the toggle doesn't feel like a jump cut.
-    const shown = $('#board').hidden ? $('#sessions') : $('#board');
+    const shown = !$('#town').hidden ? $('#town') : $('#board').hidden ? $('#sessions') : $('#board');
     if (viewFade) viewFade.cancel(); // a quick Board-List-Board must not stack fades or flash the old one
     viewFade = !instant && motionOK() && shown.animate ? shown.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT }) : null;
-    announce(v === 'board' ? 'Board view' : 'List view');
+    announce(v === 'board' ? 'Board view' : v === 'list' ? 'List view' : 'Town view');
+  }
+
+  /* ================= Town (pixel art) =================
+     Draws whatever the bot's town feed returns (GET api/town): rooms, agents as characters, an envelope for
+     each new message and a small task board per room. The art is hand-made pixel maps, one char per pixel. */
+  const TW_K = '#2a2135';
+  const TW_SPRITES = {
+    daemon: { // a robot with an antenna
+      pal: { k: TW_K, b: '#e07a52', B: '#b65a37', h: '#f6a57f', w: '#fff4e4', e: TW_K, a: '#ffd166', g: '#8a8fa3' },
+      eyes: [[5, 6, 2, 2], [9, 6, 2, 2]], lid: 'w', lash: 'k',
+      px: [
+        '................',
+        '.......aa.......',
+        '.......kk.......',
+        '...kkkkkkkkkk...',
+        '..kbbbbbbbbbbk..',
+        '..kbwwwwwwwwbk..',
+        '..kbweewweewbk..',
+        '..kbweewweewbk..',
+        '..kbwwwBBwwwbk..',
+        '..kBbbbbbbbbBk..',
+        '...kkkkkkkkkk...',
+        '....kbbbbbbk....',
+        '...kgkbhhbkgk...',
+        '...kgkbbbbkgk...',
+        '....kBkkkkBk....',
+        '....kk....kk....',
+      ],
+    },
+    pi: { // a round bot with a visor
+      pal: { k: TW_K, b: '#3fb8a8', B: '#2a8c80', h: '#8fe3d6', v: '#1f2a44', c: '#7cf3ff' },
+      eyes: [[5, 7, 2, 1], [9, 7, 2, 1]], lid: 'v', lash: '#3a5a86',
+      px: [
+        '................',
+        '................',
+        '.....kkkkkk.....',
+        '....kbbbbbbk....',
+        '...kbhhbbbbbk...',
+        '..kbhbbbbbbbbk..',
+        '..kbvvvvvvvvbk..',
+        '..kbvccvvccvbk..',
+        '..kbvvvvvvvvbk..',
+        '..kbbbbbbbbbbk..',
+        '..kBbbbbbbbbBk..',
+        '...kBbbbbbbBk...',
+        '...kBBbbbbBBk...',
+        '....kBBBBBBk....',
+        '.....kk..kk.....',
+        '................',
+      ],
+    },
+    session: { // a person in a hoodie
+      pal: { k: TW_K, s: '#f2c19b', S: '#d9a07a', H: '#4a3128', b: '#4f7bd9', B: '#3a5fb0', e: TW_K, w: '#f4f6fb' },
+      eyes: [[6, 6, 1, 2], [9, 6, 1, 2]], lid: 's', lash: 'k',
+      px: [
+        '................',
+        '.....kkkkkk.....',
+        '....kHHHHHHk....',
+        '...kHHHHHHHHk...',
+        '...kHssssssHk...',
+        '...kssssssssk...',
+        '...kssessessk...',
+        '...kssessessk...',
+        '...ksssSSsssk...',
+        '....kssssssk....',
+        '...kkbbbbbbkk...',
+        '..kbbbbwwbbbbk..',
+        '..kbbbbbbbbbbk..',
+        '..kbBbbbbbbBbk..',
+        '..kbBbbbbbbBbk..',
+        '..kkkkkkkkkkkk..',
+      ],
+    },
+    other: { // a box droid with a status light
+      pal: { k: TW_K, b: '#9aa0b4', B: '#737a90', h: '#c8ccd8', e: TW_K, a: '#6fd08c' },
+      eyes: [[5, 5, 2, 2], [9, 5, 2, 2]], lid: 'b', lash: 'k',
+      px: [
+        '................',
+        '................',
+        '....kkkkkkkk....',
+        '...kbbbbbbbbk...',
+        '...kbhhhhhhbk...',
+        '...kbeebbeebk...',
+        '...kbeebbeebk...',
+        '...kbbbbbbbbk...',
+        '...kbbaabbbbk...',
+        '...kBBBBBBBBk...',
+        '....kkkkkkkk....',
+        '.....kbbbbk.....',
+        '...kkbbbbbbkk...',
+        '...kbBbbbbBbk...',
+        '...kkkkkkkkkk...',
+        '....kk....kk....',
+      ],
+    },
+  };
+  const TW_ART = {
+    lap: { w: 16, h: 16, pal: { k: TW_K, g: '#c9ccd6', G: '#a3a7b5', l: '#ffffff' }, px: [
+      '................', '................', '................', '................', '................', '................',
+      '................', '................', '................', '................', '................',
+      '..kkkkkkkkkkkk..',
+      '..kggggggggggk..',
+      '..kggggllggggk..',
+      '..kGGGGGGGGGGk..',
+      '.kkkkkkkkkkkkkk.',
+    ] },
+    bang: { w: 9, h: 10, pal: { k: TW_K, r: '#d93a3f', w: '#ffffff' }, px: [
+      '.kkkkkkk.',
+      'krrrrrrrk',
+      'krrrwrrrk',
+      'krrrwrrrk',
+      'krrrwrrrk',
+      'krrrrrrrk',
+      'krrrwrrrk',
+      'krrrrrrrk',
+      '.kkkkkkk.',
+      '.kk......',
+    ] },
+    talk: { w: 13, h: 8, pal: { k: TW_K, w: '#ffffff' }, px: [
+      '.kkkkkkkkkkk.',
+      'kwwwwwwwwwwwk',
+      'kwwwwwwwwwwwk',
+      'kwwwwwwwwwwwk',
+      'kwwwwwwwwwwwk',
+      'kwwwwwwwwwwwk',
+      '.kkkkkkkkkkk.',
+      '.kk..........',
+    ] },
+    mail: { w: 8, h: 6, pal: { k: TW_K, w: '#fffbea', r: '#d93a3f' }, px: [
+      'kkkkkkkk',
+      'kkwwwwkk',
+      'kwkwwkwk',
+      'kwwrrwwk',
+      'kwwwwwwk',
+      'kkkkkkkk',
+    ] },
+    star: { w: 7, h: 7, pal: { y: '#ffd166' }, px: [
+      '...y...',
+      '...y...',
+      'yyyyyyy',
+      '.yyyyy.',
+      '..yyy..',
+      '.yy.yy.',
+      '.y...y.',
+    ] },
+  };
+  const TW_KIND = { 'claude-daemon': 'daemon', pi: 'pi', 'claude-session': 'session', other: 'other' };
+  const TW_KIND_LABEL = { 'claude-daemon': 'Daemon', pi: 'pi agent', 'claude-session': 'Claude session', other: 'Agent' };
+  const TW_STATE = { busy: 'Busy', waiting: 'Waiting', idle: 'Idle', offline: 'Offline' };
+  const TW_BANG = '<svg width="18" height="20" viewBox="0 0 9 10" focusable="false"><use href="#tws-bang"/></svg>';
+  const TW_TALK = '<svg width="26" height="16" viewBox="0 0 13 8" focusable="false"><use href="#tws-talk"/><rect class="d d1" x="3" y="2" width="2" height="2"/><rect class="d d2" x="6" y="2" width="2" height="2"/><rect class="d d3" x="9" y="2" width="2" height="2"/></svg>';
+  const TW_STAR = '<svg viewBox="0 0 7 7" aria-hidden="true" focusable="false"><use href="#tws-star"/></svg>';
+  const TW_CLOSED = /^(done|closed|complete|completed|cancell?ed|merged|resolved|archived|wontfix)$/i;
+  const TOWN_MS = 3000;
+
+  // One <rect> per horizontal run of a colour.
+  function twRects(rows, pal) {
+    let out = '';
+    rows.forEach((row, y) => {
+      for (let x = 0; x < row.length;) {
+        const c = row[x];
+        let w = 1;
+        while (row[x + w] === c) w++;
+        if (c !== '.' && pal[c]) out += `<rect x="${x}" y="${y}" width="${w}" height="1" fill="${pal[c]}"/>`;
+        x += w;
+      }
+    });
+    return out;
+  }
+  // The sprite sheet: every character, its blink frame and the props, drawn once as <symbol>s.
+  function twDefs() {
+    const sym = (id, w, h, body) => `<symbol id="${id}" viewBox="0 0 ${w} ${h}">${body}</symbol>`;
+    let defs = '';
+    for (const [k, s] of Object.entries(TW_SPRITES)) {
+      defs += sym('tws-' + k, 16, 16, twRects(s.px, s.pal));
+      const lid = s.pal[s.lid] || s.lid, lash = s.pal[s.lash] || s.lash;
+      defs += sym('tws-' + k + '-b', 16, 16, s.eyes.map(([x, y, w, h]) =>
+        (h > 1 ? `<rect x="${x}" y="${y}" width="${w}" height="${h - 1}" fill="${lid}"/>` : '') +
+        `<rect x="${x}" y="${y + h - 1}" width="${w}" height="1" fill="${lash}"/>`).join(''));
+    }
+    for (const [k, a] of Object.entries(TW_ART)) defs += sym('tws-' + k, a.w, a.h, twRects(a.px, a.pal));
+    const box = doc.createElement('div');
+    box.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>${defs}</defs></svg>`;
+    doc.body.appendChild(box.firstChild);
+  }
+  const twHash = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+  const twOpen = t => !TW_CLOSED.test(String(t.state || '').trim());
+  const twByUpdate = (a, b) => n0(b.updated_at) - n0(a.updated_at) || String(a.title).localeCompare(String(b.title));
+  function twPill(st) {
+    const tone = { busy: 'ok', waiting: 'need', idle: 'idle', offline: 'idle' }[st] || 'idle';
+    return `<span class="pill tone-${tone}"><span class="dot${st === 'busy' ? ' pulse' : ''}${st === 'offline' ? ' sq' : ''}"></span>${esc(TW_STATE[st] || st)}</span>`;
+  }
+  // A feed time: epoch ms becomes "5m ago" (kept fresh by tick), text stays as sent.
+  const twStamp = v => (typeof v === 'number' ? `<span data-ago="${v}" data-f="ago"></span>` : v ? esc(v) : '—');
+
+  // Rooms in order (hubs first), each room's agents and open tasks. Agents and tasks that name no
+  // known room go to the hub, so nothing in the feed is hidden.
+  function twLayout(d) {
+    let rooms = (d.rooms || []).slice();
+    if (!rooms.length) rooms = [{ id: '', title: d.machine || 'Town', kind: 'hub' }];
+    rooms = rooms.filter(r => r.kind === 'hub').concat(rooms.filter(r => r.kind !== 'hub'));
+    const home = rooms[0].id;
+    const key = new Map();
+    rooms.forEach(r => { key.set(r.id.toLowerCase(), r.id); if (!key.has(r.title.toLowerCase())) key.set(r.title.toLowerCase(), r.id); });
+    const find = v => key.get(String(v || '').toLowerCase()) ?? home;
+    const agents = new Map(rooms.map(r => [r.id, []]));
+    const tasks = new Map(rooms.map(r => [r.id, []]));
+    (d.agents || []).forEach(a => agents.get(find(a.room)).push(a));
+    (d.tasks || []).filter(twOpen).forEach(t => tasks.get(find(t.project)).push(t));
+    tasks.forEach(l => l.sort(twByUpdate));
+    return { rooms, agents, tasks, title: id => (rooms.find(r => r.id === id) || {}).title || id };
+  }
+
+  const T = { data: null, err: null, inflight: null, timer: 0, seen: null };
+  const townActive = () => S.view === 'main' && viewNow() === 'town' && !doc.hidden && !S.paused && S.mode !== 'auth' && S.mode !== 'unreachable';
+  function townStop() {
+    clearTimeout(T.timer); T.timer = 0;
+    if (T.inflight) { T.inflight.abort(); T.inflight = null; }
+  }
+  // Called on every render and every clock tick: starts polling when the Town is on screen, stops it otherwise.
+  function townSync() {
+    if (!townActive()) townStop();
+    else if (!T.timer && !T.inflight) townPoll();
+  }
+  function townReset() {
+    townStop();
+    T.data = null; T.err = null; T.seen = null;
+    const box = $('#town'); box._ready = false; box._ags = null; box._rooms = null; box.innerHTML = '';
+  }
+  async function townPoll() {
+    clearTimeout(T.timer); T.timer = 0;
+    if (!townActive() || T.inflight) return;
+    const ctrl = new AbortController();
+    const gen = S.gen, mid = S.machine;
+    T.inflight = ctrl;
+    const killer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(mid === 'local' ? 'api/town' : 'api/town?machine=' + encodeURIComponent(mid), {
+        headers: { Authorization: 'tma ' + ((WA && WA.initData) || '') },
+        cache: 'no-store', credentials: 'same-origin', signal: ctrl.signal,
+      });
+      if (gen !== S.gen) return;
+      if (res.status === 404) { S.townOn = false; render(); return; } // that machine has no town feed
+      if (res.status === 401 || res.status === 403) return; // the main poll shows the sign-in state
+      const body = await res.json().catch(() => null);
+      if (gen !== S.gen) return;
+      if (res.ok && body && Array.isArray(body.agents) && Array.isArray(body.rooms)) onTown(body);
+      else { T.err = (body && typeof body.error === 'string' && body.error) || 'unexpected answer'; renderTown(); }
+    } catch (_) {
+      if (T.inflight !== ctrl || gen !== S.gen) return; // stopped on purpose
+      T.err = 'no answer from the bot';
+      renderTown();
+    } finally {
+      clearTimeout(killer);
+      if (T.inflight === ctrl) T.inflight = null;
+      if (gen === S.gen && townActive() && !T.timer) T.timer = setTimeout(townPoll, TOWN_MS);
+    }
+  }
+  function onTown(d) {
+    const prev = T.seen;
+    d.messages = Array.isArray(d.messages) ? d.messages : [];
+    d.tasks = Array.isArray(d.tasks) ? d.tasks : [];
+    T.data = d; T.err = null;
+    T.seen = new Set(d.messages.map(m => m.id));
+    renderTown();
+    if (C.sheet && /^town-/.test(C.sheet.kind)) renderTownSheet();
+    if (!prev || doc.hidden) return; // the first load shows the state; only later messages fly
+    const now = n0(d.generated_at) || Date.now();
+    const fresh = d.messages.filter(m => !prev.has(m.id) && (!m.ts || Math.abs(now - m.ts) < 120000)).reverse();
+    fresh.slice(-3).forEach((m, i) => setTimeout(() => twFly(m, i), i * 160));
+  }
+
+  function renderTown() {
+    const box = $('#town');
+    if (box.hidden) return;
+    if (!box._ready) {
+      box.innerHTML = `<div class="tw-bar" id="tw-bar"></div><div class="tw-rooms" id="tw-rooms"></div>
+        <div class="block-head tw-mail-head" id="tw-mail-head" hidden><h3>Messages</h3><span class="count" id="tw-mail-count"></span></div>
+        <div id="tw-mail" hidden></div><div class="tw-layer" id="tw-layer" aria-hidden="true"></div>`;
+      box._ready = true; box._rooms = new Map(); box._ags = new Map();
+    }
+    const d = T.data, rooms = $('#tw-rooms');
+    if (!d) {
+      rooms.dataset.kind = 'wait'; box._rooms.clear(); box._ags.clear();
+      setHTML($('#tw-bar'), '');
+      setHTML(rooms, T.err
+        ? `<div class="empty">${svg('wifiOff')}<p class="empty-title">Town feed not reachable</p><p class="empty-sub">${esc(T.err[0].toUpperCase() + T.err.slice(1))}. Retrying every few seconds.</p></div>`
+        : `<div aria-hidden="true"><span class="sk tw-sk"></span><span class="sk tw-sk"></span></div><span class="sr-only">Loading the town</span>`);
+      $('#tw-mail-head').hidden = true; $('#tw-mail').hidden = true;
+      setText($('#s-count'), '');
+      return;
+    }
+    if (rooms.dataset.kind !== 'rooms') { rooms.dataset.kind = 'rooms'; rooms._h = null; rooms.innerHTML = ''; rooms._ready = false; }
+    const L = twLayout(d);
+    box._ags.forEach(A => { A.seen = false; });
+    const keep = new Set(), els = [];
+    L.rooms.forEach(r => {
+      let R = box._rooms.get(r.id);
+      if (!R) {
+        R = twRoomEl();
+        box._rooms.set(r.id, R);
+        if (rooms._ready && motionOK()) R.el.classList.add('enter');
+      }
+      keep.add(r.id);
+      R.el.classList.toggle('hub', r.kind === 'hub');
+      setHTML(R.plate, (r.kind === 'hub' ? TW_STAR : '') + `<span class="plate-t">${esc(r.title)}</span>` + (r.kind === 'hub' ? '<span class="sr-only">, hub</span>' : ''));
+      twBoard(R, r, L.tasks.get(r.id));
+      twFloor(box, R, r, L.agents.get(r.id));
+      els.push(R.el);
+    });
+    for (const [id, R] of box._rooms) if (!keep.has(id)) { R.el.remove(); box._rooms.delete(id); }
+    els.forEach((el, i) => { if (rooms.children[i] !== el) rooms.insertBefore(el, rooms.children[i] || null); });
+    for (const [name, A] of box._ags) if (!A.seen) { A.el.remove(); box._ags.delete(name); }
+    rooms._ready = true;
+    twBar(d);
+    twMail(d);
+    setText($('#s-count'), d.agents.length ? plural(d.agents.length, 'agent', 'agents') : '');
+  }
+  let twSeq = 0;
+  function twRoomEl() {
+    const el = doc.createElement('section');
+    const hid = 'twr-' + (++twSeq);
+    el.className = 'room tw-px';
+    el.setAttribute('aria-labelledby', hid);
+    el.innerHTML = `<div class="room-wall"><h3 class="plate tw-px" id="${hid}"></h3><span class="win" aria-hidden="true"></span><button type="button" class="tboard" aria-haspopup="dialog"></button></div><div class="room-floor"></div>`;
+    el.addEventListener('animationend', e => { if (e.target === el) el.classList.remove('enter'); });
+    return { el, plate: el.querySelector('.plate'), board: el.querySelector('.tboard'), floor: el.querySelector('.room-floor'), zones: new Map(), empty: null };
+  }
+  function twBoard(R, r, tasks) {
+    R.board.dataset.townTasks = r.id;
+    const n = tasks.length;
+    setHTML(R.board, `<span class="sr-only">Open tasks in ${esc(r.title)}: ${n}. </span><span class="tb-h" aria-hidden="true"><span>Tasks</span><span class="tb-n">${n}</span></span>` +
+      (n ? tasks.slice(0, 3).map(t => `<span class="tb-l">${esc(t.title)}</span>`).join('') + (n > 3 ? `<span class="tb-more">+${n - 3} more</span>` : '')
+        : '<span class="tb-none">No open tasks</span>'));
+  }
+  // The floor: one zone per department (a rug with a label), agents sorted by name, so nobody moves between polls.
+  function twFloor(box, R, room, agents) {
+    const groups = new Map();
+    agents.slice().sort((a, b) => a.department.localeCompare(b.department) || a.name.localeCompare(b.name))
+      .forEach(a => { const k = a.department || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); });
+    const keep = new Set(), zones = [];
+    for (const [dept, list] of groups) {
+      let Z = R.zones.get(dept);
+      if (!Z) {
+        const el = doc.createElement('div');
+        el.className = 'zone' + (dept ? ' lab' : '');
+        if (dept) { el.setAttribute('role', 'group'); el.setAttribute('aria-label', dept); el.innerHTML = `<span class="zone-l" aria-hidden="true">${esc(dept)}</span>`; }
+        Z = { el, off: dept ? 1 : 0 };
+        R.zones.set(dept, Z);
+      }
+      keep.add(dept);
+      list.forEach((a, i) => {
+        const el = twAgent(box, a, room), at = Z.el.children[i + Z.off];
+        if (at !== el) Z.el.insertBefore(el, at || null);
+      });
+      zones.push(Z.el);
+    }
+    for (const [k, Z] of R.zones) if (!keep.has(k)) { Z.el.remove(); R.zones.delete(k); }
+    if (!agents.length) {
+      if (!R.empty) { R.empty = doc.createElement('p'); R.empty.className = 'room-empty'; R.empty.textContent = 'Nobody here'; }
+      zones.push(R.empty);
+    } else if (R.empty) { R.empty.remove(); R.empty = null; }
+    zones.forEach((el, i) => { if (R.floor.children[i] !== el) R.floor.insertBefore(el, R.floor.children[i] || null); });
+  }
+  // One button per agent, reused across polls. Its class changes only when its state does, so the
+  // animations of unchanged agents never restart.
+  // "sales@shop" in the room "shop" is just "sales" on its name tag; the full name stays in the label and the sheet.
+  function twShort(name, room) {
+    const at = name.lastIndexOf('@');
+    const suf = at > 0 ? name.slice(at + 1).toLowerCase() : '';
+    if (!suf) return name;
+    const same = k => (k = String(k || '').toLowerCase()) && (k === suf || /^[-_ .]/.test(k.slice(suf.length)) && k.startsWith(suf));
+    return same(room.id) || same(room.title) ? name.slice(0, at) : name;
+  }
+  function twAgent(box, a, room) {
+    let A = box._ags.get(a.name);
+    if (!A) {
+      const el = doc.createElement('button');
+      el.type = 'button';
+      el.setAttribute('aria-haspopup', 'dialog');
+      const h = twHash(a.name);
+      el.style.setProperty('--ad', -(h % 3200) + 'ms');
+      el.style.setProperty('--bd', -((h >>> 12) % 5200) + 'ms');
+      el.innerHTML = `<span class="ag-bub" aria-hidden="true"></span><span class="ag-stand" aria-hidden="true"><span class="ag-fig"><svg class="spr" viewBox="0 0 16 16" focusable="false"><use/><use class="blink"/></svg></span><svg class="ag-lap" viewBox="0 0 16 16" focusable="false"><use href="#tws-lap"/></svg></span><span class="ag-name"></span>`;
+      A = { el, kind: '', cls: '', bub: el.querySelector('.ag-bub'), uses: el.querySelectorAll('.spr use'), name: el.querySelector('.ag-name') };
+      box._ags.set(a.name, A);
+    }
+    A.seen = true;
+    A.el.dataset.townAg = a.name;
+    const sk = TW_KIND[a.kind] || 'other';
+    if (A.kind !== sk) {
+      A.kind = sk;
+      A.uses[0].setAttribute('href', '#tws-' + sk);
+      A.uses[1].setAttribute('href', '#tws-' + sk + '-b');
+    }
+    const cls = 'ag st-' + (TW_STATE[a.state] ? a.state : 'idle');
+    if (A.cls !== cls) {
+      A.el.className = cls; A.cls = cls;
+      A.bub.innerHTML = a.state === 'waiting' ? TW_BANG : a.state === 'busy' ? TW_TALK : '';
+    }
+    setText(A.name, twShort(a.name, room));
+    const label = `${a.name}, ${TW_STATE[a.state] || 'Idle'}${a.role ? ', ' + a.role : ''}${a.state === 'waiting' && a.waiting_for ? ', waiting for ' + a.waiting_for : ''}`;
+    if (A.el.getAttribute('aria-label') !== label) A.el.setAttribute('aria-label', label);
+    return A.el;
+  }
+  function twBar(d) {
+    const c = { busy: 0, waiting: 0, idle: 0, offline: 0 };
+    d.agents.forEach(a => { if (a.state in c) c[a.state]++; });
+    const pill = (n, tone, label, dot) => (n ? `<span class="pill tone-${tone}"><span class="dot${dot || ''}"></span>${n} ${label}</span>` : '');
+    const at = n0(d.generated_at) || n0(d.fetched_at);
+    const age = T.err
+      ? `<span class="tw-age bad">Feed not reachable · data from <span data-ago="${n0(d.fetched_at)}" data-f="ago"></span></span>`
+      : at ? `<span class="tw-age">Updated <span data-ago="${at}" data-f="ago"></span></span>` : '';
+    setHTML($('#tw-bar'), (d.agents.length
+      ? pill(c.busy, 'ok', 'busy', ' pulse') + pill(c.waiting, 'need', 'waiting') + pill(c.idle, 'idle', 'idle') + pill(c.offline, 'idle', 'offline', ' sq')
+      : '<span class="count">No agents in the feed</span>') + age);
+  }
+  function twMail(d) {
+    const list = d.messages.slice(0, 8);
+    $('#tw-mail-head').hidden = !list.length;
+    const box = $('#tw-mail');
+    box.hidden = !list.length;
+    setText($('#tw-mail-count'), list.length ? `latest ${list.length}` : '');
+    setHTML(box, list.length ? `<ul class="card feed">${list.map(m => `<li><button type="button" class="f-row tw-mrow" data-town-msg="${esc(m.id)}" aria-haspopup="dialog">
+        <span class="f-l1"><span class="tgt">${esc(m.from || '?')} <span class="tw-arrow" aria-hidden="true">→</span><span class="sr-only"> to </span> ${esc(m.to || '?')}</span>${m.ts ? `<span class="ago" data-ago="${m.ts}"></span>` : ''}</span>
+        ${m.preview ? `<span class="tw-prev">${esc(m.preview)}</span>` : ''}</button></li>`).join('')}</ul>` : '');
+  }
+
+  // An envelope flies from the sender to the receiver when both are on screen, then waits by the
+  // receiver for a few seconds; a tap opens the message. The Messages list below has every message too.
+  function twFly(m, i) {
+    const box = $('#town'), layer = $('#tw-layer');
+    if (!layer || box.hidden || !box._ags || m.from === m.to) return;
+    const F = box._ags.get(m.from), A = box._ags.get(m.to);
+    if (!F || !A || !F.el.isConnected || !A.el.isConnected) return;
+    const vh = window.innerHeight;
+    const seen = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.bottom > 0 && r.top < vh; };
+    if (!seen(F.el) || !seen(A.el)) return;
+    const br = box.getBoundingClientRect();
+    // Lands at the top-left of the head; the "!" and typing bubbles sit at the top-right.
+    const spot = el => { const r = el.querySelector('.ag-stand').getBoundingClientRect(); return { x: Math.round(r.left - br.left - 8), y: Math.round(r.top - br.top - 10) }; };
+    const a = spot(F.el), b = spot(A.el);
+    b.x += i * 9; // two letters for one receiver sit side by side
+    const env = doc.createElement('button');
+    env.type = 'button'; env.className = 'mail'; env.tabIndex = -1;
+    env.setAttribute('aria-hidden', 'true');
+    env.dataset.townMsg = m.id;
+    env.innerHTML = `<span class="mail-i"><svg viewBox="0 0 8 6" focusable="false"><use href="#tws-mail"/></svg></span>`;
+    const end = `translate(${b.x}px, ${b.y}px)`;
+    env.style.transform = end;
+    layer.appendChild(env);
+    let dur = 0;
+    if (motionOK() && env.animate) {
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      dur = Math.round(Math.min(950, Math.max(520, 360 + dist * .8)));
+      const arc = Math.round(Math.min(54, 18 + dist * .12));
+      // Path: ease-in-out (moving across the screen). Arc: rises fast and falls back, like a thrown letter.
+      env.animate([{ transform: `translate(${a.x}px, ${a.y}px)` }, { transform: end }], { duration: dur, easing: EASE_IN_OUT });
+      env.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE_OUT });
+      env.firstChild.animate([
+        { transform: 'none', easing: 'cubic-bezier(.33, 1, .68, 1)' },
+        { transform: `translateY(${-arc}px)`, easing: 'cubic-bezier(.32, 0, .67, 0)' },
+        { transform: 'none' },
+      ], { duration: dur });
+    } else if (env.animate) {
+      env.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 150, easing: EASE_OUT }); // reduced motion: appear in place
+    }
+    setTimeout(() => {
+      if (!env.isConnected) return;
+      if (!env.animate) { env.remove(); return; }
+      env.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: EASE_OUT, fill: 'forwards' }).onfinish = () => env.remove();
+    }, dur + 4500);
+  }
+
+  /* ---------- Town sheets: an agent, a message, a room's tasks ---------- */
+  function openTownSheet(kind, title, ref, trigger) {
+    C.town = { ref, last: null };
+    openSheet(kind, title, '', trigger);
+    $('#sheet-body').innerHTML = '<div class="tw-sheet" id="tw-sheet"></div>';
+    renderTownSheet();
+    $('#sheet-title').focus({ preventScroll: true });
+  }
+  const twState = v => String(v || '').replace(/[_-]+/g, ' ');
+  function twMsgItem(m, who, tasks) {
+    const task = m.task_id && tasks ? tasks.find(t => t.id === m.task_id) : null;
+    const dir = who == null ? `${esc(m.from)} → ${esc(m.to)}` : m.from === who ? `To ${esc(m.to)}` : `From ${esc(m.from)}`;
+    return `<li class="tw-li"><span class="tw-li-1"><b>${dir}</b>${m.ts ? `<span data-ago="${m.ts}" data-f="ago"></span>` : ''}</span>
+      ${m.preview ? `<p>${esc(m.preview)}</p>` : ''}${m.task_id ? `<span class="sub">Task: ${esc(task ? task.title : m.task_id)}</span>` : ''}</li>`;
+  }
+  function twTaskItem(t) {
+    const sub = [twState(t.state), t.owner].filter(Boolean).map(esc).join(' · ');
+    return `<li class="tw-li"><span class="tw-li-1"><b>${esc(t.title)}</b>${t.updated_at ? `<span data-ago="${t.updated_at}" data-f="ago"></span>` : ''}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</li>`;
+  }
+  function renderTownSheet() {
+    const el = $('#tw-sheet'), Z = C.town;
+    if (!el || !C.sheet || !Z) return;
+    const d = T.data || { agents: [], messages: [], tasks: [], rooms: [] };
+    const gone = text => `<div class="d-ended">${svg('flag')}${text}</div>`;
+    const now = serverNow();
+    if (C.sheet.kind === 'town-agent') {
+      const live = d.agents.find(x => x.name === Z.ref);
+      const a = live || Z.last;
+      if (!a) { setHTML(el, gone('This agent is not in the feed.')); return; }
+      Z.last = a;
+      const L = twLayout(d);
+      const sk = TW_KIND[a.kind] || 'other';
+      const msgs = d.messages.filter(m => m.from === a.name || m.to === a.name).slice(0, 10);
+      const tasks = d.tasks.filter(t => t.owner === a.name && twOpen(t)).sort(twByUpdate).slice(0, 8);
+      const wait = a.waiting_for ? (/^waiting\b/i.test(a.waiting_for) ? a.waiting_for : 'Waiting for ' + a.waiting_for) : 'Waiting';
+      setHTML(el, (live ? '' : gone('This agent left the feed. Showing the last data seen.')) +
+        `<div class="tw-hero"><span class="tw-hero-art${a.state === 'offline' ? ' off' : ''}" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><use href="#tws-${sk}"/></svg></span>
+          <div class="tw-hero-t">${twPill(a.state)}${a.role ? `<p class="tw-hero-role">${esc(a.role)}</p>` : ''}<p class="tw-hero-sub">${[a.department, TW_KIND_LABEL[a.kind] || 'Agent'].filter(Boolean).map(esc).join(' · ')}</p></div></div>` +
+        (a.state === 'waiting' ? `<div class="tw-wait">${svg('alert')}<span>${esc(wait)}</span></div>` : '') +
+        `<dl class="d-grid">
+          <div><dt>Room</dt><dd>${esc(L.title(L.agents.has(a.room) ? a.room : L.rooms[0].id))}</dd></div>
+          <div><dt>Listening</dt><dd>${a.listening ? 'Yes' : 'No'}</dd></div>
+          <div><dt>Last in</dt><dd>${twStamp(a.last_in)}</dd></div>
+          <div><dt>Last out</dt><dd>${twStamp(a.last_out)}</dd></div>
+        </dl>
+        ${a.state === 'waiting' && a.activity === a.waiting_for ? '' : `<div class="d-now">${a.activity ? `<span class="tgt">${esc(a.activity)}</span>` : '<span class="tgt" style="color:var(--hint)">No activity reported</span>'}</div>`}
+        <h3 class="tw-sh-h">Recent messages</h3>${msgs.length ? `<ul class="tw-list">${msgs.map(m => twMsgItem(m, a.name, d.tasks)).join('')}</ul>` : '<p class="tw-list tw-none">No messages to or from this agent.</p>'}` +
+        (tasks.length ? `<h3 class="tw-sh-h">Open tasks</h3><ul class="tw-list">${tasks.map(twTaskItem).join('')}</ul>` : ''));
+    } else if (C.sheet.kind === 'town-msg') {
+      const live = d.messages.find(x => x.id === Z.ref);
+      const m = live || Z.last;
+      if (!m) { setHTML(el, gone('This message is no longer in the feed.')); return; }
+      Z.last = m;
+      const task = m.task_id ? d.tasks.find(t => t.id === m.task_id) : null;
+      setHTML(el, `<dl class="d-grid">
+          <div><dt>From</dt><dd>${esc(m.from || '—')}</dd></div>
+          <div><dt>To</dt><dd>${esc(m.to || '—')}</dd></div>
+          <div><dt>Sent</dt><dd>${m.ts ? `${esc(clockTime(m.ts, now))} <small>· <span data-ago="${m.ts}" data-f="ago"></span></small>` : '—'}</dd></div>
+          <div><dt>Task</dt><dd>${m.task_id ? esc(task ? task.title : m.task_id) : '—'}</dd></div>
+        </dl>
+        <h3 class="tw-sh-h">Preview</h3><p class="tw-bubble">${m.preview ? esc(m.preview) : '<span style="color:var(--hint)">No preview</span>'}</p>`);
+    } else if (C.sheet.kind === 'town-tasks') {
+      const L = twLayout(d);
+      const tasks = L.tasks.get(Z.ref);
+      if (!tasks) { setHTML(el, gone('This room is no longer in the feed.')); return; }
+      setHTML(el, tasks.length ? `<ul class="tw-list">${tasks.map(twTaskItem).join('')}</ul>` : '<p class="tw-list tw-none">No open tasks in this room.</p>');
+    }
   }
 
   /* ================= Activity feed ================= */
@@ -1815,12 +2560,13 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (S.snap && (S.mode === 'live' || S.mode === 'stale')) {
       renderTiles(S.snap);
       renderChart(S.snap);
-      if (!$('#board').hidden) renderBoard(S.snap); else renderSessions(S.snap);
+      if (!$('#board').hidden) renderBoard(S.snap); else if ($('#town').hidden) renderSessions(S.snap);
       if (shown) { restoreBoardScroll(); fitBoard(); }
       renderFeed(S.snap);
     } else if (S.mode === 'boot' || S.mode === 'loading') {
       renderSkeleton(S.mode === 'loading' ? 'Starting up…' : '');
     }
+    if (!$('#town').hidden) renderTown();
     if (S.view === 'detail') renderDetail();
     tick();
   }
@@ -2564,6 +3310,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     } else if (!toast.hidden) {
       toast.hidden = true; toast._h = null;
     }
+    townSync();
   }
 
   /* ================= Networking ================= */
@@ -2629,7 +3376,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       } else if (!res.ok) {
         const body = await res.json().catch(() => null);
         if (gen !== S.gen) return;
-        takeMachines(body);
+        takeMachines(body); takeTown(body);
         const err = body && body.error;
         if (res.status === 404 && err === 'unknown machine' && mid !== 'local') {
           // The saved machine is gone from the config: forget it and show this Mac.
@@ -2645,7 +3392,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       } else {
         const data = await res.json();
         if (gen !== S.gen) return;
-        takeMachines(data);
+        takeMachines(data); takeTown(data);
         if (data && data.loading) {
           if (!S.snap) { S.mode = 'loading'; render(); }
           next = LOADING_MS;
@@ -2704,6 +3451,16 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (back) { goBack(); return; }
     const retry = t.closest('[data-retry]');
     if (retry) { haptic(); S.fails = 0; poll(); return; }
+    const tag = t.closest('[data-town-ag]');
+    if (tag) { openTownSheet('town-agent', tag.dataset.townAg, tag.dataset.townAg, tag); return; }
+    const tmsg = t.closest('[data-town-msg]');
+    if (tmsg) { openTownSheet('town-msg', 'Message', tmsg.dataset.townMsg, tmsg); return; }
+    const ttask = t.closest('[data-town-tasks]');
+    if (ttask) {
+      const room = T.data && (T.data.rooms || []).find(r => r.id === ttask.dataset.townTasks);
+      openTownSheet('town-tasks', room ? room.title + ' · tasks' : 'Tasks', ttask.dataset.townTasks, ttask);
+      return;
+    }
     const sv = t.closest('[data-sview]');
     // e.detail is 0 for a click made with Enter or Space: those change instantly.
     if (sv) { setView(sv.dataset.sview, e.detail === 0); return; }
@@ -2851,6 +3608,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   doc.addEventListener('visibilitychange', () => {
     if (doc.hidden) {
       clearTimeout(timer);
+      townStop();
       if (inflight) { pausedAbort = true; inflight.abort(); }
     } else {
       tick();
@@ -2871,9 +3629,10 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (ver('6.1')) { try { WA.BackButton.onClick(onBack); WA.BackButton.hide(); } catch (_) {} }
     if (ver('8.0')) {
       try { WA.onEvent('activated', () => { S.paused = false; tick(); poll(); }); } catch (_) {}
-      try { WA.onEvent('deactivated', () => { S.paused = true; clearTimeout(timer); }); } catch (_) {}
+      try { WA.onEvent('deactivated', () => { S.paused = true; clearTimeout(timer); townStop(); }); } catch (_) {}
     }
   }
+  twDefs();
   applyTheme();
   render();
   poll();

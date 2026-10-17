@@ -433,6 +433,8 @@ For a fixed address, use your own HTTPS setup:
 | `TELEGRAM_MINIAPP_PEER_TOKEN` | not set | Shared secret (16+ characters) between the machines. Without it, `TELEGRAM_MINIAPP_PEERS` is ignored. |
 | `TELEGRAM_MINIAPP_HOST` | `127.0.0.1` | Address the board server binds. Set it on a machine that other boards read from. |
 | `TELEGRAM_MINIAPP_CONTROL` | on | `off` turns the session controls off. The board stays read-only. |
+| `TELEGRAM_MINIAPP_TOWN_FEED` | not set | URL of a town feed (see [Town view](#town-view)). Without it the Town view is hidden. |
+| `TELEGRAM_MINIAPP_TOWN_TOKEN` | not set | Sent to the town feed as `Authorization: Bearer <token>`. It stays on the server. |
 
 **Several machines.** If you run Claude Code on more than one computer, one board can show all of them. Tap the machine name in the header to switch. Every machine runs this plugin with its own bot.
 
@@ -453,6 +455,39 @@ The main board fetches the other machine's data when you select it. The request 
 - **The bot's own session:** "New session" does the same as `/new`. The board never signals or messages the session it runs in.
 
 On another machine the controls go through the shared secret, unless that machine turned them off. Each user can run 10 actions per minute. Every action goes to the bot's log, without the message text. `TELEGRAM_MINIAPP_CONTROL=off` makes the board read-only.
+
+#### Town view
+
+If you run several agents that talk to each other, the board can draw them as a small pixel-art town. Each room is a project (plus one hub), each agent is a character in its room, and a new message flies across as an envelope. The plugin does not collect this data itself: it shows whatever a town feed returns.
+
+Set `TELEGRAM_MINIAPP_TOWN_FEED` (and `TELEGRAM_MINIAPP_TOWN_TOKEN` if the feed needs one) and restart. The Sessions header then gets a third view next to Board and List. The bot fetches the feed on the server, with a 3 second timeout and a 1 MB limit, keeps only the fields below, and serves the result at `GET /api/town` with the same Telegram sign-in as the rest of the board. On another machine from `TELEGRAM_MINIAPP_PEERS` the board shows that machine's town, if it has a feed.
+
+- **Characters:** a different sprite for a Claude daemon, a pi agent, a Claude session and anything else. Idle agents breathe, busy ones type behind a laptop, waiting ones show a red "!", offline ones turn grey. Tap an agent for its role, department, state, activity, last message in and out, its recent messages and open tasks.
+- **Rooms:** a sign with the room title, a task board with the number of open tasks and the first three, and one rug per department.
+- **Messages:** an envelope flies from sender to receiver when both are on screen. The latest messages are also listed under the town. Tap either for the preview.
+
+With reduced motion the characters stand still and envelopes appear in place.
+
+The feed is JSON, schema version 1. Times can be ISO strings or epoch seconds or milliseconds. Unknown fields are dropped.
+
+```json
+{
+  "version": 1,
+  "generated_at": "2026-10-17T10:00:00Z",
+  "machine": "studio",
+  "rooms": [{ "id": "hub", "title": "HQ", "kind": "hub" }, { "id": "shop", "title": "shop", "kind": "project" }],
+  "agents": [{
+    "name": "sales@shop", "room": "shop", "department": "sales", "role": "Outbound",
+    "kind": "claude-session", "listening": true, "state": "waiting",
+    "waiting_for": "approval to send", "activity": "→ claude: batch ready",
+    "last_in": "2026-10-17T09:58:00Z", "last_out": "2026-10-17T09:59:00Z"
+  }],
+  "messages": [{ "id": "42", "from": "sales@shop", "to": "claude", "ts": "2026-10-17T09:59:00Z", "task_id": "7", "preview": "Batch ready" }],
+  "tasks": [{ "id": "7", "project": "shop", "title": "Send the batch", "state": "open", "owner": "sales@shop", "updated_at": "2026-10-17T09:59:00Z" }]
+}
+```
+
+`kind` is `claude-daemon`, `pi`, `claude-session` or `other`. `state` is `busy`, `waiting`, `idle` or `offline`. `messages` are newest first, at most 50. A task counts as open unless its state is done, closed, completed, cancelled, merged, resolved or archived. Agents and tasks whose room is unknown go to the hub.
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
 

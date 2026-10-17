@@ -10,6 +10,7 @@
  * the allowlist, so the public URL shows nothing to anyone else.
  * With TELEGRAM_WEBHOOK=on the same server also takes Telegram's updates at
  * POST /telegram/webhook (server.ts checks the secret token).
+ * With TELEGRAM_MINIAPP_TOWN_FEED the page also gets a Town view (GET /api/town, see parseTownFeed).
  * Users that server.ts lets control sessions can also read a session's messages,
  * send it a message, start background tasks, stop them and signal terminal
  * sessions (POST /api/control). TELEGRAM_MINIAPP_CONTROL=off turns that off.
@@ -508,6 +509,218 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown> | str
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
+// ── Town view: an optional feed of agents, rooms, messages and tasks ──
+//
+// TELEGRAM_MINIAPP_TOWN_FEED points at a JSON feed (schema version 1) that something else produces.
+// The server fetches it with TELEGRAM_MINIAPP_TOWN_TOKEN, so the token never reaches the browser,
+// and passes on only the known fields, clipped. The page draws each agent as a character in a room.
+
+type TownState = "busy" | "waiting" | "idle" | "offline";
+type TownKind = "claude-daemon" | "pi" | "claude-session" | "other";
+/** A time as epoch ms. A value that is not a time stays as short text. */
+type TownStamp = number | string | null;
+
+interface TownRoom {
+  id: string;
+  title: string;
+  kind: "hub" | "project";
+}
+interface TownAgent {
+  name: string;
+  room: string;
+  department: string;
+  role: string;
+  kind: TownKind;
+  listening: boolean;
+  state: TownState;
+  waiting_for: string | null;
+  activity: string;
+  last_in: TownStamp;
+  last_out: TownStamp;
+}
+interface TownMessage {
+  id: string;
+  from: string;
+  to: string;
+  ts: number | null;
+  task_id: string | null;
+  preview: string;
+}
+interface TownTask {
+  id: string;
+  project: string;
+  title: string;
+  state: string;
+  owner: string;
+  updated_at: number | null;
+}
+export interface TownFeed {
+  version: 1;
+  generated_at: number | null;
+  machine: string;
+  rooms: TownRoom[];
+  agents: TownAgent[];
+  messages: TownMessage[];
+  tasks: TownTask[];
+}
+
+const TOWN_TIMEOUT_MS = 3000;
+const TOWN_MAX_BYTES = 1 << 20;
+const TOWN_CACHE_MS = 1500;
+const TOWN_STATES = new Set(["busy", "waiting", "idle", "offline"]);
+const TOWN_KINDS = new Set(["claude-daemon", "pi", "claude-session", "other"]);
+
+/** The feed address from TELEGRAM_MINIAPP_TOWN_FEED, or "" when it is unset or not an http(s) URL. */
+export function townFeedUrl(): string {
+  const url = (process.env.TELEGRAM_MINIAPP_TOWN_FEED ?? "").trim();
+  return /^https?:\/\/\S+$/i.test(url) ? url : "";
+}
+
+/** Epoch ms from a number (seconds or ms) or a date string, else null. */
+function townTime(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return Math.round(v < 1e12 ? v * 1000 : v);
+  if (typeof v === "string" && v.trim()) {
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
+}
+
+function townStamp(v: unknown): TownStamp {
+  const t = townTime(v);
+  if (t !== null) return t;
+  return typeof v === "string" && v.trim() ? clip(v, 120) : null;
+}
+
+// Strings and numbers become clipped text; anything else becomes "".
+const townText = (v: unknown, n: number) => (typeof v === "string" || typeof v === "number" ? clip(v, n) : "");
+const townList = (v: unknown, max: number): Record<string, unknown>[] =>
+  (Array.isArray(v) ? v : []).filter((x) => x && typeof x === "object" && !Array.isArray(x)).slice(0, max);
+
+/** Checks a version 1 feed and keeps only the known fields. Returns null when the shape is wrong. */
+export function parseTownFeed(raw: unknown): TownFeed | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const f = raw as Record<string, unknown>;
+  if (f.version !== 1 || !Array.isArray(f.rooms) || !Array.isArray(f.agents)) return null;
+
+  const rooms: TownRoom[] = [];
+  const roomIds = new Set<string>();
+  for (const r of townList(f.rooms, 60)) {
+    const id = townText(r.id, 64);
+    if (!id || roomIds.has(id)) continue;
+    roomIds.add(id);
+    rooms.push({ id, title: townText(r.title, 80) || id, kind: r.kind === "hub" ? "hub" : "project" });
+  }
+
+  const agents: TownAgent[] = [];
+  const names = new Set<string>();
+  for (const a of townList(f.agents, 300)) {
+    const name = townText(a.name, 64);
+    if (!name || names.has(name)) continue;
+    names.add(name);
+    agents.push({
+      name,
+      room: townText(a.room, 64),
+      department: townText(a.department, 64),
+      role: townText(a.role, 80),
+      kind: TOWN_KINDS.has(a.kind as string) ? (a.kind as TownKind) : "other",
+      listening: a.listening === true,
+      state: TOWN_STATES.has(a.state as string) ? (a.state as TownState) : "idle",
+      waiting_for: townText(a.waiting_for, 200) || null,
+      activity: townText(a.activity, 200),
+      last_in: townStamp(a.last_in),
+      last_out: townStamp(a.last_out),
+    });
+  }
+
+  const messages: TownMessage[] = [];
+  const msgIds = new Set<string>();
+  for (const m of townList(f.messages, 50)) {
+    const from = townText(m.from, 64);
+    const to = townText(m.to, 64);
+    const ts = townTime(m.ts);
+    // A message without an id still needs a stable key, so the page can tell new ones from old ones.
+    const id = townText(m.id, 80) || `${from}>${to}@${ts ?? ""}`;
+    if (msgIds.has(id)) continue;
+    msgIds.add(id);
+    messages.push({ id, from, to, ts, task_id: townText(m.task_id, 80) || null, preview: townText(m.preview, 300) });
+  }
+
+  const tasks: TownTask[] = [];
+  for (const t of townList(f.tasks, 300)) {
+    const title = townText(t.title, 160);
+    if (!title) continue;
+    tasks.push({
+      id: townText(t.id, 80),
+      project: townText(t.project, 64),
+      title,
+      state: townText(t.state, 32),
+      owner: townText(t.owner, 64),
+      updated_at: townTime(t.updated_at),
+    });
+  }
+
+  return {
+    version: 1,
+    generated_at: townTime(f.generated_at),
+    machine: townText(f.machine, 64),
+    rooms,
+    agents,
+    messages,
+    tasks,
+  };
+}
+
+// Reads a response body of at most `max` bytes. Returns null when it is larger.
+async function readCapped(res: Response, max: number): Promise<string | null> {
+  if (Number(res.headers.get("content-length") ?? 0) > max) return null;
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > max) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Fetches and checks the town feed. Never throws: a failure is [502, { error }]. */
+export async function fetchTownFeed(url: string, token: string): Promise<Reply> {
+  try {
+    const res = await globalThis.fetch(url, {
+      headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      // A redirect could carry the token to another host.
+      redirect: "error",
+      signal: AbortSignal.timeout(TOWN_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      res.body?.cancel().catch(() => {});
+      return [502, { error: "feed failed", detail: `HTTP ${res.status}` }];
+    }
+    const text = await readCapped(res, TOWN_MAX_BYTES);
+    if (text === null) return [502, { error: "feed too large" }];
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      return [502, { error: "feed is not JSON" }];
+    }
+    const feed = parseTownFeed(raw);
+    if (!feed) return [502, { error: "feed does not match schema version 1" }];
+    return [200, { ...feed, fetched_at: Date.now() }];
+  } catch (err) {
+    const timeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    return [502, { error: timeout ? "feed timed out" : "feed unreachable" }];
+  }
+}
+
 export function startMiniApp(opts: {
   token: string;
   isAllowed: (userId: string) => boolean;
@@ -539,6 +752,27 @@ export function startMiniApp(opts: {
     opts.log("mini app: TELEGRAM_MINIAPP_PEERS is ignored without TELEGRAM_MINIAPP_PEER_TOKEN");
   const peers = peerSecret ? peerList() : new Map<string, string>();
   const machines = [{ id: "local", name: machineName() }, ...[...peers.keys()].map((name) => ({ id: name, name }))];
+
+  // Town view: on only with a feed address. Every board polls it every 3 s, so readers share one fetch.
+  const townUrl = townFeedUrl();
+  const townToken = (process.env.TELEGRAM_MINIAPP_TOWN_TOKEN ?? "").trim();
+  if (process.env.TELEGRAM_MINIAPP_TOWN_FEED?.trim() && !townUrl)
+    opts.log("mini app: TELEGRAM_MINIAPP_TOWN_FEED must be an http(s) URL; the Town view stays off");
+  let townCache: { at: number; reply: Promise<Reply> } | null = null;
+  let townLogAt = 0;
+  const town = (): Promise<Reply> => {
+    if (townCache && Date.now() - townCache.at < TOWN_CACHE_MS) return townCache.reply;
+    const reply = fetchTownFeed(townUrl, townToken).then((r) => {
+      // One line a minute at most, without the address (it may hold a secret).
+      if (r[0] !== 200 && Date.now() - townLogAt > 60_000) {
+        townLogAt = Date.now();
+        opts.log(`mini app: town feed: ${str(r[1].error)}${r[1].detail ? ` (${str(r[1].detail)})` : ""}`);
+      }
+      return r;
+    });
+    townCache = { at: Date.now(), reply };
+    return reply;
+  };
 
   const touch = () => {
     if (!worker) {
@@ -898,10 +1132,22 @@ export function startMiniApp(opts: {
                 enabled: false,
                 reason: str((data.control as any)?.reason) || "That machine runs a version without session controls.",
               };
-        return json({ ...withControl(data, remote), machine, machines });
+        return json({ ...withControl(data, remote), town: data.town === true, machine, machines });
       }
       touch();
-      return json({ ...withControl(snapshot ?? { loading: true }, control), machine, machines });
+      return json({ ...withControl(snapshot ?? { loading: true }, control), town: !!townUrl, machine, machines });
+    }
+    if (pathname === "/api/town") {
+      const userId = telegramUser(req);
+      if (!userId) return json({ error: "unauthorized" }, 401);
+      const machine = url.searchParams.get("machine") || "local";
+      if (machine !== "local") {
+        const [status, body] = await askPeer(machine, "/api/peer/town", {}, 5000);
+        return json({ ...body, machine }, status === 200 ? 200 : status === 404 ? 404 : 502);
+      }
+      if (!townUrl) return json({ error: "no town feed" }, 404);
+      const [status, body] = await town();
+      return json(body, status);
     }
     if (pathname === "/api/session/messages") {
       const userId = telegramUser(req);
@@ -924,7 +1170,16 @@ export function startMiniApp(opts: {
       // that board removes them for users who may not control.
       if (!isPeer(req)) return json({ error: "unauthorized" }, 401);
       touch();
-      return json(withControl(snapshot ?? { loading: true }, controlOff ? offHere : { enabled: true }));
+      return json({
+        ...withControl(snapshot ?? { loading: true }, controlOff ? offHere : { enabled: true }),
+        town: !!townUrl,
+      });
+    }
+    if (pathname === "/api/peer/town") {
+      if (!isPeer(req)) return json({ error: "unauthorized" }, 401);
+      if (!townUrl) return json({ error: "no town feed" }, 404);
+      const [status, body] = await town();
+      return json(body, status);
     }
     if (pathname === "/api/peer/messages") {
       if (!isPeer(req)) return json({ error: "unauthorized" }, 401);

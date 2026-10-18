@@ -30,6 +30,12 @@ html[data-theme="light"] {
   --f-fuchsia: #a21caf; --f-slate: #55527a;
   --kb-wait: #e5484d; --kb-run: #3b82f6; --kb-done: #10b981; --kb-col: rgba(118, 124, 140, .08);
   --kb-shadow: 0 1px 2px rgba(16, 22, 34, .05), 0 2px 6px -3px rgba(16, 22, 34, .08);
+  --warn-fg: #8a5a00;
+  /* AffectUI surfaces: a gray tray, white cards on it with a hairline, a raised pill for the picked option */
+  --ui-tray: rgba(118, 124, 140, .09);
+  --ui-card-shadow: inset 0 0 0 1px var(--sep), 0 1px 2px rgba(16, 22, 34, .05);
+  --ui-pill: var(--card);
+  --ui-pill-shadow: 0 0 0 .5px rgba(0, 0, 0, .08), 0 1px 2px rgba(0, 0, 0, .08), 0 2px 8px -2px rgba(0, 0, 0, .06);
 }
 html[data-theme="dark"] {
   --fb-page: #0e0f12; --fb-bg: #18191d; --fb-section: #1a1b20; --fb-text: #f3f4f6;
@@ -48,6 +54,11 @@ html[data-theme="dark"] {
   --f-fuchsia: #f0abfc; --f-slate: #bdb9dc;
   --kb-wait: #f87171; --kb-run: #60a5fa; --kb-done: #34d399; --kb-col: rgba(255, 255, 255, .035);
   --kb-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  --warn-fg: #facc15;
+  --ui-tray: rgba(255, 255, 255, .045);
+  --ui-card-shadow: inset 0 0 0 1px var(--sep), 0 1px 2px rgba(0, 0, 0, .4);
+  --ui-pill: color-mix(in srgb, var(--text) 11%, var(--card));
+  --ui-pill-shadow: 0 0 0 1px rgba(255, 255, 255, .06), 0 1px 2px rgba(0, 0, 0, .4);
 }
 :root {
   --bg: var(--tg-theme-secondary-bg-color, var(--fb-page));
@@ -153,12 +164,15 @@ html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--
 .mm-item[aria-checked="true"] .mm-ico, .mm-check { color: var(--link); }
 .mm-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ---------- Pills & dots ---------- */
+/* ---------- Status badges & dots ----------
+   AffectUI badges: a small tinted rounded rectangle, not a capsule */
 .pill {
-  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 8px;
-  border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; flex: none; line-height: 1;
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px 0 7px;
+  border-radius: 7px; font-size: 12px; font-weight: 600; white-space: nowrap; flex: none; line-height: 1;
 }
-.pill-lg { height: 28px; padding: 0 11px 0 10px; font-size: 13px; }
+.pill-lg { height: 28px; padding: 0 10px 0 9px; border-radius: 8px; font-size: 13px; }
+.tone-acc { color: var(--link); background: color-mix(in srgb, var(--link) 13%, transparent); }
+.tone-warn { color: var(--warn-fg); background: rgb(234 179 8 / .16); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; position: relative; flex: none; }
 .dot.pulse::after {
   content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit;
@@ -185,7 +199,8 @@ html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--
 .tile { padding: 13px 14px 12px; min-height: 98px; display: flex; flex-direction: column; min-width: 0; }
 .tile-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: var(--hint); }
 .tile-label { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tile-top .ico { width: 15px; height: 15px; opacity: .75; }
+/* The icon sits in a small AffectUI tile */
+.tile-top .ico { width: 26px; height: 26px; padding: 6px; margin: -3px -3px -3px 0; border-radius: 7px; background: var(--ui-tray); box-shadow: inset 0 0 0 1px var(--sep); color: var(--text); stroke-width: 1.9; }
 .tile-val { margin-top: 9px; display: flex; align-items: baseline; gap: 5px; line-height: 1; min-width: 0; }
 .tile-num { font-size: 24px; font-weight: 650; letter-spacing: -.025em; }
 .tile-unit { font-size: 14px; font-weight: 600; color: var(--hint); }
@@ -198,9 +213,10 @@ html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--
 .chart { margin-top: 10px; padding: 14px 14px 12px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; min-height: 30px; }
 .card-title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
-.seg { display: inline-flex; padding: 2px; border-radius: 9px; background: var(--fill); flex: none; }
-.seg button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--hint); transition: background .2s, color .2s; }
-.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04); }
+/* AffectUI Segmented Control (tray): a gray track, the picked option on a raised pill */
+.seg { display: inline-flex; padding: 2px; border-radius: 10px; background: var(--fill); flex: none; }
+.seg button { height: 26px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; font-weight: 600; color: var(--hint); transition: background-color 200ms ease, color 200ms ease; }
+.seg button[aria-pressed="true"] { background: var(--ui-pill); color: var(--text); box-shadow: var(--ui-pill-shadow); }
 .bars { --bar-c: var(--accent); height: 72px; display: flex; align-items: stretch; gap: 3px; touch-action: pan-y; position: relative; }
 .bars.m-out { --bar-c: var(--k-out); }
 .bar { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; border-radius: 3px; }
@@ -344,14 +360,14 @@ button.f-row:active { background: var(--press); }
 .seg-v .ico { width: 14px; height: 14px; }
 .seg-thumb, .seg-copy { position: absolute; top: 2px; bottom: 2px; left: 2px; pointer-events: none; }
 .seg-thumb {
-  z-index: -1; width: calc((100% - 4px) / var(--n)); border-radius: 7px; background: var(--card);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04);
+  z-index: -1; width: calc((100% - 4px) / var(--n)); border-radius: 8px; background: var(--ui-pill);
+  box-shadow: var(--ui-pill-shadow);
   transform: translateX(calc(var(--i) * 100%));
   transition: transform 250ms var(--ease-in-out);
 }
 .seg-copy {
   right: 2px; display: grid; grid-template-columns: repeat(var(--n), 1fr); color: var(--text);
-  clip-path: inset(0 calc(100% - (var(--i) + 1) * 100% / var(--n)) 0 calc(var(--i) * 100% / var(--n)) round 7px);
+  clip-path: inset(0 calc(100% - (var(--i) + 1) * 100% / var(--n)) 0 calc(var(--i) * 100% / var(--n)) round 8px);
   transition: clip-path 250ms var(--ease-in-out);
 }
 .seg-copy > span { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px 0 8px; font-size: 12.5px; font-weight: 600; }
@@ -458,143 +474,86 @@ button.f-row:active { background: var(--press); }
   .kcol { padding: 8px 8px 8px; }
 }
 
-/* ---------- Town (pixel art; only when a town feed is configured) ----------
-   Art is drawn on a 3px grid: one art pixel = 3 CSS px, sprites are 16x16 art px (48px).
-   Motion: idle characters breathe (one art pixel, stepped), busy ones nod over a laptop with
-   typing dots, waiting ones show a "!" that pops in once. Only transform and opacity animate. */
-html[data-theme="light"] {
-  --tw-k: #2a2135; --tw-wall: #eee3cf; --tw-wall-2: #e7dac2; --tw-base: #9c7650;
-  --tw-floor: #d4b081; --tw-floor-2: #caa474;
-  --tw-hub-wall: #dfe7f0; --tw-hub-wall-2: #d6e0ec; --tw-hub-floor: #c3ccd6; --tw-hub-floor-2: #b8c2cd;
-  --tw-sky: #a6d8f5; --tw-sky-2: #d6f0fc; --tw-frame: #fdfaf2;
-  --tw-plate: #87552c; --tw-plate-hi: #a7703e; --tw-plate-text: #fff4de;
-  --tw-cork: #b8834f; --tw-paper: #fffbea; --tw-ink: #3b2f22; --tw-ink-2: #6f5c47;
-  --tw-tag: rgba(42, 33, 53, .84); --tw-rug: rgba(255, 255, 255, .2); --tw-rug-line: rgba(42, 33, 53, .14);
-  --tw-shadow: rgba(42, 33, 53, .2);
-}
-html[data-theme="dark"] {
-  --tw-k: #07060c; --tw-wall: #3b3651; --tw-wall-2: #36314b; --tw-base: #4d3b2e;
-  --tw-floor: #4b3c30; --tw-floor-2: #44362b;
-  --tw-hub-wall: #303b50; --tw-hub-wall-2: #2c3649; --tw-hub-floor: #3b4352; --tw-hub-floor-2: #353c4a;
-  --tw-sky: #1c2647; --tw-sky-2: #2a3762; --tw-frame: #6c7088;
-  --tw-plate: #6c4424; --tw-plate-hi: #845530; --tw-plate-text: #ffe8c2;
-  --tw-cork: #7d5a37; --tw-paper: #ece4c8; --tw-ink: #2c2318; --tw-ink-2: #5e4e3b;
-  --tw-tag: rgba(0, 0, 0, .6); --tw-rug: rgba(255, 255, 255, .05); --tw-rug-line: rgba(255, 255, 255, .08);
-  --tw-shadow: rgba(0, 0, 0, .38);
-}
+/* ---------- Town (only when a town feed is configured) ----------
+   AffectUI-style: every room is a gray tray with its title, its agents sit on a card in it as rows
+   (avatar, name, what they do, status), with the room's open tasks as the card's last row.
+   Motion: a new room or agent fades up once (240ms), a state change pops its status in (160ms),
+   busy agents show a spinner. Only transform and opacity animate. */
 .town { position: relative; }
-.tw-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px; margin: 0 2px 16px; }
+.tw-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px; margin: 0 2px 12px; }
 .tw-bar .pill { height: 22px; font-size: 11.5px; }
 .tw-age { margin-left: auto; font-size: 12px; color: var(--hint); white-space: nowrap; }
 .tw-age.bad { color: var(--bad-fg); font-weight: 500; }
-/* Pixel frame: four hard shadows leave the corners notched, the classic pixel-art box */
-.tw-px { box-shadow: 0 -3px 0 0 var(--tw-k), 0 3px 0 0 var(--tw-k), -3px 0 0 0 var(--tw-k), 3px 0 0 0 var(--tw-k); }
-.tw-rooms { display: grid; grid-template-columns: minmax(0, 1fr); gap: 21px; padding: 3px; }
-.room { position: relative; display: flex; flex-direction: column; min-width: 0; background: var(--tw-floor); }
-.room.enter { animation: rise .3s var(--ease-out) both; }
-.room-wall {
-  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px 15px;
-  padding: 9px 12px 15px;
-  background: linear-gradient(transparent calc(100% - 6px), var(--tw-base) 0),
-    repeating-linear-gradient(90deg, var(--tw-wall) 0 12px, var(--tw-wall-2) 12px 24px);
-}
-.room.hub .room-wall {
-  background: linear-gradient(transparent calc(100% - 6px), var(--tw-base) 0),
-    repeating-linear-gradient(90deg, var(--tw-hub-wall) 0 12px, var(--tw-hub-wall-2) 12px 24px);
-}
-.plate {
-  grid-column: 1 / -1; justify-self: center; display: flex; align-items: center; gap: 6px; max-width: calc(100% - 6px);
-  margin: 3px 0 0; padding: 3px 10px; background: var(--tw-plate); color: var(--tw-plate-text);
-  font: 700 12px/18px var(--font); letter-spacing: .07em; text-transform: uppercase;
-}
-.plate.tw-px { box-shadow: inset 0 3px 0 var(--tw-plate-hi), 0 -3px 0 0 var(--tw-k), 0 3px 0 0 var(--tw-k), -3px 0 0 0 var(--tw-k), 3px 0 0 0 var(--tw-k); }
+.tw-rooms { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.room, .u-card { position: relative; display: flex; flex-direction: column; min-width: 0; padding: 4px; border-radius: 20px; background: var(--ui-tray); }
+.room.enter, .ag.enter { animation: ui-in 240ms var(--ease-out) both; }
+@keyframes ui-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.room-h, .u-head { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 5px 10px 7px; }
+.plate, .u-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; }
+.plate .ico, .u-title .ico { width: 15px; height: 15px; color: var(--hint); }
+.room.hub .plate .ico, .u-title .ico { color: var(--link); }
 .plate-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plate svg { width: 14px; height: 14px; flex: none; shape-rendering: crispEdges; }
-.win {
-  width: 42px; height: 33px; margin: 6px 0 0 6px;
-  background:
-    linear-gradient(var(--tw-frame), var(--tw-frame)) 50% 0 / 3px 100% no-repeat,
-    linear-gradient(var(--tw-frame), var(--tw-frame)) 0 50% / 100% 3px no-repeat,
-    linear-gradient(var(--tw-sky-2) 0 33%, var(--tw-sky) 0);
-  box-shadow: 0 0 0 3px var(--tw-frame), 0 0 0 6px var(--tw-k);
-}
-.tboard {
-  justify-self: end; display: flex; flex-direction: column; gap: 2px; width: min(100%, 230px); min-width: 0; margin: 6px 6px 0 0;
-  padding: 6px 9px 7px; background: var(--tw-paper); color: var(--tw-ink);
-  box-shadow: 0 0 0 3px var(--tw-cork), 0 0 0 6px var(--tw-k); transition: transform 160ms var(--ease-out);
-  touch-action: manipulation;
-}
-.tboard:active { transform: scale(.97); }
-.tboard:focus-visible { outline-offset: 7px; border-radius: 0; }
-.tb-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 700 10px/14px var(--font); letter-spacing: .09em; text-transform: uppercase; color: var(--tw-ink-2); }
-.tb-n { min-width: 18px; padding: 0 4px; text-align: center; background: var(--tw-ink); color: var(--tw-paper); letter-spacing: 0; }
-.tb-l { display: block; min-width: 0; font-size: 12px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tb-l::before { content: ""; display: inline-block; width: 4px; height: 4px; margin: 0 6px 2px 0; background: var(--tw-ink-2); }
-.tb-more, .tb-none { font-size: 11.5px; line-height: 16px; color: var(--tw-ink-2); }
-.room-floor {
-  flex: 1; display: flex; flex-wrap: wrap; justify-content: center; align-content: flex-start; gap: 12px 6px;
-  min-height: 114px; padding: 14px 5px 12px; border-top: 3px solid var(--tw-k);
-  background: conic-gradient(var(--tw-floor) 25%, var(--tw-floor-2) 0 50%, var(--tw-floor) 0 75%, var(--tw-floor-2) 0) 0 0 / 24px 24px;
-}
-.room.hub .room-floor {
-  background: conic-gradient(var(--tw-hub-floor) 25%, var(--tw-hub-floor-2) 0 50%, var(--tw-hub-floor) 0 75%, var(--tw-hub-floor-2) 0) 0 0 / 24px 24px;
-}
-.room-empty { align-self: center; padding: 6px 9px; font-size: 12px; color: #fff; background: var(--tw-tag); }
-.zone { position: relative; display: flex; flex-wrap: wrap; justify-content: center; min-width: 0; }
-.zone.lab { padding: 12px 3px 3px; background: var(--tw-rug); box-shadow: inset 0 0 0 3px var(--tw-rug-line); }
-.zone-l { position: absolute; top: -7px; left: 9px; max-width: calc(100% - 18px); padding: 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 9.5px/15px var(--font); letter-spacing: .08em; text-transform: uppercase; color: #fff; background: var(--tw-tag); }
-.ag { position: relative; display: flex; flex-direction: column; align-items: center; width: 70px; padding: 20px 2px 4px; transition: transform 160ms var(--ease-out); touch-action: manipulation; }
-.ag:active { transform: scale(.96); }
-.ag:focus-visible { outline: 3px solid var(--link); outline-offset: -2px; border-radius: 0; }
-.ag-stand { position: relative; display: block; width: 48px; height: 48px; }
-.ag-stand::before { content: ""; position: absolute; left: 9px; right: 9px; bottom: -3px; height: 6px; background: var(--tw-shadow); }
-.ag-fig { position: relative; display: block; width: 48px; height: 48px; }
-.spr { display: block; width: 48px; height: 48px; shape-rendering: crispEdges; overflow: visible; }
-.ag-lap { position: absolute; inset: 0; display: none; width: 48px; height: 48px; shape-rendering: crispEdges; }
-.ag-name { max-width: 66px; margin-top: 6px; padding: 0 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 11px/16px var(--font); color: #fff; background: var(--tw-tag); }
-.ag-bub { position: absolute; top: 2px; left: calc(50% + 7px); transform-origin: 0 100%; pointer-events: none; }
-.ag-bub svg { display: block; shape-rendering: crispEdges; }
-.ag-bub .d { fill: #2a2135; }
-/* Idle and waiting: breathe up one art pixel for a moment every 3 s, each on its own phase */
-.st-idle .ag-fig, .st-waiting .ag-fig { animation: tw-breathe 3.2s steps(1, end) infinite; animation-delay: var(--ad, 0ms); }
-@keyframes tw-breathe { 0% { transform: none; } 78% { transform: translateY(-3px); } 100% { transform: translateY(-3px); } }
-.blink { opacity: 0; animation: tw-blink 5.2s steps(1, end) infinite; animation-delay: var(--bd, 0ms); }
-@keyframes tw-blink { 0% { opacity: 0; } 96.5% { opacity: 1; } 99.5% { opacity: 0; } 100% { opacity: 0; } }
-/* Busy: seated behind a laptop, nodding as it types */
-.st-busy .ag-lap { display: block; }
-.st-busy .ag-stand { overflow: hidden; } /* seated: the legs stay under the desk */
-.st-busy .ag-fig { animation: tw-nod 1.3s steps(1, end) infinite; animation-delay: var(--ad, 0ms); }
-@keyframes tw-nod { 0% { transform: translateY(3px); } 55% { transform: translateY(6px); } 100% { transform: translateY(6px); } }
-.st-busy .d { animation: tw-dot 1.2s steps(1, end) infinite; }
-.st-busy .d2 { animation-delay: .4s; }
-.st-busy .d3 { animation-delay: .8s; }
-@keyframes tw-dot { 0% { opacity: 1; } 33.3% { opacity: .25; } 100% { opacity: .25; } }
-/* Waiting: the "!" pops in once from its tail, then hops gently */
-.st-waiting .ag-bub { animation: tw-pop 220ms var(--ease-out) both; }
-.st-waiting .ag-bub svg { animation: tw-hop 1.8s steps(1, end) 220ms infinite; }
-@keyframes tw-pop { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: none; } }
-@keyframes tw-hop { 0% { transform: none; } 70% { transform: translateY(-2px); } 100% { transform: translateY(-2px); } }
-.st-offline .ag-stand { filter: grayscale(1); opacity: .42; }
-.st-offline .blink { animation: none; }
-.st-offline .ag-name { opacity: .7; }
-/* Messages: an envelope flies from sender to receiver, then waits there a few seconds (tap: the preview) */
+.room-n, .u-when { flex: none; font-size: 12px; color: var(--hint); white-space: nowrap; }
+.room-card, .u-body { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; border-radius: 16px; background: var(--card); box-shadow: var(--ui-card-shadow); }
+.room-floor { flex: 1; display: flex; flex-direction: column; padding: 4px; }
+.zone { display: flex; flex-direction: column; min-width: 0; }
+.zone + .zone { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--sep); }
+.zone-l { padding: 8px 10px 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--hint); }
+.room-empty { padding: 16px 12px; text-align: center; font-size: 13px; color: var(--hint); }
+/* An agent: a row like AffectUI's Tool Call Card. The press gives a little; the whole row is the target. */
+.ag { position: relative; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 8px 6px 8px 8px; border-radius: 12px; transition: background-color 150ms ease, transform 160ms var(--ease-out); touch-action: manipulation; }
+.ag:active { background: var(--press); transform: scale(.985); }
+@media (hover: hover) and (pointer: fine) { .ag:hover { background: var(--press); } }
+.ag:focus-visible { outline-offset: -2px; border-radius: 12px; }
+.av { position: relative; flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: rgb(var(--tb) / var(--chip-a)); color: var(--tf); box-shadow: inset 0 0 0 1px rgb(var(--tb) / .2); font-size: 12px; font-weight: 650; letter-spacing: .02em; line-height: 1; }
+.ag-av { flex: none; display: flex; }
+.av-lg { width: 56px; height: 56px; border-radius: 16px; font-size: 19px; }
+.av-dot { position: absolute; right: -3px; bottom: -3px; width: 11px; height: 11px; border-radius: 50%; background: var(--hint); box-shadow: 0 0 0 2px var(--card); }
+.av-lg .av-dot { width: 14px; height: 14px; }
+.st-busy .av-dot { background: var(--ok); }
+.st-waiting .av-dot { background: var(--kb-wait); }
+.st-offline .av-dot { background: var(--card); box-shadow: 0 0 0 2px var(--card), inset 0 0 0 1.5px var(--hint); }
+.st-offline .av { filter: grayscale(1); opacity: .55; }
+.ag-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ag-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
+.ag-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--hint); }
+.st-waiting .ag-sub { color: var(--bad-fg); }
+.st-offline .ag-name { color: var(--hint); }
+.ag-st { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; color: var(--hint); white-space: nowrap; }
+.ag-st.pop { animation: st-pop 160ms var(--ease-out); }
+@keyframes st-pop { from { opacity: 0; transform: scale(.95); } to { opacity: 1; transform: none; } }
+.st-busy .ag-st { color: var(--ok-fg); font-weight: 600; }
+.ag-st .pill { height: 22px; font-size: 11.5px; }
+.ag .chev-r, .tboard .chev-r { flex: none; width: 15px; height: 15px; color: var(--hint); opacity: .6; }
+/* The AffectUI spinner: a faint ring with a bright quarter, turning fast so it reads as progress */
+.ui-spin { width: 13px; height: 13px; flex: none; border-radius: 50%; border: 1.6px solid rgb(16 185 129 / .25); border-top-color: var(--ok); animation: spin .8s linear infinite; }
+/* The room's open tasks: the card's last row */
+.tboard { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 8px 8px 12px; border-top: 1px solid var(--sep); transition: background-color 150ms ease; touch-action: manipulation; }
+.tboard:active { background: var(--press); }
+@media (hover: hover) and (pointer: fine) { .tboard:hover { background: var(--press); } }
+.tboard:focus-visible { outline-offset: -2px; border-radius: 0 0 15px 15px; }
+.ui-tile { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: var(--ui-tray); box-shadow: inset 0 0 0 1px var(--sep); color: var(--text); }
+.ui-tile .ico { width: 14px; height: 14px; }
+.tb-main { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.tb-h { flex: none; font-size: 13px; font-weight: 600; }
+.tb-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--hint); }
+.tb-n { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 6px; display: grid; place-items: center; background: var(--fill-2); color: var(--hint); font-size: 11px; font-weight: 600; }
+/* Messages: a small envelope tile flies from sender to receiver, then waits there a few seconds (tap: the preview) */
 .tw-layer { position: absolute; inset: 0; pointer-events: none; }
-.mail { position: absolute; left: 0; top: 0; z-index: 3; width: 24px; height: 18px; pointer-events: auto; touch-action: manipulation; }
-.mail::after { content: ""; position: absolute; inset: -13px -10px; }
-.mail-i { display: block; }
-.mail svg { display: block; width: 24px; height: 18px; shape-rendering: crispEdges; filter: drop-shadow(0 3px 0 var(--tw-shadow)); }
+.mail { position: absolute; left: 0; top: 0; z-index: 3; width: 26px; height: 22px; pointer-events: auto; touch-action: manipulation; }
+.mail::after { content: ""; position: absolute; inset: -11px -9px; }
+.mail-i { display: grid; place-items: center; width: 26px; height: 22px; border-radius: 7px; background: var(--card); color: var(--link); box-shadow: inset 0 0 0 1px var(--sep), 0 6px 16px -6px rgba(16, 22, 34, .35); }
+.mail-i .ico { width: 14px; height: 14px; }
 .tw-mail-head { margin-top: 26px; }
 .tw-mail-head h3 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
 .tw-mrow .f-l1 { font-weight: 600; }
 .tw-mrow .tw-arrow { color: var(--hint); font-weight: 400; }
 .tw-prev { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 13px; line-height: 1.4; opacity: .82; overflow-wrap: anywhere; }
-.tw-sk { height: 236px; }
-.tw-sk + .tw-sk { margin-top: 21px; }
+.tw-sk { height: 180px; border-radius: 20px; }
+.tw-sk + .tw-sk { margin-top: 12px; }
 /* Agent sheet */
 .tw-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
-.tw-hero-art { flex: none; display: grid; place-items: end center; width: 76px; height: 76px; padding-bottom: 6px; background: conic-gradient(var(--tw-floor) 25%, var(--tw-floor-2) 0 50%, var(--tw-floor) 0 75%, var(--tw-floor-2) 0) 0 0 / 24px 24px; }
-.tw-hero-art svg { width: 64px; height: 64px; shape-rendering: crispEdges; }
-.tw-hero-art.off svg { filter: grayscale(1); opacity: .5; }
+.tw-hero > span:first-child { flex: none; display: flex; }
 .tw-hero-t { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .tw-hero-role { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .tw-hero-sub { font-size: 13px; color: var(--hint); overflow-wrap: anywhere; }
@@ -613,16 +572,58 @@ html[data-theme="dark"] {
 .tw-li .sub { font-size: 12px; color: var(--hint); }
 .tw-none { padding: 12px; font-size: 13px; color: var(--hint); }
 .tw-bubble { padding: 10px 13px; border-radius: 16px; border-bottom-left-radius: 6px; background: var(--fill); font-size: 14.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---------- Usage limits (in the Town, when the feed has a usage block) ----------
+   AffectUI Usage Meter, ported: per account a meter for each window (5 h, 7 d, scoped ones), amber from 80 %,
+   red at 100 %. A meter glides to its new value in 300ms (fills from zero the first time); nothing else moves. */
+.u-card { margin-bottom: 12px; }
+.u-stale .u-when { color: var(--warn-fg); font-weight: 500; }
+.u-note { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 4px; padding: 9px 11px; border-radius: 14px; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.u-note .ico { width: 15px; height: 15px; margin-top: 1.5px; }
+.u-note b { font-weight: 650; }
+.u-alert { background: rgb(239 68 68 / .12); color: var(--bad-fg); box-shadow: inset 0 0 0 1px rgb(239 68 68 / .22); }
+.u-low { background: rgb(234 179 8 / .14); color: var(--warn-fg); box-shadow: inset 0 0 0 1px rgb(234 179 8 / .26); }
+.u-acc { padding: 12px 12px 14px; }
+.u-acc + .u-acc { border-top: 1px solid var(--sep); }
+.u-acc-h { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.u-acc-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.u-acc-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
+.u-acc-s { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--hint); }
+.u-acc-h .pill { height: 22px; font-size: 11.5px; }
+.u-wins { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.u-win-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+.u-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.u-pct { flex: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+.u-track { position: relative; height: 8px; margin-top: 6px; border-radius: 999px; background: var(--fill-2); overflow: hidden; }
+/* The fill slides in from the left (translate keeps its rounded end round, scaleX would squash it) */
+.u-fill { position: absolute; inset: 0; border-radius: inherit; background: var(--ok); }
+.lv-warn .u-fill { background: var(--warn); }
+.lv-full .u-fill { background: var(--bad); }
+.lv-warn .u-pct { color: var(--warn-fg); }
+.lv-full .u-pct { color: var(--bad-fg); }
+.u-sub { margin-top: 5px; min-height: 15px; font-size: 11.5px; line-height: 15px; color: var(--hint); }
+.u-stale .u-body { opacity: .6; }
+.u-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 16px; text-align: center; color: var(--hint); }
+.u-empty .ui-tile { width: 36px; height: 36px; border-radius: 10px; margin-bottom: 2px; color: var(--hint); }
+.u-empty .ui-tile .ico { width: 18px; height: 18px; }
+.u-empty-t { font-size: 14px; font-weight: 600; color: var(--text); }
+.u-empty-s { max-width: 34ch; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+@media (min-width: 480px) {
+  .u-wins { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; }
+}
 @media (min-width: 720px) {
-  .tw-rooms { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 21px 15px; }
+  .tw-rooms { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
   .room.hub { grid-column: 1 / -1; }
-  /* Same wall height in every project room (fits a full task board), so the floors line up */
-  .room:not(.hub) .room-wall { min-height: 168px; align-content: start; }
+  /* The hub spans the page, so its agents sit three to a row */
+  .room.hub .zone { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 4px; }
+  .room.hub .zone-l { grid-column: 1 / -1; }
+  .u-wins { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 /* ---------- Empty & centred states ---------- */
-.empty { border: 1.5px dashed var(--sep); border-radius: 16px; padding: 26px 20px; text-align: center; color: var(--hint); display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.empty .ico { width: 24px; height: 24px; stroke-width: 1.7; margin-bottom: 4px; opacity: .8; }
+/* AffectUI empty state: a quiet gray tray, the icon on a raised tile */
+.empty { border-radius: 20px; padding: 26px 20px; background: var(--ui-tray); text-align: center; color: var(--hint); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.empty .ico { width: 40px; height: 40px; padding: 10px; margin-bottom: 6px; border-radius: 12px; background: var(--card); box-shadow: var(--ui-card-shadow); color: var(--text); stroke-width: 1.8; }
 .empty-title { font-size: 14px; font-weight: 600; color: var(--text); }
 .empty-sub { font-size: 13px; max-width: 30ch; }
 code { font-family: var(--mono); font-size: .92em; padding: 1px 5px; border-radius: 5px; background: var(--fill-2); color: var(--text); }
@@ -878,8 +879,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
 .mode { position: relative; display: block; min-width: 0; }
 .mode input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .mode span { display: flex; align-items: center; justify-content: center; height: 38px; padding: 0 6px; border-radius: 9px; font-size: 14px; font-weight: 600; color: var(--hint); text-align: center; white-space: nowrap; transition: background-color .2s, color .2s; pointer-events: none; }
-.mode input:checked + span { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04); }
-html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); }
+.mode input:checked + span { background: var(--ui-pill); color: var(--text); box-shadow: var(--ui-pill-shadow); }
 .mode input:focus-visible + span { outline: 2px solid var(--link); outline-offset: 1px; }
 .btn-primary {
   display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 48px; margin-top: 4px;
@@ -933,10 +933,9 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   /* A frozen spinner looks broken: show a still, full ring instead */
   .kc-spin { border-right-color: var(--kc); opacity: .6; }
   .kcard:has(> .kc-main:active), .seg-v button:active { transform: none; }
-  /* Town: characters stand still, the "!" and the typing dots stay visible without moving */
-  .ag-fig, .blink, .st-busy .d, .ag-bub, .ag-bub svg { animation: none !important; }
-  .st-busy .d { opacity: 1; }
-  .ag:active, .tboard:active { transform: none; }
+  /* Town: a still, full ring for busy agents; rows don't shrink on press */
+  .ui-spin { border-color: var(--ok); opacity: .6; }
+  .ag:active { transform: none; }
 }
 </style>
 </head>
@@ -1067,6 +1066,9 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     search: '<circle cx="10.75" cy="10.75" r="6.25"/><path d="m15.5 15.5 4.5 4.5"/>',
     town: '<path d="M3.5 11 12 4.5l8.5 6.5"/><path d="M5.5 9.5v10h13v-10"/><path d="M10 19.5v-5h4v5"/>',
     wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.4-3.4a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9l-3.4 3.4Z"/>',
+    gauge: '<path d="M4.2 17.5a8.5 8.5 0 1 1 15.6 0"/><path d="m12 13.5 3.75-3.75"/><circle cx="12" cy="13.5" r="1.4"/>',
+    mail: '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="m4.5 7.5 7.5 5.5 7.5-5.5"/>',
+    star: '<path d="m12 4 2.35 4.76 5.25.77-3.8 3.7.9 5.23L12 15.99l-4.7 2.47.9-5.23-3.8-3.7 5.25-.77L12 4Z"/>',
   };
   // Filled four-point star with a small companion, for the board columns.
   const SPARK = '<svg class="kspark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6.5 1.5c.4 3 1.75 4.35 4.75 4.75-3 .4-4.35 1.75-4.75 4.75-.4-3-1.75-4.35-4.75-4.75 3-.4 4.35-1.75 4.75-4.75Z"/><path d="M12.25 9.5c.18 1.4.85 2.07 2.25 2.25-1.4.18-2.07.85-2.25 2.25-.18-1.4-.85-2.07-2.25-2.25 1.4-.18 2.07-.85 2.25-2.25Z" opacity=".7"/></svg>';
@@ -1917,189 +1919,16 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     announce(v === 'board' ? 'Board view' : v === 'list' ? 'List view' : 'Town view');
   }
 
-  /* ================= Town (pixel art) =================
-     Draws whatever the bot's town feed returns (GET api/town): rooms, agents as characters, an envelope for
-     each new message and a small task board per room. The art is hand-made pixel maps, one char per pixel. */
-  const TW_K = '#2a2135';
-  const TW_SPRITES = {
-    daemon: { // a robot with an antenna
-      pal: { k: TW_K, b: '#e07a52', B: '#b65a37', h: '#f6a57f', w: '#fff4e4', e: TW_K, a: '#ffd166', g: '#8a8fa3' },
-      eyes: [[5, 6, 2, 2], [9, 6, 2, 2]], lid: 'w', lash: 'k',
-      px: [
-        '................',
-        '.......aa.......',
-        '.......kk.......',
-        '...kkkkkkkkkk...',
-        '..kbbbbbbbbbbk..',
-        '..kbwwwwwwwwbk..',
-        '..kbweewweewbk..',
-        '..kbweewweewbk..',
-        '..kbwwwBBwwwbk..',
-        '..kBbbbbbbbbBk..',
-        '...kkkkkkkkkk...',
-        '....kbbbbbbk....',
-        '...kgkbhhbkgk...',
-        '...kgkbbbbkgk...',
-        '....kBkkkkBk....',
-        '....kk....kk....',
-      ],
-    },
-    pi: { // a round bot with a visor
-      pal: { k: TW_K, b: '#3fb8a8', B: '#2a8c80', h: '#8fe3d6', v: '#1f2a44', c: '#7cf3ff' },
-      eyes: [[5, 7, 2, 1], [9, 7, 2, 1]], lid: 'v', lash: '#3a5a86',
-      px: [
-        '................',
-        '................',
-        '.....kkkkkk.....',
-        '....kbbbbbbk....',
-        '...kbhhbbbbbk...',
-        '..kbhbbbbbbbbk..',
-        '..kbvvvvvvvvbk..',
-        '..kbvccvvccvbk..',
-        '..kbvvvvvvvvbk..',
-        '..kbbbbbbbbbbk..',
-        '..kBbbbbbbbbBk..',
-        '...kBbbbbbbBk...',
-        '...kBBbbbbBBk...',
-        '....kBBBBBBk....',
-        '.....kk..kk.....',
-        '................',
-      ],
-    },
-    session: { // a person in a hoodie
-      pal: { k: TW_K, s: '#f2c19b', S: '#d9a07a', H: '#4a3128', b: '#4f7bd9', B: '#3a5fb0', e: TW_K, w: '#f4f6fb' },
-      eyes: [[6, 6, 1, 2], [9, 6, 1, 2]], lid: 's', lash: 'k',
-      px: [
-        '................',
-        '.....kkkkkk.....',
-        '....kHHHHHHk....',
-        '...kHHHHHHHHk...',
-        '...kHssssssHk...',
-        '...kssssssssk...',
-        '...kssessessk...',
-        '...kssessessk...',
-        '...ksssSSsssk...',
-        '....kssssssk....',
-        '...kkbbbbbbkk...',
-        '..kbbbbwwbbbbk..',
-        '..kbbbbbbbbbbk..',
-        '..kbBbbbbbbBbk..',
-        '..kbBbbbbbbBbk..',
-        '..kkkkkkkkkkkk..',
-      ],
-    },
-    other: { // a box droid with a status light
-      pal: { k: TW_K, b: '#9aa0b4', B: '#737a90', h: '#c8ccd8', e: TW_K, a: '#6fd08c' },
-      eyes: [[5, 5, 2, 2], [9, 5, 2, 2]], lid: 'b', lash: 'k',
-      px: [
-        '................',
-        '................',
-        '....kkkkkkkk....',
-        '...kbbbbbbbbk...',
-        '...kbhhhhhhbk...',
-        '...kbeebbeebk...',
-        '...kbeebbeebk...',
-        '...kbbbbbbbbk...',
-        '...kbbaabbbbk...',
-        '...kBBBBBBBBk...',
-        '....kkkkkkkk....',
-        '.....kbbbbk.....',
-        '...kkbbbbbbkk...',
-        '...kbBbbbbBbk...',
-        '...kkkkkkkkkk...',
-        '....kk....kk....',
-      ],
-    },
-  };
-  const TW_ART = {
-    lap: { w: 16, h: 16, pal: { k: TW_K, g: '#c9ccd6', G: '#a3a7b5', l: '#ffffff' }, px: [
-      '................', '................', '................', '................', '................', '................',
-      '................', '................', '................', '................', '................',
-      '..kkkkkkkkkkkk..',
-      '..kggggggggggk..',
-      '..kggggllggggk..',
-      '..kGGGGGGGGGGk..',
-      '.kkkkkkkkkkkkkk.',
-    ] },
-    bang: { w: 9, h: 10, pal: { k: TW_K, r: '#d93a3f', w: '#ffffff' }, px: [
-      '.kkkkkkk.',
-      'krrrrrrrk',
-      'krrrwrrrk',
-      'krrrwrrrk',
-      'krrrwrrrk',
-      'krrrrrrrk',
-      'krrrwrrrk',
-      'krrrrrrrk',
-      '.kkkkkkk.',
-      '.kk......',
-    ] },
-    talk: { w: 13, h: 8, pal: { k: TW_K, w: '#ffffff' }, px: [
-      '.kkkkkkkkkkk.',
-      'kwwwwwwwwwwwk',
-      'kwwwwwwwwwwwk',
-      'kwwwwwwwwwwwk',
-      'kwwwwwwwwwwwk',
-      'kwwwwwwwwwwwk',
-      '.kkkkkkkkkkk.',
-      '.kk..........',
-    ] },
-    mail: { w: 8, h: 6, pal: { k: TW_K, w: '#fffbea', r: '#d93a3f' }, px: [
-      'kkkkkkkk',
-      'kkwwwwkk',
-      'kwkwwkwk',
-      'kwwrrwwk',
-      'kwwwwwwk',
-      'kkkkkkkk',
-    ] },
-    star: { w: 7, h: 7, pal: { y: '#ffd166' }, px: [
-      '...y...',
-      '...y...',
-      'yyyyyyy',
-      '.yyyyy.',
-      '..yyy..',
-      '.yy.yy.',
-      '.y...y.',
-    ] },
-  };
-  const TW_KIND = { 'claude-daemon': 'daemon', pi: 'pi', 'claude-session': 'session', other: 'other' };
+  /* ================= Town (AffectUI cards) =================
+     Draws whatever the bot's town feed returns (GET api/town): rooms as trays, agents as rows with an
+     avatar and a status, the open tasks of each room, an envelope for each new message, and the
+     Claude accounts' usage limits when the feed has them. */
   const TW_KIND_LABEL = { 'claude-daemon': 'Daemon', pi: 'pi agent', 'claude-session': 'Claude session', other: 'Agent' };
   const TW_STATE = { busy: 'Busy', waiting: 'Waiting', idle: 'Idle', offline: 'Offline' };
-  const TW_BANG = '<svg width="18" height="20" viewBox="0 0 9 10" focusable="false"><use href="#tws-bang"/></svg>';
-  const TW_TALK = '<svg width="26" height="16" viewBox="0 0 13 8" focusable="false"><use href="#tws-talk"/><rect class="d d1" x="3" y="2" width="2" height="2"/><rect class="d d2" x="6" y="2" width="2" height="2"/><rect class="d d3" x="9" y="2" width="2" height="2"/></svg>';
-  const TW_STAR = '<svg viewBox="0 0 7 7" aria-hidden="true" focusable="false"><use href="#tws-star"/></svg>';
+  const TW_TONES = ['emerald', 'sky', 'violet', 'amber', 'cyan', 'blue', 'pink', 'rose', 'fuchsia', 'slate'];
   const TW_CLOSED = /^(done|closed|complete|completed|cancell?ed|merged|resolved|archived|wontfix)$/i;
   const TOWN_MS = 3000;
 
-  // One <rect> per horizontal run of a colour.
-  function twRects(rows, pal) {
-    let out = '';
-    rows.forEach((row, y) => {
-      for (let x = 0; x < row.length;) {
-        const c = row[x];
-        let w = 1;
-        while (row[x + w] === c) w++;
-        if (c !== '.' && pal[c]) out += `<rect x="${x}" y="${y}" width="${w}" height="1" fill="${pal[c]}"/>`;
-        x += w;
-      }
-    });
-    return out;
-  }
-  // The sprite sheet: every character, its blink frame and the props, drawn once as <symbol>s.
-  function twDefs() {
-    const sym = (id, w, h, body) => `<symbol id="${id}" viewBox="0 0 ${w} ${h}">${body}</symbol>`;
-    let defs = '';
-    for (const [k, s] of Object.entries(TW_SPRITES)) {
-      defs += sym('tws-' + k, 16, 16, twRects(s.px, s.pal));
-      const lid = s.pal[s.lid] || s.lid, lash = s.pal[s.lash] || s.lash;
-      defs += sym('tws-' + k + '-b', 16, 16, s.eyes.map(([x, y, w, h]) =>
-        (h > 1 ? `<rect x="${x}" y="${y}" width="${w}" height="${h - 1}" fill="${lid}"/>` : '') +
-        `<rect x="${x}" y="${y + h - 1}" width="${w}" height="1" fill="${lash}"/>`).join(''));
-    }
-    for (const [k, a] of Object.entries(TW_ART)) defs += sym('tws-' + k, a.w, a.h, twRects(a.px, a.pal));
-    const box = doc.createElement('div');
-    box.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>${defs}</defs></svg>`;
-    doc.body.appendChild(box.firstChild);
-  }
   const twHash = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
   const twOpen = t => !TW_CLOSED.test(String(t.state || '').trim());
   const twByUpdate = (a, b) => n0(b.updated_at) - n0(a.updated_at) || String(a.title).localeCompare(String(b.title));
@@ -2109,6 +1938,13 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   }
   // A feed time: epoch ms becomes "5m ago" (kept fresh by tick), text stays as sent.
   const twStamp = v => (typeof v === 'number' ? `<span data-ago="${v}" data-f="ago"></span>` : v ? esc(v) : '—');
+  // An avatar: up to two initials on a tile tinted by the name, so each agent keeps its colour.
+  function twInitials(label) {
+    const words = String(label || '?').replace(/@.*$/, '').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const s = words.length > 1 ? words[0][0] + words[1][0] : (words[0] || '?').slice(0, 2);
+    return s.toUpperCase();
+  }
+  const twAvatar = (key, label, big) => `<span class="av${big ? ' av-lg' : ''} tc-${TW_TONES[twHash(String(key)) % TW_TONES.length]}" aria-hidden="true">${esc(twInitials(label))}<span class="av-dot"></span></span>`;
 
   // Rooms in order (hubs first), each room's agents and open tasks. Agents and tasks that name no
   // known room go to the hub, so nothing in the feed is hidden.
@@ -2128,7 +1964,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     return { rooms, agents, tasks, title: id => (rooms.find(r => r.id === id) || {}).title || id };
   }
 
-  const T = { data: null, err: null, inflight: null, timer: 0, seen: null };
+  const T = { data: null, err: null, inflight: null, timer: 0, seen: null, uPct: null, noRoom: false };
   const townActive = () => S.view === 'main' && viewNow() === 'town' && !doc.hidden && !S.paused && S.mode !== 'auth' && S.mode !== 'unreachable';
   function townStop() {
     clearTimeout(T.timer); T.timer = 0;
@@ -2141,7 +1977,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
   }
   function townReset() {
     townStop();
-    T.data = null; T.err = null; T.seen = null;
+    T.data = null; T.err = null; T.seen = null; T.uPct = null; T.noRoom = false;
     const box = $('#town'); box._ready = false; box._ags = null; box._rooms = null; box.innerHTML = '';
   }
   async function townPoll() {
@@ -2187,11 +2023,127 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     fresh.slice(-3).forEach((m, i) => setTimeout(() => twFly(m, i), i * 160));
   }
 
+  /* ---------- Usage limits (AffectUI Usage Meter, ported) ----------
+     Pure helpers: they only read the usage block and return a model or HTML, so the tests can run them
+     (test/miniapp-usage.test.ts loads the code between the two markers). */
+  /* usage:pure:start */
+  const USAGE_WARN = 80;
+  const usageLevel = pct => (typeof pct !== 'number' ? 'ok' : pct >= 100 ? 'full' : pct >= USAGE_WARN ? 'warn' : 'ok');
+  const usageText = (v, n) => (typeof v === 'string' || typeof v === 'number' ? String(v).slice(0, n) : '');
+  function usageModel(u) {
+    if (!u || typeof u !== 'object' || Array.isArray(u)) return { show: false, state: 'ok', readAt: null, detail: '', noRoom: false, warn: false, low: [], accounts: [] };
+    const accounts = (Array.isArray(u.accounts) ? u.accounts : []).filter(a => a && typeof a === 'object').map((a, i) => {
+      const num = typeof a.number === 'number' && isFinite(a.number) ? a.number : null;
+      const key = 'a' + (num ?? 'i' + i);
+      const label = usageText(a.label, 64) || (num != null ? 'Account ' + num : 'Account');
+      const wins = [a.five_hour, a.seven_day].concat(Array.isArray(a.scoped) ? a.scoped : [])
+        .filter(w => w && typeof w === 'object' && usageText(w.name, 40));
+      const seen = new Set();
+      const windows = wins.map(w => {
+        const name = usageText(w.name, 40);
+        const pct = typeof w.pct === 'number' && isFinite(w.pct) ? Math.min(100, Math.max(0, w.pct)) : null;
+        const resetAt = typeof w.reset_at === 'string' ? Date.parse(w.reset_at) : NaN;
+        return { key: key + ':' + name, name, pct, level: usageLevel(pct), countdown: usageText(w.countdown, 40), resetAt: isFinite(resetAt) ? resetAt : null };
+      }).filter(w => !seen.has(w.key) && seen.add(w.key));
+      const status = usageText(a.usage_status, 32);
+      return { key, num, label, plan: usageText(a.plan, 32), active: a.active === true, status, windows };
+    });
+    const low = [];
+    accounts.forEach(a => a.windows.forEach(w => { if (w.level !== 'ok') low.push({ account: a.label, name: w.name, pct: w.pct }); }));
+    low.sort((x, y) => y.pct - x.pct);
+    const readAt = typeof u.read_at === 'string' ? Date.parse(u.read_at) : NaN;
+    return {
+      show: true,
+      state: u.state === 'stale' || u.state === 'unavailable' ? u.state : 'ok',
+      readAt: isFinite(readAt) ? readAt : null,
+      detail: usageText(u.detail, 300),
+      noRoom: u.no_room === true,
+      warn: low.length > 0,
+      low,
+      accounts,
+    };
+  }
+  const usagePct = p => (p == null ? '—' : Math.round(p) + '%');
+  function usageReset(w) {
+    if (w.countdown) return 'Resets in ' + w.countdown;
+    if (w.resetAt != null) return 'Resets ' + new Date(w.resetAt).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+    return '';
+  }
+  function usageWinHTML(a, w) {
+    const reset = usageReset(w);
+    const said = w.pct == null ? 'no data' : `${usagePct(w.pct)} used${w.level === 'full' ? ', at the limit' : w.level === 'warn' ? ', running low' : ''}`;
+    // The fill is a full-width bar slid left by the share not used; the page animates its transform.
+    const shift = ((w.pct == null ? 0 : w.pct) - 100).toFixed(1);
+    return `<div class="u-win lv-${w.level}" data-ukey="${esc(w.key)}">
+        <div class="u-win-top"><span class="u-name">${esc(w.name)}</span><span class="u-pct">${usagePct(w.pct)}</span></div>
+        <div class="u-track" role="meter" aria-label="${esc(w.name + ' window, ' + a.label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${w.pct == null ? 0 : Math.round(w.pct)}" aria-valuetext="${esc(said + (reset ? ', ' + reset.toLowerCase() : ''))}"><span class="u-fill" data-x="${shift}" style="transform:translateX(${shift}%)"></span></div>
+        <p class="u-sub">${esc(reset)}</p>
+      </div>`;
+  }
+  function usageAccHTML(a) {
+    const sub = [a.plan, a.num != null ? '#' + a.num : '', a.status && !/^ok$/i.test(a.status) ? a.status : ''].filter(Boolean).map(esc).join(' · ');
+    const low = a.windows.some(w => w.level === 'full') ? '<span class="pill tone-bad">Full</span>' : a.windows.some(w => w.level === 'warn') ? '<span class="pill tone-warn">Low</span>' : '';
+    return `<section class="u-acc${a.active ? ' on' : ''}" aria-label="${esc(a.label + (a.active ? ', active account' : ''))}">
+        <div class="u-acc-h"><span class="av tc-${a.active ? 'blue' : 'slate'}" aria-hidden="true">${esc((a.label.replace(/@.*$/, '')[0] || '#').toUpperCase())}</span>
+          <span class="u-acc-t"><span class="u-acc-n">${esc(a.label)}</span>${sub ? `<span class="u-acc-s">${sub}</span>` : ''}</span>
+          ${low}${a.active ? '<span class="pill tone-acc">Active</span>' : ''}</div>
+        ${a.windows.length ? `<div class="u-wins">${a.windows.map(w => usageWinHTML(a, w)).join('')}</div>` : '<p class="u-sub">No usage windows reported.</p>'}
+      </section>`;
+  }
+  function usageHTML(u) {
+    const m = usageModel(u);
+    if (!m.show) return '';
+    const when = m.readAt != null ? `${m.state === 'stale' ? 'Stale · read' : 'Read'} <span data-ago="${m.readAt}" data-f="ago"></span>` : m.state === 'stale' ? 'Stale' : '';
+    let notes = '';
+    if (m.noRoom) {
+      notes += `<div class="u-note u-alert">${svg('alert')}<span><b>No room left.</b> ${esc(m.detail || 'Every account is at a limit. New work waits until a window resets.')}</span></div>`;
+    } else if (m.warn && m.state !== 'unavailable') {
+      const top = m.low[0];
+      const more = m.low.length > 1 ? ` and ${m.low.length - 1} more` : '';
+      notes += `<div class="u-note u-low">${svg('alert')}<span><b>${top.pct >= 100 ? 'At the limit' : 'Running low'}:</b> ${esc(top.account)} ${esc(top.name)} at ${usagePct(top.pct)}${more}.</span></div>`;
+    }
+    let body;
+    if (m.state === 'unavailable') {
+      body = `<div class="u-empty"><span class="ui-tile">${svg('gauge')}</span><p class="u-empty-t">Usage unavailable</p><p class="u-empty-s">${esc(m.detail || 'The feed could not read the account limits.')}</p></div>`;
+    } else if (!m.accounts.length) {
+      body = `<div class="u-empty"><span class="ui-tile">${svg('gauge')}</span><p class="u-empty-t">No accounts</p><p class="u-empty-s">The usage feed lists no Claude accounts.</p></div>`;
+    } else {
+      body = m.accounts.map(usageAccHTML).join('');
+    }
+    return `<section class="u-card u-${m.state}" aria-labelledby="u-title">
+        <div class="u-head"><h3 class="u-title" id="u-title">${svg('gauge')}<span>Usage limits</span></h3>${when ? `<span class="u-when">${when}</span>` : ''}</div>
+        ${notes}<div class="u-body">${body}</div>
+      </section>`;
+  }
+  /* usage:pure:end */
+
+  // Renders the usage card. Each meter glides from its last value to the new one (from zero the first
+  // time the card shows): state indication, 300ms strong ease-out, transform only, none with reduced motion.
+  function twUsage(d) {
+    const box = $('#tw-usage');
+    const html = usageHTML(d.usage);
+    box.hidden = !html;
+    if (!setHTML(box, html)) return;
+    const prev = T.uPct;
+    const now = new Map();
+    $$('.u-win', box).forEach(w => {
+      const fill = $('.u-fill', w), x = +fill.dataset.x;
+      now.set(w.dataset.ukey, x);
+      const from = prev ? prev.get(w.dataset.ukey) : -100;
+      if (from == null || from === x || !motionOK() || !fill.animate || doc.hidden) return;
+      fill.animate([{ transform: `translateX(${from}%)` }, { transform: `translateX(${x}%)` }], { duration: 300, easing: EASE_OUT });
+    });
+    T.uPct = now;
+    const noRoom = usageModel(d.usage).noRoom;
+    if (noRoom && !T.noRoom) announce('No room left on any Claude account');
+    T.noRoom = noRoom;
+  }
+
   function renderTown() {
     const box = $('#town');
     if (box.hidden) return;
     if (!box._ready) {
-      box.innerHTML = `<div class="tw-bar" id="tw-bar"></div><div class="tw-rooms" id="tw-rooms"></div>
+      box.innerHTML = `<div class="tw-bar" id="tw-bar"></div><div id="tw-usage" hidden></div><div class="tw-rooms" id="tw-rooms"></div>
         <div class="block-head tw-mail-head" id="tw-mail-head" hidden><h3>Messages</h3><span class="count" id="tw-mail-count"></span></div>
         <div id="tw-mail" hidden></div><div class="tw-layer" id="tw-layer" aria-hidden="true"></div>`;
       box._ready = true; box._rooms = new Map(); box._ags = new Map();
@@ -2200,6 +2152,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     if (!d) {
       rooms.dataset.kind = 'wait'; box._rooms.clear(); box._ags.clear();
       setHTML($('#tw-bar'), '');
+      const u = $('#tw-usage'); u.hidden = true; setHTML(u, ''); T.uPct = null;
       setHTML(rooms, T.err
         ? `<div class="empty">${svg('wifiOff')}<p class="empty-title">Town feed not reachable</p><p class="empty-sub">${esc(T.err[0].toUpperCase() + T.err.slice(1))}. Retrying every few seconds.</p></div>`
         : `<div aria-hidden="true"><span class="sk tw-sk"></span><span class="sk tw-sk"></span></div><span class="sr-only">Loading the town</span>`);
@@ -2220,9 +2173,11 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       }
       keep.add(r.id);
       R.el.classList.toggle('hub', r.kind === 'hub');
-      setHTML(R.plate, (r.kind === 'hub' ? TW_STAR : '') + `<span class="plate-t">${esc(r.title)}</span>` + (r.kind === 'hub' ? '<span class="sr-only">, hub</span>' : ''));
+      setHTML(R.plate, svg(r.kind === 'hub' ? 'star' : 'town') + `<span class="plate-t">${esc(r.title)}</span>` + (r.kind === 'hub' ? '<span class="sr-only">, hub</span>' : ''));
+      const n = L.agents.get(r.id).length;
+      setText(R.count, n ? plural(n, 'agent', 'agents') : '');
       twBoard(R, r, L.tasks.get(r.id));
-      twFloor(box, R, r, L.agents.get(r.id));
+      twFloor(box, R, r, L.agents.get(r.id), rooms._ready);
       els.push(R.el);
     });
     for (const [id, R] of box._rooms) if (!keep.has(id)) { R.el.remove(); box._rooms.delete(id); }
@@ -2230,28 +2185,31 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     for (const [name, A] of box._ags) if (!A.seen) { A.el.remove(); box._ags.delete(name); }
     rooms._ready = true;
     twBar(d);
+    twUsage(d);
     twMail(d);
     setText($('#s-count'), d.agents.length ? plural(d.agents.length, 'agent', 'agents') : '');
   }
   let twSeq = 0;
+  // A room: a tray with its title and agent count; the card on it holds the agents and, last, the tasks row.
   function twRoomEl() {
     const el = doc.createElement('section');
     const hid = 'twr-' + (++twSeq);
-    el.className = 'room tw-px';
+    el.className = 'room';
     el.setAttribute('aria-labelledby', hid);
-    el.innerHTML = `<div class="room-wall"><h3 class="plate tw-px" id="${hid}"></h3><span class="win" aria-hidden="true"></span><button type="button" class="tboard" aria-haspopup="dialog"></button></div><div class="room-floor"></div>`;
+    el.innerHTML = `<div class="room-h"><h3 class="plate" id="${hid}"></h3><span class="room-n"></span></div>
+      <div class="room-card"><div class="room-floor"></div><button type="button" class="tboard" aria-haspopup="dialog"></button></div>`;
     el.addEventListener('animationend', e => { if (e.target === el) el.classList.remove('enter'); });
-    return { el, plate: el.querySelector('.plate'), board: el.querySelector('.tboard'), floor: el.querySelector('.room-floor'), zones: new Map(), empty: null };
+    return { el, plate: el.querySelector('.plate'), count: el.querySelector('.room-n'), board: el.querySelector('.tboard'), floor: el.querySelector('.room-floor'), zones: new Map(), empty: null };
   }
   function twBoard(R, r, tasks) {
     R.board.dataset.townTasks = r.id;
     const n = tasks.length;
-    setHTML(R.board, `<span class="sr-only">Open tasks in ${esc(r.title)}: ${n}. </span><span class="tb-h" aria-hidden="true"><span>Tasks</span><span class="tb-n">${n}</span></span>` +
-      (n ? tasks.slice(0, 3).map(t => `<span class="tb-l">${esc(t.title)}</span>`).join('') + (n > 3 ? `<span class="tb-more">+${n - 3} more</span>` : '')
-        : '<span class="tb-none">No open tasks</span>'));
+    setHTML(R.board, `<span class="ui-tile" aria-hidden="true">${svg('list')}</span><span class="sr-only">Open tasks in ${esc(r.title)}: ${n}. </span>` +
+      `<span class="tb-main" aria-hidden="true"><span class="tb-h">Tasks</span><span class="tb-l">${n ? esc(tasks[0].title) : 'No open tasks'}</span></span>` +
+      `<span class="tb-n" aria-hidden="true">${n}</span>${svg('chevR', 'chev-r')}`);
   }
-  // The floor: one zone per department (a rug with a label), agents sorted by name, so nobody moves between polls.
-  function twFloor(box, R, room, agents) {
+  // The card: one group per department (a small label on top), agents sorted by name, so nobody moves between polls.
+  function twFloor(box, R, room, agents, settled) {
     const groups = new Map();
     agents.slice().sort((a, b) => a.department.localeCompare(b.department) || a.name.localeCompare(b.name))
       .forEach(a => { const k = a.department || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); });
@@ -2267,7 +2225,7 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       }
       keep.add(dept);
       list.forEach((a, i) => {
-        const el = twAgent(box, a, room), at = Z.el.children[i + Z.off];
+        const el = twAgent(box, a, room, settled), at = Z.el.children[i + Z.off];
         if (at !== el) Z.el.insertBefore(el, at || null);
       });
       zones.push(Z.el);
@@ -2279,14 +2237,12 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     } else if (R.empty) { R.empty.remove(); R.empty = null; }
     zones.forEach((el, i) => { if (R.floor.children[i] !== el) R.floor.insertBefore(el, R.floor.children[i] || null); });
   }
-  // One button per agent, reused across polls. Its class changes only when its state does, so the
-  // animations of unchanged agents never restart.
-  // "sales@shop" in the room "shop" is just "sales" on its name tag; the full name stays in the label and the sheet.
   // The name Kyrylo knows an agent by (display_name from the feed), else its inbox name.
   function twWho(name) {
     const a = name && T.data ? T.data.agents.find(x => x.name === name) : null;
     return (a && a.display_name) || name;
   }
+  // "sales@shop" in the room "shop" is just "sales" on its row; the full name stays in the label and the sheet.
   function twShort(name, room) {
     const at = name.lastIndexOf('@');
     const suf = at > 0 ? name.slice(at + 1).toLowerCase() : '';
@@ -2294,33 +2250,43 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     const same = k => (k = String(k || '').toLowerCase()) && (k === suf || /^[-_ .]/.test(k.slice(suf.length)) && k.startsWith(suf));
     return same(room.id) || same(room.title) ? name.slice(0, at) : name;
   }
-  function twAgent(box, a, room) {
+  // The second line of a row: what the agent waits for, what it does, or who it is.
+  function twSub(a) {
+    if (a.state === 'waiting') return a.waiting_for ? (/^waiting\b/i.test(a.waiting_for) ? a.waiting_for : 'Waiting for ' + a.waiting_for) : 'Waiting for you';
+    return a.activity || a.role || TW_KIND_LABEL[a.kind] || 'Agent';
+  }
+  function twStatus(a) {
+    if (a.state === 'busy') return '<span class="ui-spin"></span>Busy';
+    if (a.state === 'waiting') return '<span class="pill tone-need"><span class="dot"></span>Waiting</span>';
+    if (a.state === 'offline') return 'Offline';
+    const t = [a.last_out, a.last_in].filter(v => typeof v === 'number').sort((x, y) => y - x)[0];
+    return t ? `<span data-ago="${t}" data-f="rel"></span>` : 'Idle';
+  }
+  // One row per agent, reused across polls. Its state class changes only when the state does; then its
+  // status pops in (160ms) so the change is seen. A new agent after the first paint fades up once.
+  function twAgent(box, a, room, settled) {
     let A = box._ags.get(a.name);
     if (!A) {
       const el = doc.createElement('button');
       el.type = 'button';
       el.setAttribute('aria-haspopup', 'dialog');
-      const h = twHash(a.name);
-      el.style.setProperty('--ad', -(h % 3200) + 'ms');
-      el.style.setProperty('--bd', -((h >>> 12) % 5200) + 'ms');
-      el.innerHTML = `<span class="ag-bub" aria-hidden="true"></span><span class="ag-stand" aria-hidden="true"><span class="ag-fig"><svg class="spr" viewBox="0 0 16 16" focusable="false"><use/><use class="blink"/></svg></span><svg class="ag-lap" viewBox="0 0 16 16" focusable="false"><use href="#tws-lap"/></svg></span><span class="ag-name"></span>`;
-      A = { el, kind: '', cls: '', bub: el.querySelector('.ag-bub'), uses: el.querySelectorAll('.spr use'), name: el.querySelector('.ag-name') };
+      el.innerHTML = `<span class="ag-av"></span><span class="ag-main" aria-hidden="true"><span class="ag-name"></span><span class="ag-sub"></span></span><span class="ag-st" aria-hidden="true"></span>${svg('chevR', 'chev-r')}`;
+      el.addEventListener('animationend', e => { if (e.target === el) el.classList.remove('enter'); else e.target.classList.remove('pop'); });
+      el.className = 'ag';
+      A = { el, state: null, av: el.querySelector('.ag-av'), name: el.querySelector('.ag-name'), sub: el.querySelector('.ag-sub'), st: el.querySelector('.ag-st') };
       box._ags.set(a.name, A);
+      if (settled && motionOK()) el.classList.add('enter');
     }
     A.seen = true;
     A.el.dataset.townAg = a.name;
-    const sk = TW_KIND[a.kind] || 'other';
-    if (A.kind !== sk) {
-      A.kind = sk;
-      A.uses[0].setAttribute('href', '#tws-' + sk);
-      A.uses[1].setAttribute('href', '#tws-' + sk + '-b');
-    }
-    const cls = 'ag st-' + (TW_STATE[a.state] ? a.state : 'idle');
-    if (A.cls !== cls) {
-      A.el.className = cls; A.cls = cls;
-      A.bub.innerHTML = a.state === 'waiting' ? TW_BANG : a.state === 'busy' ? TW_TALK : '';
-    }
-    setText(A.name, a.display_name || twShort(a.name, room));
+    const shown = a.display_name || twShort(a.name, room);
+    setHTML(A.av, twAvatar(a.name, shown));
+    const st = TW_STATE[a.state] ? a.state : 'idle';
+    const changed = A.state != null && A.state !== st;
+    if (A.state !== st) { if (A.state) A.el.classList.remove('st-' + A.state); A.el.classList.add('st-' + st); A.state = st; }
+    setText(A.name, shown);
+    setText(A.sub, twSub(a));
+    if (setHTML(A.st, twStatus(a)) && changed && motionOK()) { A.st.classList.remove('pop'); void A.st.offsetWidth; A.st.classList.add('pop'); }
     const label = `${a.display_name || a.name}, ${TW_STATE[a.state] || 'Idle'}${a.role ? ', ' + a.role : ''}${a.state === 'waiting' && a.waiting_for ? ', waiting for ' + a.waiting_for : ''}`;
     if (A.el.getAttribute('aria-label') !== label) A.el.setAttribute('aria-label', label);
     return A.el;
@@ -2348,8 +2314,9 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
         ${m.preview ? `<span class="tw-prev">${esc(m.preview)}</span>` : ''}</button></li>`).join('')}</ul>` : '');
   }
 
-  // An envelope flies from the sender to the receiver when both are on screen, then waits by the
-  // receiver for a few seconds; a tap opens the message. The Messages list below has every message too.
+  // An envelope tile flies from the sender's avatar to the receiver's when both are on screen, then waits
+  // there a few seconds; a tap opens the message. The Messages list below has every message too.
+  // Spatial purpose (who wrote to whom), occasional, so it may take longer than a UI transition: 400–700ms.
   function twFly(m, i) {
     const box = $('#town'), layer = $('#tw-layer');
     if (!layer || box.hidden || !box._ags || m.from === m.to) return;
@@ -2359,23 +2326,23 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
     const seen = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.bottom > 0 && r.top < vh; };
     if (!seen(F.el) || !seen(A.el)) return;
     const br = box.getBoundingClientRect();
-    // Lands at the top-left of the head; the "!" and typing bubbles sit at the top-right.
-    const spot = el => { const r = el.querySelector('.ag-stand').getBoundingClientRect(); return { x: Math.round(r.left - br.left - 8), y: Math.round(r.top - br.top - 10) }; };
+    // Lands on the top-left corner of the avatar; the state dot sits bottom-right.
+    const spot = el => { const r = el.querySelector('.av').getBoundingClientRect(); return { x: Math.round(r.left - br.left - 10), y: Math.round(r.top - br.top - 12) }; };
     const a = spot(F.el), b = spot(A.el);
     b.x += i * 9; // two letters for one receiver sit side by side
     const env = doc.createElement('button');
     env.type = 'button'; env.className = 'mail'; env.tabIndex = -1;
     env.setAttribute('aria-hidden', 'true');
     env.dataset.townMsg = m.id;
-    env.innerHTML = `<span class="mail-i"><svg viewBox="0 0 8 6" focusable="false"><use href="#tws-mail"/></svg></span>`;
+    env.innerHTML = `<span class="mail-i">${svg('mail')}</span>`;
     const end = `translate(${b.x}px, ${b.y}px)`;
     env.style.transform = end;
     layer.appendChild(env);
     let dur = 0;
     if (motionOK() && env.animate) {
       const dist = Math.hypot(b.x - a.x, b.y - a.y);
-      dur = Math.round(Math.min(950, Math.max(520, 360 + dist * .8)));
-      const arc = Math.round(Math.min(54, 18 + dist * .12));
+      dur = Math.round(Math.min(700, Math.max(400, 300 + dist * .6)));
+      const arc = Math.round(Math.min(40, 14 + dist * .1));
       // Path: ease-in-out (moving across the screen). Arc: rises fast and falls back, like a thrown letter.
       env.animate([{ transform: `translate(${a.x}px, ${a.y}px)` }, { transform: end }], { duration: dur, easing: EASE_IN_OUT });
       env.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE_OUT });
@@ -2425,12 +2392,11 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       if (!a) { setHTML(el, gone('This agent is not in the feed.')); return; }
       Z.last = a;
       const L = twLayout(d);
-      const sk = TW_KIND[a.kind] || 'other';
       const msgs = d.messages.filter(m => m.from === a.name || m.to === a.name).slice(0, 10);
       const tasks = d.tasks.filter(t => t.owner === a.name && twOpen(t)).sort(twByUpdate).slice(0, 8);
       const wait = a.waiting_for ? (/^waiting\b/i.test(a.waiting_for) ? a.waiting_for : 'Waiting for ' + a.waiting_for) : 'Waiting';
       setHTML(el, (live ? '' : gone('This agent left the feed. Showing the last data seen.')) +
-        `<div class="tw-hero"><span class="tw-hero-art${a.state === 'offline' ? ' off' : ''}" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><use href="#tws-${sk}"/></svg></span>
+        `<div class="tw-hero"><span class="st-${TW_STATE[a.state] ? a.state : 'idle'}">${twAvatar(a.name, a.display_name || a.name, true)}</span>
           <div class="tw-hero-t">${twPill(a.state)}${a.display_name ? `<p class="tw-hero-sub">${esc(a.name)}</p>` : ''}${a.role ? `<p class="tw-hero-role">${esc(a.role)}</p>` : ''}<p class="tw-hero-sub">${[a.department, TW_KIND_LABEL[a.kind] || 'Agent'].filter(Boolean).map(esc).join(' · ')}</p></div></div>` +
         (a.state === 'waiting' ? `<div class="tw-wait">${svg('alert')}<span>${esc(wait)}</span></div>` : '') +
         `<dl class="d-grid">
@@ -3637,7 +3603,6 @@ html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); 
       try { WA.onEvent('deactivated', () => { S.paused = true; clearTimeout(timer); townStop(); }); } catch (_) {}
     }
   }
-  twDefs();
   applyTheme();
   render();
   poll();

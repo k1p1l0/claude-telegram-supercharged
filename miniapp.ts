@@ -861,11 +861,13 @@ const delegateKey = (st: Stats) => `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}
  * The folder must be one we trust (delegateDirProblem) and the file a regular file of this user that group and others
  * cannot write, at most max bytes. A symlink, FIFO, socket or device is never opened (lstat first), and if one is
  * swapped in after that, O_NOFOLLOW, O_NONBLOCK and the fstat of the opened descriptor refuse it. After the open, the
- * folder must be the same one and the path must still lead to the opened file, so a folder swapped in and back again
- * is caught. At most size + 1 (so at most max + 1) bytes are read; a file that grows or shrinks while it is read is
- * refused, and so is one whose device, inode, size, mtime or ctime differ after the read (a same-size write in place).
- * A write that leaves all of them the same (within one tick of a file system's clock) is not seen.
- * The folders above the file's folder are not checked or pinned: the caller must trust them.
+ * folder must be the same one and the path must still lead to the opened file. That catches a folder swapped in for
+ * the open and back before these checks, but not every swap: each check walks the path again, so someone who controls
+ * a folder above can swap it in and out between them. At most size + 1 (so at most max + 1) bytes are read; a file
+ * that grows or shrinks while it is read is refused, and so is one whose device, inode, size, mtime or ctime differ
+ * after the read (a same-size write in place). A write that leaves all of them the same (within one tick of a file
+ * system's clock) is not seen. The folders above the file's folder are not checked or pinned: the caller must trust
+ * them, and that trust is the real protection against swaps.
  */
 export function readDelegateBundle(
   path: string,
@@ -894,7 +896,7 @@ export function readDelegateBundle(
     const now = lstatSync(parent);
     if (now.dev !== dir.dev || now.ino !== dir.ino || delegateDirProblem(now, uid))
       return { why: "its folder changed" };
-    // And the path must lead to the file we opened, not to one that was there while a folder was swapped.
+    // And the path must lead to the file we opened. This narrows a folder swap, it does not rule one out.
     const at = lstatSync(path);
     if (at.dev !== st.dev || at.ino !== st.ino) return { why: "it was replaced while it was opened" };
     const key = delegateKey(st);

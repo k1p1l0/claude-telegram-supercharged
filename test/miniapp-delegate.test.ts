@@ -227,7 +227,8 @@ describe("delegateBundleReader", () => {
     expect(why(readDelegateBundle(path, 1000, uid, "", { beforeOpen: swap }))).toContain("folder changed");
   });
 
-  test("a folder or a folder above it swapped in for the open and back is refused", () => {
+  test("a folder or a folder above it swapped in for the open and back before the checks is refused", () => {
+    // One case the check after the open catches. It does not rule out a swap timed around each check: see the README.
     // The file's folder: the check of the folder passes again, but the path no longer leads to the opened file.
     const d = privateDir();
     const path = put(join(d, "b.js"), STUB);

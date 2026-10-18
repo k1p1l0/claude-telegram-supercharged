@@ -513,7 +513,8 @@ const str = (v: unknown) => (typeof v === "string" ? v : "");
 //
 // TELEGRAM_MINIAPP_TOWN_FEED points at a JSON feed (schema version 1) that something else produces.
 // The server fetches it with TELEGRAM_MINIAPP_TOWN_TOKEN, so the token never reaches the browser,
-// and passes on only the known fields, clipped. The page draws each agent as a character in a room.
+// and passes on only the known fields, clipped. The page shows each room as a card with its agents as rows,
+// and the Claude accounts' usage limits when the feed has a usage block.
 
 type TownState = "busy" | "waiting" | "idle" | "offline";
 type TownKind = "claude-daemon" | "pi" | "claude-session" | "other";
@@ -556,6 +557,31 @@ interface TownTask {
   owner: string;
   updated_at: number | null;
 }
+/** One usage window of a Claude account: 5 h, 7 d, or a scoped one such as Fable. */
+interface UsageWindow {
+  name: string;
+  /** Share used, 0 to 100; null when the feed sent no number. */
+  pct: number | null;
+  countdown: string | null;
+  reset_at: string | null;
+}
+interface UsageAccount {
+  number: number | null;
+  label: string;
+  plan: string;
+  active: boolean;
+  usage_status: string;
+  five_hour: UsageWindow | null;
+  seven_day: UsageWindow | null;
+  scoped: UsageWindow[];
+}
+export interface TownUsage {
+  state: "ok" | "stale" | "unavailable";
+  read_at: string | null;
+  detail: string | null;
+  no_room: boolean;
+  accounts: UsageAccount[];
+}
 export interface TownFeed {
   version: 1;
   generated_at: number | null;
@@ -564,6 +590,7 @@ export interface TownFeed {
   agents: TownAgent[];
   messages: TownMessage[];
   tasks: TownTask[];
+  usage: TownUsage | null;
 }
 
 const TOWN_TIMEOUT_MS = 3000;
@@ -671,6 +698,48 @@ export function parseTownFeed(raw: unknown): TownFeed | null {
     agents,
     messages,
     tasks,
+    usage: parseTownUsage(f.usage),
+  };
+}
+
+const USAGE_STATES = new Set(["ok", "stale", "unavailable"]);
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+// A date string that parses, clipped; anything else is null. The page formats it.
+const usageIso = (v: unknown) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? clip(v, 40) : null);
+
+function usageWindow(v: unknown): UsageWindow | null {
+  if (!isObj(v)) return null;
+  const name = townText(v.name, 40);
+  if (!name) return null;
+  const pct = typeof v.pct === "number" && Number.isFinite(v.pct) ? Math.min(100, Math.max(0, v.pct)) : null;
+  return { name, pct, countdown: townText(v.countdown, 40) || null, reset_at: usageIso(v.reset_at) };
+}
+
+/** Checks the feed's optional usage block (Claude account limits). Returns null when it is missing or the wrong shape. */
+export function parseTownUsage(raw: unknown): TownUsage | null {
+  if (!isObj(raw) || !USAGE_STATES.has(raw.state as string)) return null;
+  const accounts: UsageAccount[] = [];
+  for (const a of townList(raw.accounts, 12)) {
+    const n = typeof a.number === "string" && a.number.trim() ? Number(a.number) : a.number;
+    accounts.push({
+      number: typeof n === "number" && Number.isFinite(n) ? n : null,
+      label: townText(a.label, 64),
+      plan: townText(a.plan, 32),
+      active: a.active === true,
+      usage_status: townText(a.usage_status, 32),
+      five_hour: usageWindow(a.five_hour),
+      seven_day: usageWindow(a.seven_day),
+      scoped: townList(a.scoped, 8)
+        .map(usageWindow)
+        .filter((w): w is UsageWindow => w !== null),
+    });
+  }
+  return {
+    state: raw.state as TownUsage["state"],
+    read_at: usageIso(raw.read_at),
+    detail: townText(raw.detail, 300) || null,
+    no_room: raw.no_room === true,
+    accounts,
   };
 }
 

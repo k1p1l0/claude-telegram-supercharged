@@ -849,19 +849,30 @@ function delegateDirProblem(st: Stats, uid: number): string {
 }
 
 /**
+ * Test hooks for readDelegateBundle: beforeOpen runs after the first checks, afterOpen right after open(), afterStat
+ * between the fstat checks and the read.
+ */
+export type DelegateHooks = { beforeOpen?: () => void; afterOpen?: () => void; afterStat?: (fd: number) => void };
+
+const delegateKey = (st: Stats) => `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+
+/**
  * Reads the bundle once, through one opened descriptor, so nothing can be swapped in between the checks and the read.
  * The folder must be one we trust (delegateDirProblem) and the file a regular file of this user that group and others
  * cannot write, at most max bytes. A symlink, FIFO, socket or device is never opened (lstat first), and if one is
- * swapped in after that, O_NOFOLLOW, O_NONBLOCK and the fstat of the opened descriptor refuse it. At most size + 1
- * (so at most max + 1) bytes are read; a file that grows or shrinks while it is read is refused.
- * afterStat is for tests: it runs between the fstat and the read.
+ * swapped in after that, O_NOFOLLOW, O_NONBLOCK and the fstat of the opened descriptor refuse it. After the open, the
+ * folder must be the same one and the path must still lead to the opened file, so a folder swapped in and back again
+ * is caught. At most size + 1 (so at most max + 1) bytes are read; a file that grows or shrinks while it is read is
+ * refused, and so is one whose device, inode, size, mtime or ctime differ after the read (a same-size write in place).
+ * A write that leaves all of them the same (within one tick of a file system's clock) is not seen.
+ * The folders above the file's folder are not checked or pinned: the caller must trust them.
  */
 export function readDelegateBundle(
   path: string,
   max: number,
   uid: number,
   cachedKey = "",
-  afterStat?: (fd: number) => void,
+  hooks: DelegateHooks = {},
 ): DelegateRead {
   if (DELEGATE_OPEN < 0 || uid < 0) return { why: "this platform has no O_NOFOLLOW or user ids" };
   const parent = dirname(path);
@@ -871,7 +882,9 @@ export function readDelegateBundle(
     const bad = delegateDirProblem(dir, uid);
     if (bad) return { why: bad };
     if (!lstatSync(path).isFile()) return { why: "it is not a regular file" };
+    hooks.beforeOpen?.();
     fd = openSync(path, DELEGATE_OPEN);
+    hooks.afterOpen?.();
     const st = fstatSync(fd);
     if (!st.isFile()) return { why: "it is not a regular file" };
     if (st.uid !== uid) return { why: "it belongs to another user" };
@@ -881,9 +894,12 @@ export function readDelegateBundle(
     const now = lstatSync(parent);
     if (now.dev !== dir.dev || now.ino !== dir.ino || delegateDirProblem(now, uid))
       return { why: "its folder changed" };
-    const key = `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+    // And the path must lead to the file we opened, not to one that was there while a folder was swapped.
+    const at = lstatSync(path);
+    if (at.dev !== st.dev || at.ino !== st.ino) return { why: "it was replaced while it was opened" };
+    const key = delegateKey(st);
     if (key === cachedKey) return { key };
-    afterStat?.(fd);
+    hooks.afterStat?.(fd);
     const buf = new Uint8Array(st.size + 1);
     let n = 0;
     while (n < buf.length) {
@@ -892,6 +908,7 @@ export function readDelegateBundle(
       n += got;
     }
     if (n !== st.size) return { why: n > st.size ? "it grew while it was read" : "it shrank while it was read" };
+    if (delegateKey(fstatSync(fd)) !== key) return { why: "it changed while it was read" };
     return { key, code: buf.slice(0, n) };
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
@@ -919,7 +936,7 @@ export function delegateBundleReader(
   let said = "";
   return () => {
     if (!path) return null;
-    const r = readDelegateBundle(path, max, uid, cache?.key, o.afterStat);
+    const r = readDelegateBundle(path, max, uid, cache?.key, { afterStat: o.afterStat });
     if ("why" in r) {
       cache = null;
       if (r.why && r.why !== said) o.log?.(`mini app: the Delegate board bundle is refused, ${r.why}: ${path}`);

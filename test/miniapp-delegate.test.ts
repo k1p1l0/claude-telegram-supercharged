@@ -18,7 +18,9 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  utimesSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -178,16 +180,92 @@ describe("delegateBundleReader", () => {
     const grow = () => appendFileSync(path, "y".repeat(500));
     expect(delegateBundleReader(path, { max: 100, afterStat: grow })()).toBeNull();
     put(path, "x".repeat(50));
-    expect(why(readDelegateBundle(path, 100, uid, "", grow))).toContain("grew");
+    expect(why(readDelegateBundle(path, 100, uid, "", { afterStat: grow }))).toContain("grew");
     // Grown past the cap: still refused, without reading the rest.
     put(path, "x".repeat(100));
-    expect(why(readDelegateBundle(path, 100, uid, "", grow))).toContain("grew");
+    expect(why(readDelegateBundle(path, 100, uid, "", { afterStat: grow }))).toContain("grew");
     // And one that shrinks.
     put(path, "x".repeat(50));
-    expect(why(readDelegateBundle(path, 100, uid, "", () => truncateSync(path, 10)))).toContain("shrank");
+    expect(why(readDelegateBundle(path, 100, uid, "", { afterStat: () => truncateSync(path, 10) }))).toContain(
+      "shrank",
+    );
     // Left alone, the same file reads fine.
     put(path, "x".repeat(50));
     expect(delegateBundleReader(path, { max: 100 })()?.length).toBe(50);
+  });
+
+  test("a same-size write in place while it is read is refused (its mtime changed)", () => {
+    const d = privateDir();
+    const path = put(join(d, "b.js"), "a".repeat(50));
+    // The file was written a while ago, so the write below moves its mtime even on a clock with coarse ticks.
+    const aged = () => utimesSync(path, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    const rewrite = () => {
+      const fd = openSync(path, "r+");
+      try {
+        writeSync(fd, "b".repeat(50), 0);
+      } finally {
+        closeSync(fd);
+      }
+    };
+    aged();
+    expect(why(readDelegateBundle(path, 100, uid, "", { afterStat: rewrite }))).toContain("changed while it was read");
+    aged();
+    expect(delegateBundleReader(path, { max: 100, afterStat: rewrite })()).toBeNull();
+    // Left alone, the new bytes read fine.
+    expect(text(delegateBundleReader(path, { max: 100 })())).toBe("b".repeat(50));
+  });
+
+  test("a folder replaced before the open is refused", () => {
+    const d = privateDir();
+    const path = put(join(d, "b.js"), STUB);
+    const swap = () => {
+      renameSync(d, `${d}.old`);
+      mkdirSync(d, { mode: 0o700 });
+      chmodSync(d, 0o700);
+      put(join(d, "b.js"), "window.swapped = 1;");
+    };
+    expect(why(readDelegateBundle(path, 1000, uid, "", { beforeOpen: swap }))).toContain("folder changed");
+  });
+
+  test("a folder or a folder above it swapped in for the open and back is refused", () => {
+    // The file's folder: the check of the folder passes again, but the path no longer leads to the opened file.
+    const d = privateDir();
+    const path = put(join(d, "b.js"), STUB);
+    const other = privateDir();
+    put(join(other, "b.js"), "window.swapped = 1;");
+    const away = `${d}.away`;
+    const parentIn = () => {
+      renameSync(d, away);
+      renameSync(other, d);
+    };
+    const parentBack = () => {
+      renameSync(d, other);
+      renameSync(away, d);
+    };
+    expect(why(readDelegateBundle(path, 1000, uid, "", { beforeOpen: parentIn, afterOpen: parentBack }))).toContain(
+      "replaced while it was opened",
+    );
+    expect(text(delegateBundleReader(path)())).toBe(STUB);
+    // A folder above it, with a private folder of ours inside: caught the same way.
+    const top = privateDir();
+    mkdirSync(join(top, "p"), { mode: 0o700 });
+    const deep = put(join(top, "p", "b.js"), STUB);
+    const fake = privateDir();
+    mkdirSync(join(fake, "p"), { mode: 0o700 });
+    put(join(fake, "p", "b.js"), "window.swapped = 1;");
+    const topAway = `${top}.away`;
+    const topIn = () => {
+      renameSync(top, topAway);
+      renameSync(fake, top);
+    };
+    const topBack = () => {
+      renameSync(top, fake);
+      renameSync(topAway, top);
+    };
+    expect(why(readDelegateBundle(deep, 1000, uid, "", { beforeOpen: topIn, afterOpen: topBack }))).toContain(
+      "replaced while it was opened",
+    );
+    expect(text(delegateBundleReader(deep)())).toBe(STUB);
   });
 
   test("a folder that group or others can write, or that another user owns, is refused", () => {

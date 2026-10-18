@@ -1527,7 +1527,7 @@ const mcp = new Server(
     instructions: [
       "CRITICAL — READ THIS FIRST: Every user-visible output MUST go through the reply tool. Your terminal output is INVISIBLE to the user — they are on a phone reading Telegram. If you write a question, a list, a recommendation, or any text meant for the user WITHOUT calling reply, they will never see it and will think you are broken. This includes follow-up questions, clarifications, option menus, and decision prompts — ALL of them must be sent via reply.",
       "",
-      "PROGRESS NARRATION: before each tool call, write one short plain-text sentence about what you are about to do (e.g. \"Reading the README to see the install steps.\"). Telegram shows these live in a progress bubble. They are not answers: answers still go through the reply tool.",
+      'PROGRESS NARRATION: before each tool call, write one short plain-text sentence about what you are about to do (e.g. "Reading the README to see the install steps."). Telegram shows these live in a progress bubble. They are not answers: answers still go through the reply tool.',
       "",
       "EXAMPLES: (a) WRONG: responding with 'Which voice do you want, A or B?' in your normal output. (b) RIGHT: calling reply({ chat_id, text: 'Which voice do you want, A or B?' }). (c) WRONG: printing a numbered list of decisions for the user to review. (d) RIGHT: calling reply with the same list as the text parameter. If you are asking the user anything, the question goes in a reply call, period.",
       "",
@@ -1615,7 +1615,7 @@ const mcp = new Server(
           ]
         : []),
       "",
-      "URL HANDLING — THREADS: When a message contains a Threads URL (threads.com/@ or threads.net/@), do NOT use WebFetch — Threads blocks it. Instead, check if mcp__threads-scraper__thenetaji-slash-threads-scraper is available via ToolSearch. If available, call it with input: [{\"url\": \"THE_URL\"}]. Extract the post text, author, and engagement metrics. Present as: **@username** > post text > engagement stats. If the tool is not available, fall back to WebFetch.",
+      'URL HANDLING — THREADS: When a message contains a Threads URL (threads.com/@ or threads.net/@), do NOT use WebFetch — Threads blocks it. Instead, check if mcp__threads-scraper__thenetaji-slash-threads-scraper is available via ToolSearch. If available, call it with input: [{"url": "THE_URL"}]. Extract the post text, author, and engagement metrics. Present as: **@username** > post text > engagement stats. If the tool is not available, fall back to WebFetch.',
       "",
       "URL HANDLING — YOUTUBE: When a message contains a YouTube URL (youtube.com/watch, youtu.be/, youtube.com/shorts/), check if mcp__apify-actors__invideoiq-slash-video-transcript-scraper is available. If so, use it to transcribe the video. Pass video_url with the URL. Present the video title, duration, and a summary of the transcript. If the tool is not available, fall back to WebFetch.",
       "",
@@ -3040,7 +3040,9 @@ async function transcribeAudio(audioPath: string): Promise<string | undefined> {
   const result = await withTimeout(transcribeAudioInner(audioPath, controller.signal), TRANSCRIPTION_TIMEOUT_MS);
   controller.abort();
   if (result === undefined) {
-    process.stderr.write(`telegram channel: transcription returned no result (may have timed out after ${TRANSCRIPTION_TIMEOUT_MS / 1000}s)\n`);
+    process.stderr.write(
+      `telegram channel: transcription returned no result (may have timed out after ${TRANSCRIPTION_TIMEOUT_MS / 1000}s)\n`,
+    );
   }
   return result;
 }
@@ -3265,7 +3267,6 @@ bot.on("message:text", async (ctx) => {
   if (await handleAgenticCommand(ctx)) return;
   await handleInbound(ctx, ctx.message.text, undefined, matchCustomCommand(ctx));
 });
-
 
 bot.on("message:photo", async (ctx) => {
   const caption = ctx.message.caption ?? "(photo)";
@@ -3977,7 +3978,11 @@ function pushProgressLine(t: ProgressTurn, line: string): void {
 
 // Claude's short notes between tool calls ("Reading the README first.").
 function narrationLine(text: string, level: number): string | undefined {
-  const first = text.trim().split("\n").find((l) => l.trim()) ?? "";
+  const first =
+    text
+      .trim()
+      .split("\n")
+      .find((l) => l.trim()) ?? "";
   const max = level === 2 ? 300 : 110;
   const clipped = first.length > max ? `${first.slice(0, max - 1)}…` : first;
   return clipped ? `💬 ${clipped}` : undefined;
@@ -4052,7 +4057,14 @@ async function flushProgress(t: ProgressTurn): Promise<void> {
   }
 }
 
-function onProgressEvent(ev: { t?: number; type?: string; tool?: string; short?: string; long?: string; tp?: string }): void {
+function onProgressEvent(ev: {
+  t?: number;
+  type?: string;
+  tool?: string;
+  short?: string;
+  long?: string;
+  tp?: string;
+}): void {
   if (ev.tp) lastTranscript = ev.tp;
   if (ev.type === "stop") {
     for (const t of progressTurns.values()) deleteProgressBubble(t);
@@ -4066,7 +4078,8 @@ function onProgressEvent(ev: { t?: number; type?: string; tool?: string; short?:
     t.phase = "thinking";
     t.phaseAt = ev.t ?? Date.now();
     t.dirty = true;
-    if (t.msgId != null && getVerbose(t.chatId) > 0 && Date.now() - t.lastEdit >= PROGRESS_EDIT_MS) void flushProgress(t);
+    if (t.msgId != null && getVerbose(t.chatId) > 0 && Date.now() - t.lastEdit >= PROGRESS_EDIT_MS)
+      void flushProgress(t);
     return;
   }
   if (ev.type !== "tool") return;
@@ -4661,14 +4674,21 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
     const up = Math.round((Date.now() - serverStartedAt) / 60000);
     const work = t ? `working (${Math.round((Date.now() - t.startedAt) / 1000)}s, ${t.tools} tools)` : "idle";
     await ctx.reply(
-      [`Status: ${work}`, `Uptime: ${up} min`, `Router model: ${ROUTER_MODEL}`, `Verbosity: ${getVerbose(chatId)} (${VERBOSE_LABELS[getVerbose(chatId)]})`].join("\n"),
+      [
+        `Status: ${work}`,
+        `Uptime: ${up} min`,
+        `Router model: ${ROUTER_MODEL}`,
+        `Verbosity: ${getVerbose(chatId)} (${VERBOSE_LABELS[getVerbose(chatId)]})`,
+      ].join("\n"),
     );
     return true;
   }
 
   if (cmd === "agents") {
     if (!miniapp) {
-      await ctx.reply("The agents board is not installed. Copy miniapp.ts and the miniapp folder next to server.ts and restart.");
+      await ctx.reply(
+        "The agents board is not installed. Copy miniapp.ts and the miniapp folder next to server.ts and restart.",
+      );
       return true;
     }
     const url = miniapp.miniAppUrl();
@@ -4933,9 +4953,8 @@ function replayUnanswered(b: BotEntry): void {
       void mcp.notification({
         method: "notifications/claude/channel",
         params: {
-          content: unanswered.length > 1
-            ? `[Replayed ${unanswered.length} messages missed during restart]\n${lines}`
-            : lines,
+          content:
+            unanswered.length > 1 ? `[Replayed ${unanswered.length} messages missed during restart]\n${lines}` : lines,
           meta: {
             chat_id: chatId,
             message_id: last.message_id != null ? String(last.message_id) : undefined,

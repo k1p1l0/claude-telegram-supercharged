@@ -226,13 +226,21 @@ describe.skipIf(!on)("Delegate loader in Chromium", () => {
       } catch {}
     });
     await page.goto(`${base}/full/`);
-    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
-    await page.waitForFunction(`!${el("tw-dg")}.hidden && window.calls.includes("mount")`, null, { timeout: 15000 });
+    // Function predicates only: the Mini App's CSP has no 'unsafe-eval', so a string predicate throws an EvalError.
+    const hidden = (id: string) => page.evaluate((i: string) => (document.getElementById(i) as HTMLElement).hidden, id);
+    await page.waitForFunction(
+      (id: string) => {
+        const e = document.getElementById(id);
+        return !!e && !e.hidden && (window as any).calls.includes("mount");
+      },
+      "tw-dg",
+      { timeout: 15000 },
+    );
     // A rejection with a plain value from the page itself: it names no script, so the board turns off.
     await page.evaluate(() => {
       Promise.reject("page plain value");
     });
-    await page.waitForFunction(`${el("tw-dg")}.hidden`, null, { timeout: 5000 });
+    await page.waitForFunction((id: string) => !!document.getElementById(id)?.hidden, "tw-dg", { timeout: 5000 });
     const read = () =>
       page.evaluate(() => {
         const text = (id: string) => document.getElementById(id)?.textContent ?? "";
@@ -256,14 +264,14 @@ describe.skipIf(!on)("Delegate loader in Chromium", () => {
     expect(after.calls.at(-1)).toBe("unmount");
     // The other views still switch and draw, and the Town comes back with fresh data and no board.
     await page.click('#view-seg button[data-sview="list"]');
-    expect(await page.evaluate(`[${el("town")}.hidden, ${el("sessions")}.hidden]`)).toEqual([true, false]);
+    expect([await hidden("town"), await hidden("sessions")]).toEqual([true, false]);
     await page.click('#view-seg button[data-sview="town"]');
     await page.waitForFunction(
-      `Number((${el("tw-rooms")}.textContent.match(/Hub (\\d+)/) || [])[1] || 0) > ${after.hub}`,
-      null,
+      (seen: number) => Number(document.getElementById("tw-rooms")?.textContent?.match(/Hub (\d+)/)?.[1] ?? 0) > seen,
+      after.hub,
       { timeout: 10000 },
     );
-    expect(await page.evaluate(`${el("tw-dg")}.hidden`)).toBe(true);
+    expect(await hidden("tw-dg")).toBe(true);
     expect(full.bundle).toBe(1);
     await page.close();
   }, 40000);

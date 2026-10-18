@@ -301,8 +301,11 @@ type Page = {
   delegateApi: (w: unknown) => { mount: unknown } | null;
   delegateProps: (d: unknown, theme: unknown) => { town: { agents: unknown[]; tasks: unknown[] }; theme: string };
   delegateHandle: (h: unknown) => boolean;
+  delegateOwns: (ev: unknown, url: string, loading?: boolean) => boolean;
 };
-const page = new Function(`${block?.[1] ?? ""}; return { delegateApi, delegateProps, delegateHandle };`)() as Page;
+const page = new Function(
+  `${block?.[1] ?? ""}; return { delegateApi, delegateProps, delegateHandle, delegateOwns };`,
+)() as Page;
 
 describe("Delegate loader (page)", () => {
   test("the helpers are present in the page", () => {
@@ -335,5 +338,254 @@ describe("Delegate loader (page)", () => {
     expect(page.delegateHandle({ update: fn, unmount: fn })).toBe(true);
     expect(page.delegateHandle({ update: fn })).toBe(false);
     expect(page.delegateHandle(undefined)).toBe(false);
+  });
+});
+
+describe("delegateOwns (which errors are the bundle's)", () => {
+  const url = "blob:https://board.example/1234";
+
+  test("an error event counts when it names the bundle as its file, and only then", () => {
+    expect(page.delegateOwns({ filename: url, error: new Error("x") }, url)).toBe(true);
+    expect(page.delegateOwns({ filename: "https://board.example/", error: new Error("x") }, url, true)).toBe(false);
+    expect(page.delegateOwns({ filename: url }, "")).toBe(false);
+    expect(page.delegateOwns(null, url, true)).toBe(false);
+  });
+
+  test("otherwise the stack must name it; with no stack, only while the bundle loads", () => {
+    const own = { stack: `Error: x\n    at f (${url}:1:20)` };
+    expect(page.delegateOwns({ reason: own }, url)).toBe(true);
+    expect(page.delegateOwns({ error: own }, url)).toBe(true);
+    expect(page.delegateOwns({ reason: { stack: "Error: x\n    at g (https://board.example/:9:1)" } }, url, true)).toBe(
+      false,
+    );
+    expect(page.delegateOwns({ reason: "plain value" }, url, true)).toBe(true);
+    expect(page.delegateOwns({ reason: "plain value" }, url, false)).toBe(false);
+  });
+});
+
+// ── The loader itself (between the loader markers), in a fake page ──
+// The fake runs a bundle the way a browser runs a script: a throw while it runs becomes a window error event that
+// names the blob URL, and then the script's load event fires anyway. fault() and reject() stand in for a timer or a
+// promise in the bundle that fails later. test/miniapp-delegate.browser.test.ts runs the same paths in Chromium.
+
+const loader = html.match(/\/\* delegate:loader:start \*\/([\s\S]*?)\/\* delegate:loader:end \*\//);
+const REGISTER = `window.DelegateBoardBundle = { version: 1, mount(el, p) {
+  window.calls.push('mount'); el.innerHTML = 'board';
+  return { update() { window.calls.push('update'); }, unmount() { window.calls.push('unmount'); } };
+} };`;
+
+type Loader = {
+  DG: { state: string; api: unknown; handle: unknown; retryAt: number };
+  dgLoad: () => Promise<void>;
+  dgSync: () => void;
+};
+
+function fakePage(bundle: string | null | Error, status = 200) {
+  const listeners: Record<string, ((ev: unknown) => void)[]> = { error: [], unhandledrejection: [] };
+  const fire = (type: string, ev: unknown) => {
+    for (const f of [...listeners[type]]) f(ev);
+  };
+  const win: Record<string, any> = {
+    calls: [] as string[],
+    addEventListener(type: string, f: (ev: unknown) => void) {
+      if (!listeners[type].includes(f)) listeners[type].push(f);
+    },
+  };
+  const blobs = new Map<string, Blob>();
+  let nextBlob = 0;
+  const fakeURL = {
+    createObjectURL: (b: Blob) => {
+      const u = `blob:https://board.example/${++nextBlob}`;
+      blobs.set(u, b);
+      return u;
+    },
+    revokeObjectURL: (u: string) => blobs.delete(u),
+  };
+  const doc = {
+    createElement: () => ({}) as Record<string, any>,
+    head: {
+      appendChild(s: Record<string, any>) {
+        setTimeout(async () => {
+          const b = blobs.get(s.src);
+          if (!b) return s.onerror?.();
+          const src = s.src as string;
+          const err = (error: unknown) => fire("error", { filename: src, error, message: String(error) });
+          const fault = (e: unknown, ms = 0) => setTimeout(() => err(e), ms);
+          const reject = (reason: unknown, ms = 0) => setTimeout(() => fire("unhandledrejection", { reason }), ms);
+          try {
+            new Function("window", "fault", "reject", `"use strict";\n${await b.text()}`)(win, fault, reject);
+          } catch (e) {
+            err(e);
+          }
+          s.onload?.();
+        }, 0);
+      },
+    },
+  };
+  const sec = { hidden: true };
+  const el = {
+    innerHTML: "",
+    get firstChild() {
+      return this.innerHTML ? {} : null;
+    },
+  };
+  const $ = (q: string) => (q === "#tw-dg" ? sec : q === "#tw-dg-mount" ? el : null);
+  const T = { data: { agents: [], tasks: [] } };
+  let fetches = 0;
+  const fakeFetch = async () => {
+    fetches++;
+    if (bundle instanceof Error) throw bundle;
+    return bundle === null ? new Response(null, { status: 404 }) : new Response(bundle, { status });
+  };
+  const dg = new Function(
+    "window",
+    "doc",
+    "$",
+    "T",
+    "WA",
+    "TIMEOUT_MS",
+    "scheme",
+    "fetch",
+    "URL",
+    `"use strict";\n${block?.[1] ?? ""}\n${loader?.[1] ?? ""}\nreturn { DG, dgLoad, dgSync };`,
+  )(win, doc, $, T, null, 2000, () => "light", fakeFetch, fakeURL) as Loader;
+  return { dg, win, sec, el, fire, fetches: () => fetches };
+}
+const wait = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+// Off for good: hidden, empty, the global gone or ignored, and no new fetch however often the page syncs.
+function expectOffForGood(p: ReturnType<typeof fakePage>) {
+  expect(p.dg.DG.state).toBe("off");
+  expect(p.dg.DG.api).toBeNull();
+  expect(p.dg.DG.handle).toBeNull();
+  expect(p.sec.hidden).toBe(true);
+  expect(p.el.innerHTML).toBe("");
+  const n = p.fetches();
+  for (let i = 0; i < 3; i++) p.dg.dgSync();
+  expect(p.fetches()).toBe(n);
+  expect(p.dg.DG.state).toBe("off");
+}
+
+describe("Delegate loader fails closed (fake page)", () => {
+  test("the loader is present in the page", () => {
+    expect(loader).not.toBeNull();
+  });
+
+  test("a good bundle mounts once, shows the section and gets updates", async () => {
+    const p = fakePage(REGISTER);
+    await p.dg.dgLoad();
+    expect(p.dg.DG.state).toBe("ready");
+    expect(p.sec.hidden).toBe(false);
+    expect(p.el.innerHTML).toBe("board");
+    p.dg.dgSync();
+    expect(p.win.calls).toEqual(["mount", "update"]);
+  });
+
+  test("registers, then throws while it runs: nothing mounts and the global is deleted", async () => {
+    const p = fakePage(`${REGISTER}\nthrow new Error('after register');`);
+    await p.dg.dgLoad();
+    expect(p.win.calls).toEqual([]);
+    expect("DelegateBoardBundle" in p.win).toBe(false);
+    expectOffForGood(p);
+  });
+
+  test("registers, then a timer throws right after: nothing mounts", async () => {
+    const p = fakePage(`${REGISTER}\nfault(new Error('async'), 0);`);
+    await p.dg.dgLoad();
+    expect(p.win.calls).toEqual([]);
+    expect("DelegateBoardBundle" in p.win).toBe(false);
+    expectOffForGood(p);
+  });
+
+  test("registers, then a promise rejects with a plain value while it loads: nothing mounts", async () => {
+    const p = fakePage(`${REGISTER}\nreject('nope', 0);`);
+    await p.dg.dgLoad();
+    expect(p.win.calls).toEqual([]);
+    expectOffForGood(p);
+  });
+
+  test("a later throw from the bundle unmounts the board and hides it for good", async () => {
+    const p = fakePage(`${REGISTER}\nfault(new Error('late'), 450);`);
+    await p.dg.dgLoad();
+    expect(p.sec.hidden).toBe(false);
+    await wait(400);
+    expect(p.win.calls).toEqual(["mount", "unmount"]);
+    expectOffForGood(p);
+  });
+
+  test("mount throws: hidden, the global deleted, no retry", async () => {
+    const p = fakePage(
+      "window.DelegateBoardBundle = { version: 1, mount(el) { window.calls.push('mount'); el.innerHTML = 'half'; throw new Error('m'); } };",
+    );
+    await p.dg.dgLoad();
+    expect(p.win.calls).toEqual(["mount"]);
+    expect("DelegateBoardBundle" in p.win).toBe(false);
+    expectOffForGood(p);
+  });
+
+  test("mount returns no update(): its unmount() is called and the board stays off", async () => {
+    const p = fakePage(
+      "window.DelegateBoardBundle = { version: 1, mount() { window.calls.push('mount'); return { unmount() { window.calls.push('unmount'); } }; } };",
+    );
+    await p.dg.dgLoad();
+    expect(p.win.calls).toEqual(["mount", "unmount"]);
+    expectOffForGood(p);
+  });
+
+  test("an update() that throws turns the board off", async () => {
+    const p = fakePage(
+      "window.DelegateBoardBundle = { version: 1, mount() { return { update() { throw new Error('u'); }, unmount() { window.calls.push('unmount'); } }; } };",
+    );
+    await p.dg.dgLoad();
+    expect(p.sec.hidden).toBe(false);
+    p.dg.dgSync();
+    expect(p.win.calls).toEqual(["unmount"]);
+    expectOffForGood(p);
+  });
+
+  test("a global the bundle made undeletable is ignored after a throw", async () => {
+    const p = fakePage(`Object.defineProperty(window, 'DelegateBoardBundle', { configurable: false, value: {
+      version: 1, mount() { window.calls.push('mount'); return { update() {}, unmount() {} }; } } });
+    throw new Error('x');`);
+    await p.dg.dgLoad();
+    expect("DelegateBoardBundle" in p.win).toBe(true);
+    expect(p.win.calls).toEqual([]);
+    expectOffForGood(p);
+  });
+
+  test("a global set before the load does not count", async () => {
+    const p = fakePage("/* registers nothing */");
+    p.win.DelegateBoardBundle = { version: 1, mount: () => p.win.calls.push("stale") };
+    await p.dg.dgLoad();
+    expect(p.win.calls).toEqual([]);
+    expectOffForGood(p);
+  });
+
+  test("errors from the page's own code do not turn a running board off", async () => {
+    const p = fakePage(REGISTER);
+    await p.dg.dgLoad();
+    p.fire("error", { filename: "https://board.example/", error: new Error("page") });
+    p.fire("unhandledrejection", { reason: { stack: "Error: page\n    at x (https://board.example/:1:1)" } });
+    p.fire("unhandledrejection", { reason: "plain value" });
+    expect(p.dg.DG.state).toBe("ready");
+    expect(p.sec.hidden).toBe(false);
+  });
+
+  test("no bundle (404) or another version: off, without a retry", async () => {
+    const none = fakePage(null);
+    await none.dg.dgLoad();
+    expectOffForGood(none);
+    const v2 = fakePage("window.DelegateBoardBundle = { version: 2, mount() { window.calls.push('mount'); } };");
+    await v2.dg.dgLoad();
+    expect(v2.win.calls).toEqual([]);
+    expectOffForGood(v2);
+  });
+
+  test("a network error (no bundle ran yet) waits and tries again later", async () => {
+    const p = fakePage(new Error("offline"));
+    await p.dg.dgLoad();
+    expect(p.dg.DG.state).toBe("idle");
+    expect(p.dg.DG.retryAt).toBeGreaterThan(Date.now());
+    p.dg.dgSync();
+    expect(p.fetches()).toBe(1);
   });
 });

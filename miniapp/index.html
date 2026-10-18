@@ -2149,7 +2149,9 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
      GET api/delegate-bundle serves a read-only board that is not part of this repo, when this Mac has it.
      The page runs it once from a Blob URL, mounts it under the rooms and passes it the town's agents and
      tasks on every poll. A 404, a network error, another version or any throw keeps the section hidden.
-     Pure helpers between the markers (test/miniapp-delegate.test.ts loads them). */
+     The bundle runs as trusted same-origin code; this only keeps a broken one off the screen, it is no sandbox.
+     Pure helpers sit between the pure markers, the loader between the loader markers
+     (test/miniapp-delegate.test.ts and test/miniapp-delegate.browser.test.ts load them). */
   /* delegate:pure:start */
   const DELEGATE_VERSION = 1;
   // The bundle's API on window, or null when it is missing or another version.
@@ -2165,11 +2167,39 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     };
   }
   const delegateHandle = h => !!h && typeof h.update === 'function' && typeof h.unmount === 'function';
+  // Whether an error event or an unhandled rejection came from the bundle at url. An error in its code names
+  // url as the file; otherwise the stack must name it. While it loads, an error with no file and no stack
+  // (a rejection with a plain value, say) counts too.
+  function delegateOwns(ev, url, loading) {
+    if (!ev || !url) return false;
+    if (ev.filename) return ev.filename === url;
+    const e = ev.error !== undefined ? ev.error : ev.reason;
+    const stack = e && typeof e === 'object' && typeof e.stack === 'string' ? e.stack : '';
+    return stack ? stack.includes(url) : !!loading;
+  }
   /* delegate:pure:end */
 
-  const DG_SCRIPT_MS = 10000, DG_RETRY_MS = 30000;
-  // state: idle (not fetched yet), loading, ready (the bundle ran), off (no bundle, or it failed).
-  const DG = { state: 'idle', api: null, handle: null, el: null, retryAt: 0 };
+  /* delegate:loader:start */
+  const DG_SCRIPT_MS = 10000, DG_RETRY_MS = 30000, DG_SETTLE_MS = 300;
+  // state: idle (not fetched yet), loading, ready (the bundle ran), off (no bundle, or it failed: until reload).
+  const DG = { state: 'idle', api: null, handle: null, el: null, retryAt: 0, url: '' };
+  function dgForget() {
+    DG.api = null;
+    // A bundle can make the global undeletable; then it is only ignored (DG.api stays null and state off).
+    try { delete window.DelegateBoardBundle; } catch (_) {}
+  }
+  // Turns the board off for good: unmounts it, hides the section, and never loads or mounts again.
+  function dgKill() {
+    DG.state = 'off';
+    dgForget();
+    dgUnmount();
+    dgSync();
+  }
+  // window error and unhandledrejection, from the start of the load on: an uncaught error from the bundle's
+  // code (while it runs, from a timer or promise it started, or later) turns the board off.
+  function dgFault(ev) {
+    if (DG.state !== 'off' && delegateOwns(ev, DG.url, DG.state === 'loading')) dgKill();
+  }
   async function dgLoad() {
     DG.state = 'loading';
     const ctrl = new AbortController();
@@ -2192,7 +2222,13 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
       const code = await res.text();
       clearTimeout(killer);
       url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-      // A CSP block or a load failure fires error; a syntax error or a throw inside only leaves the API unset.
+      DG.url = url;
+      dgForget(); // nothing set before this load counts
+      // The script's load event fires even when its code throws, so a throw while it runs only shows up as a
+      // window error event naming the blob URL. These listeners stay for later faults too.
+      window.addEventListener('error', dgFault);
+      window.addEventListener('unhandledrejection', dgFault);
+      // A CSP block or a load failure fires the script's own error event.
       await new Promise((ok, bad) => {
         const s = doc.createElement('script');
         const t = setTimeout(() => bad(new Error('timeout')), DG_SCRIPT_MS);
@@ -2201,11 +2237,15 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
         s.src = url;
         doc.head.appendChild(s);
       });
+      // A short wait, so a throw from a timer or promise the bundle started fails the load before anything mounts.
+      await new Promise(ok => setTimeout(ok, DG_SETTLE_MS));
+      if (DG.state !== 'loading') throw new Error('fault');
       DG.api = delegateApi(window);
       if (!DG.api) throw new Error('version');
       DG.state = 'ready';
     } catch (_) {
       DG.state = 'off';
+      dgForget();
     } finally {
       clearTimeout(killer);
       if (url) URL.revokeObjectURL(url);
@@ -2233,17 +2273,18 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
       else {
         dgUnmount();
         const h = DG.api.mount(el, props);
-        if (!delegateHandle(h)) throw new Error('mount');
+        if (!delegateHandle(h)) {
+          try { if (h && typeof h.unmount === 'function') h.unmount(); } catch (_) {}
+          throw new Error('mount');
+        }
         DG.handle = h; DG.el = el;
       }
       sec.hidden = false;
     } catch (_) {
-      dgUnmount();
-      DG.state = 'off';
-      el.innerHTML = '';
-      sec.hidden = true;
+      dgKill();
     }
   }
+  /* delegate:loader:end */
 
   function renderTown() {
     const box = $('#town');

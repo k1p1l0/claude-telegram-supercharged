@@ -30,6 +30,12 @@ html[data-theme="light"] {
   --f-fuchsia: #a21caf; --f-slate: #55527a;
   --kb-wait: #e5484d; --kb-run: #3b82f6; --kb-done: #10b981; --kb-col: rgba(118, 124, 140, .08);
   --kb-shadow: 0 1px 2px rgba(16, 22, 34, .05), 0 2px 6px -3px rgba(16, 22, 34, .08);
+  --warn-fg: #8a5a00;
+  /* AffectUI surfaces: a gray tray, white cards on it with a hairline, a raised pill for the picked option */
+  --ui-tray: rgba(118, 124, 140, .09);
+  --ui-card-shadow: inset 0 0 0 1px var(--sep), 0 1px 2px rgba(16, 22, 34, .05);
+  --ui-pill: var(--card);
+  --ui-pill-shadow: 0 0 0 .5px rgba(0, 0, 0, .08), 0 1px 2px rgba(0, 0, 0, .08), 0 2px 8px -2px rgba(0, 0, 0, .06);
 }
 html[data-theme="dark"] {
   --fb-page: #0e0f12; --fb-bg: #18191d; --fb-section: #1a1b20; --fb-text: #f3f4f6;
@@ -48,6 +54,11 @@ html[data-theme="dark"] {
   --f-fuchsia: #f0abfc; --f-slate: #bdb9dc;
   --kb-wait: #f87171; --kb-run: #60a5fa; --kb-done: #34d399; --kb-col: rgba(255, 255, 255, .035);
   --kb-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  --warn-fg: #facc15;
+  --ui-tray: rgba(255, 255, 255, .045);
+  --ui-card-shadow: inset 0 0 0 1px var(--sep), 0 1px 2px rgba(0, 0, 0, .4);
+  --ui-pill: color-mix(in srgb, var(--text) 11%, var(--card));
+  --ui-pill-shadow: 0 0 0 1px rgba(255, 255, 255, .06), 0 1px 2px rgba(0, 0, 0, .4);
 }
 :root {
   --bg: var(--tg-theme-secondary-bg-color, var(--fb-page));
@@ -153,12 +164,15 @@ html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--
 .mm-item[aria-checked="true"] .mm-ico, .mm-check { color: var(--link); }
 .mm-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* ---------- Pills & dots ---------- */
+/* ---------- Status badges & dots ----------
+   AffectUI badges: a small tinted rounded rectangle, not a capsule */
 .pill {
-  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 8px;
-  border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; flex: none; line-height: 1;
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px 0 7px;
+  border-radius: 7px; font-size: 12px; font-weight: 600; white-space: nowrap; flex: none; line-height: 1;
 }
-.pill-lg { height: 28px; padding: 0 11px 0 10px; font-size: 13px; }
+.pill-lg { height: 28px; padding: 0 10px 0 9px; border-radius: 8px; font-size: 13px; }
+.tone-acc { color: var(--link); background: color-mix(in srgb, var(--link) 13%, transparent); }
+.tone-warn { color: var(--warn-fg); background: rgb(234 179 8 / .16); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; position: relative; flex: none; }
 .dot.pulse::after {
   content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit;
@@ -185,7 +199,8 @@ html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--
 .tile { padding: 13px 14px 12px; min-height: 98px; display: flex; flex-direction: column; min-width: 0; }
 .tile-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: var(--hint); }
 .tile-label { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tile-top .ico { width: 15px; height: 15px; opacity: .75; }
+/* The icon sits in a small AffectUI tile */
+.tile-top .ico { width: 26px; height: 26px; padding: 6px; margin: -3px -3px -3px 0; border-radius: 7px; background: var(--ui-tray); box-shadow: inset 0 0 0 1px var(--sep); color: var(--text); stroke-width: 1.9; }
 .tile-val { margin-top: 9px; display: flex; align-items: baseline; gap: 5px; line-height: 1; min-width: 0; }
 .tile-num { font-size: 24px; font-weight: 650; letter-spacing: -.025em; }
 .tile-unit { font-size: 14px; font-weight: 600; color: var(--hint); }
@@ -198,9 +213,10 @@ html[data-theme="dark"] .mmenu { background: linear-gradient(var(--fill), var(--
 .chart { margin-top: 10px; padding: 14px 14px 12px; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; min-height: 30px; }
 .card-title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
-.seg { display: inline-flex; padding: 2px; border-radius: 9px; background: var(--fill); flex: none; }
-.seg button { height: 26px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--hint); transition: background .2s, color .2s; }
-.seg button[aria-pressed="true"] { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04); }
+/* AffectUI Segmented Control (tray): a gray track, the picked option on a raised pill */
+.seg { display: inline-flex; padding: 2px; border-radius: 10px; background: var(--fill); flex: none; }
+.seg button { height: 26px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; font-weight: 600; color: var(--hint); transition: background-color 200ms ease, color 200ms ease; }
+.seg button[aria-pressed="true"] { background: var(--ui-pill); color: var(--text); box-shadow: var(--ui-pill-shadow); }
 .bars { --bar-c: var(--accent); height: 72px; display: flex; align-items: stretch; gap: 3px; touch-action: pan-y; position: relative; }
 .bars.m-out { --bar-c: var(--k-out); }
 .bar { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; border-radius: 3px; }
@@ -344,14 +360,14 @@ button.f-row:active { background: var(--press); }
 .seg-v .ico { width: 14px; height: 14px; }
 .seg-thumb, .seg-copy { position: absolute; top: 2px; bottom: 2px; left: 2px; pointer-events: none; }
 .seg-thumb {
-  z-index: -1; width: calc((100% - 4px) / var(--n)); border-radius: 7px; background: var(--card);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04);
+  z-index: -1; width: calc((100% - 4px) / var(--n)); border-radius: 8px; background: var(--ui-pill);
+  box-shadow: var(--ui-pill-shadow);
   transform: translateX(calc(var(--i) * 100%));
   transition: transform 250ms var(--ease-in-out);
 }
 .seg-copy {
   right: 2px; display: grid; grid-template-columns: repeat(var(--n), 1fr); color: var(--text);
-  clip-path: inset(0 calc(100% - (var(--i) + 1) * 100% / var(--n)) 0 calc(var(--i) * 100% / var(--n)) round 7px);
+  clip-path: inset(0 calc(100% - (var(--i) + 1) * 100% / var(--n)) 0 calc(var(--i) * 100% / var(--n)) round 8px);
   transition: clip-path 250ms var(--ease-in-out);
 }
 .seg-copy > span { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px 0 8px; font-size: 12.5px; font-weight: 600; }
@@ -621,8 +637,9 @@ html[data-theme="dark"] {
 }
 
 /* ---------- Empty & centred states ---------- */
-.empty { border: 1.5px dashed var(--sep); border-radius: 16px; padding: 26px 20px; text-align: center; color: var(--hint); display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.empty .ico { width: 24px; height: 24px; stroke-width: 1.7; margin-bottom: 4px; opacity: .8; }
+/* AffectUI empty state: a quiet gray tray, the icon on a raised tile */
+.empty { border-radius: 20px; padding: 26px 20px; background: var(--ui-tray); text-align: center; color: var(--hint); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.empty .ico { width: 40px; height: 40px; padding: 10px; margin-bottom: 6px; border-radius: 12px; background: var(--card); box-shadow: var(--ui-card-shadow); color: var(--text); stroke-width: 1.8; }
 .empty-title { font-size: 14px; font-weight: 600; color: var(--text); }
 .empty-sub { font-size: 13px; max-width: 30ch; }
 code { font-family: var(--mono); font-size: .92em; padding: 1px 5px; border-radius: 5px; background: var(--fill-2); color: var(--text); }
@@ -878,8 +895,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
 .mode { position: relative; display: block; min-width: 0; }
 .mode input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .mode span { display: flex; align-items: center; justify-content: center; height: 38px; padding: 0 6px; border-radius: 9px; font-size: 14px; font-weight: 600; color: var(--hint); text-align: center; white-space: nowrap; transition: background-color .2s, color .2s; pointer-events: none; }
-.mode input:checked + span { background: var(--card); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 0 0 .5px rgba(0, 0, 0, .04); }
-html[data-theme="dark"] .mode input:checked + span { background: var(--fill-2); }
+.mode input:checked + span { background: var(--ui-pill); color: var(--text); box-shadow: var(--ui-pill-shadow); }
 .mode input:focus-visible + span { outline: 2px solid var(--link); outline-offset: 1px; }
 .btn-primary {
   display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 48px; margin-top: 4px;

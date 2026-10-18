@@ -530,9 +530,17 @@ function fakePage(bundle: string | null | Error, status = 200) {
     },
   };
   const $ = (q: string) => (q === "#tw-dg" ? sec : q === "#tw-dg-mount" ? el : null);
-  const T = { data: { agents: [], tasks: [] } };
+  const T: { data: unknown } = { data: { agents: [], tasks: [] } };
+  // The page's other routes answer with a counter, so each answer differs from the one before.
+  const pageFetches: string[] = [];
+  const pageRoute = (url: string) => {
+    pageFetches.push(url);
+    const n = pageFetches.length;
+    return Response.json(url === "api/town" ? { agents: [{ id: `agent-${n}` }], rooms: [], tasks: [] } : { now: n });
+  };
   let fetches = 0;
-  const fakeFetch = async () => {
+  const fakeFetch = async (url: string) => {
+    if (url !== "api/delegate-bundle") return pageRoute(url);
     fetches++;
     if (bundle instanceof Error) throw bundle;
     return bundle === null ? new Response(null, { status: 404 }) : new Response(bundle, { status });
@@ -549,7 +557,7 @@ function fakePage(bundle: string | null | Error, status = 200) {
     "URL",
     `"use strict";\n${block?.[1] ?? ""}\n${loader?.[1] ?? ""}\nreturn { DG, dgLoad, dgSync };`,
   )(win, doc, $, T, null, 2000, () => "light", fakeFetch, fakeURL) as Loader;
-  return { dg, win, sec, el, fire, fetches: () => fetches };
+  return { dg, win, sec, el, fire, T, fetch: fakeFetch, fetches: () => fetches, pageFetches };
 }
 const wait = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
 // Off for good: hidden, empty, the global gone or ignored, and no new fetch however often the page syncs.
@@ -686,6 +694,52 @@ describe("Delegate loader fails closed (fake page)", () => {
     p.win.DelegateBoardBundle = { version: 1, mount: () => p.win.calls.push("stale") };
     await p.dg.dgLoad();
     expect(p.win.calls).toEqual([]);
+    expectOffForGood(p);
+  });
+
+  test("after an untraceable rejection turns the board off, the rest of the page keeps polling and drawing", async () => {
+    const p = fakePage(REGISTER);
+    await p.dg.dgLoad();
+    // One round of the page's polls, as poll() and townPoll() run it: fetch, store, draw (renderTown calls dgSync).
+    const drawn: string[] = [];
+    const pageRound = async () => {
+      const state = await (await p.fetch("api/state")).json();
+      p.T.data = await (await p.fetch("api/town")).json();
+      drawn.push(`state ${state.now}, ${(p.T.data as { agents: { id: string }[] }).agents[0].id}`);
+      p.dg.dgSync();
+    };
+    await pageRound();
+    expect(p.win.calls).toEqual(["mount", "update"]);
+    // A listener the page added after the loader's still hears the event, and the loader neither cancels nor stops it.
+    const pageHeard: unknown[] = [];
+    p.win.addEventListener("unhandledrejection", (e: unknown) => pageHeard.push(e));
+    const ev = {
+      reason: "plain value",
+      prevented: false,
+      stopped: false,
+      preventDefault() {
+        this.prevented = true;
+      },
+      stopPropagation() {
+        this.stopped = true;
+      },
+      stopImmediatePropagation() {
+        this.stopped = true;
+      },
+    };
+    p.fire("unhandledrejection", ev);
+    expect(pageHeard).toEqual([ev]);
+    expect(ev.prevented).toBe(false);
+    expect(ev.stopped).toBe(false);
+    expect(p.win.calls).toEqual(["mount", "update", "unmount"]);
+    expect(p.sec.hidden).toBe(true);
+    // The polls go on: every round fetches both routes, draws the new answers, and the loader's dgSync neither
+    // throws nor fetches the bundle again.
+    for (let i = 0; i < 3; i++) await pageRound();
+    expect(drawn).toEqual(["state 1, agent-2", "state 3, agent-4", "state 5, agent-6", "state 7, agent-8"]);
+    expect(p.pageFetches).toEqual(Array(4).fill(["api/state", "api/town"]).flat());
+    expect(p.win.calls).toEqual(["mount", "update", "unmount"]);
+    expect(p.fetches()).toBe(1);
     expectOffForGood(p);
   });
 

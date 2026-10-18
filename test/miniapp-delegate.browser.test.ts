@@ -5,6 +5,8 @@
 // `bun test` stays offline. To run it: bun add --no-save playwright && bunx playwright install chromium
 // The page is test/fixtures/delegate-harness.html with the loader blocks put in, served on 127.0.0.1 with the
 // Mini App's real headers, so the CSP that allows blob: scripts is the one under test. The bundles are tiny stand-ins.
+// One test loads the whole of miniapp/index.html instead, with stand-in api/state and api/town answers, to show that
+// the rest of the Mini App keeps working after the board turns itself off. telegram.org is answered with an empty script.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -42,6 +44,53 @@ const BUNDLES: Record<string, string> = {
 };
 
 const fetches = new Map<string, number>();
+// The whole Mini App page under /full/: how often it asked for each route. Each answer carries its count.
+const full = { state: 0, town: 0, bundle: 0 };
+const NO_STORE = { "Cache-Control": "no-store" };
+function fullRoute(route: string | undefined): Response {
+  if (!route) return new Response(html, { headers: HTML_HEADERS });
+  if (route === "delegate-bundle") {
+    full.bundle++;
+    return new Response(BUNDLES.ok, {
+      headers: { "Content-Type": "application/javascript; charset=utf-8", ...NO_STORE },
+    });
+  }
+  if (route === "town") {
+    const n = ++full.town;
+    const feed = {
+      schema_version: 1,
+      generated_at: Date.now(),
+      machine: "test",
+      rooms: [{ id: "hub", title: `Hub ${n}`, kind: "hub" }],
+      agents: [],
+      messages: [],
+      tasks: [],
+    };
+    return Response.json(feed, { headers: NO_STORE });
+  }
+  const n = ++full.state;
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const totals = {
+    sessions: n,
+    busy: 0,
+    waiting: 0,
+    agentsRunning: 0,
+    agents24h: 0,
+    toolCalls24h: 0,
+    tokens24h: tokens,
+  };
+  const snap = {
+    now: Date.now(),
+    host: "test",
+    ready: true,
+    totals,
+    hourly: [],
+    sessions: [],
+    activity: [],
+    projects: [],
+  };
+  return Response.json({ ...snap, town: true, machines: [] }, { headers: NO_STORE });
+}
 let server: ReturnType<typeof Bun.serve> | null = null;
 let browser: any = null;
 let base = "";
@@ -52,6 +101,8 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     port: 0,
     fetch(req) {
+      const f = new URL(req.url).pathname.match(/^\/full\/(?:api\/(state|town|delegate-bundle))?$/);
+      if (f) return fullRoute(f[1]);
       const m = new URL(req.url).pathname.match(/^\/s\/([\w-]+)\/(api\/delegate-bundle)?$/);
       if (!m || !(m[1] in BUNDLES)) return new Response(null, { status: 404 });
       if (!m[2]) return new Response(harness, { headers: HTML_HEADERS });
@@ -161,6 +212,61 @@ describe.skipIf(!on)("Delegate loader in Chromium", () => {
     await expectOffForGood("undeletable", l);
     await l.page.close();
   }, 15000);
+
+  test("full page: after an untraceable rejection turns the board off, the other views keep polling and drawing", async () => {
+    full.state = full.town = full.bundle = 0;
+    const page = await browser.newPage();
+    await page.route("https://telegram.org/**", (r: any) =>
+      r.fulfill({ status: 200, contentType: "application/javascript", body: "" }),
+    );
+    await page.addInitScript(() => {
+      (window as any).calls = [];
+      try {
+        localStorage.setItem("ccab.view", "town");
+      } catch {}
+    });
+    await page.goto(`${base}/full/`);
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    await page.waitForFunction(`!${el("tw-dg")}.hidden && window.calls.includes("mount")`, null, { timeout: 15000 });
+    // A rejection with a plain value from the page itself: it names no script, so the board turns off.
+    await page.evaluate(() => {
+      Promise.reject("page plain value");
+    });
+    await page.waitForFunction(`${el("tw-dg")}.hidden`, null, { timeout: 5000 });
+    const read = () =>
+      page.evaluate(() => {
+        const text = (id: string) => document.getElementById(id)?.textContent ?? "";
+        return {
+          tiles: Number(text("tiles").match(/of\s*(\d+)\s*open/)?.[1] ?? 0),
+          hub: Number(text("tw-rooms").match(/Hub (\d+)/)?.[1] ?? 0),
+          board: text("tw-dg-mount"),
+          calls: (window as any).calls.slice() as string[],
+        };
+      });
+    const before = await read();
+    const hits = { ...full };
+    await page.waitForTimeout(7000); // the state and town polls run every 3 s
+    const after = await read();
+    expect(full.state).toBeGreaterThanOrEqual(hits.state + 2);
+    expect(full.town).toBeGreaterThanOrEqual(hits.town + 2);
+    expect(after.tiles).toBeGreaterThan(before.tiles);
+    expect(after.hub).toBeGreaterThan(before.hub);
+    expect(after.board).toBe("");
+    expect(after.calls.filter((c) => c === "mount").length).toBe(1);
+    expect(after.calls.at(-1)).toBe("unmount");
+    // The other views still switch and draw, and the Town comes back with fresh data and no board.
+    await page.click('#view-seg button[data-sview="list"]');
+    expect(await page.evaluate(`[${el("town")}.hidden, ${el("sessions")}.hidden]`)).toEqual([true, false]);
+    await page.click('#view-seg button[data-sview="town"]');
+    await page.waitForFunction(
+      `Number((${el("tw-rooms")}.textContent.match(/Hub (\\d+)/) || [])[1] || 0) > ${after.hub}`,
+      null,
+      { timeout: 10000 },
+    );
+    expect(await page.evaluate(`${el("tw-dg")}.hidden`)).toBe(true);
+    expect(full.bundle).toBe(1);
+    await page.close();
+  }, 40000);
 
   test("errors from the page's own code leave a running board alone", async () => {
     const l = await load("ok");

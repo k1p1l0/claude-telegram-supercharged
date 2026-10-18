@@ -608,6 +608,10 @@ button.f-row:active { background: var(--press); }
 .u-empty .ui-tile .ico { width: 18px; height: 18px; }
 .u-empty-t { font-size: 14px; font-weight: 600; color: var(--text); }
 .u-empty-s { max-width: 34ch; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+/* ---------- Delegate board (in the Town, when this Mac has the optional private bundle) ----------
+   The frame and heading match the usage card; the board inside brings its own styles. */
+.dg-card { margin: 12px 0 0; }
+.dg-body { min-height: 96px; }
 @media (min-width: 480px) {
   .u-wins { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; }
 }
@@ -1218,6 +1222,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     const sch = scheme();
     root.dataset.theme = sch;
     root.style.colorScheme = sch;
+    dgSync();
     if (!WA || !ver('6.1')) return;
     const hex = toHex(getComputedStyle(doc.body).backgroundColor);
     try { WA.setBackgroundColor(hex || 'secondary_bg_color'); } catch (_) {}
@@ -1978,6 +1983,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
   function townReset() {
     townStop();
     T.data = null; T.err = null; T.seen = null; T.uPct = null; T.noRoom = false;
+    dgUnmount();
     const box = $('#town'); box._ready = false; box._ags = null; box._rooms = null; box.innerHTML = '';
   }
   async function townPoll() {
@@ -2139,11 +2145,162 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     T.noRoom = noRoom;
   }
 
+  /* ---------- Delegate board (optional private bundle) ----------
+     GET api/delegate-bundle serves a read-only board that is not part of this repo, when this Mac has it.
+     The page runs it once from a Blob URL, mounts it under the rooms and passes it the town's agents and
+     tasks on every poll. A 404, a network error, another version or any throw keeps the section hidden.
+     The bundle runs as trusted same-origin code; this only keeps a broken one off the screen, it is no sandbox.
+     Pure helpers sit between the pure markers, the loader between the loader markers
+     (test/miniapp-delegate.test.ts and test/miniapp-delegate.browser.test.ts load them). */
+  /* delegate:pure:start */
+  const DELEGATE_VERSION = 1;
+  // The bundle's API on window, or null when it is missing or another version.
+  function delegateApi(w) {
+    const b = w && w.DelegateBoardBundle;
+    return b && typeof b === 'object' && b.version === DELEGATE_VERSION && typeof b.mount === 'function' ? b : null;
+  }
+  // What mount() and update() get: the agents and tasks as api/town sent them, and the theme.
+  function delegateProps(d, theme) {
+    return {
+      town: { agents: d && Array.isArray(d.agents) ? d.agents : [], tasks: d && Array.isArray(d.tasks) ? d.tasks : [] },
+      theme: theme === 'dark' ? 'dark' : 'light',
+    };
+  }
+  const delegateHandle = h => !!h && typeof h.update === 'function' && typeof h.unmount === 'function';
+  // A stack frame in a script loaded from a web or file URL (the page's own code). A blob: URL is not one.
+  const DG_SCRIPT_FRAME = /(?:^|[^:\w])(?:https?|file):\/\/[^\s()]*:\d+:\d+/m;
+  // Whether an error event or an unhandled rejection came from the bundle at url. An error in its code names
+  // url as the file, or its stack names url. One whose file or stack names another script is the page's.
+  // Anything else cannot be traced (a rejection with a plain value, an error with no stack or a stack that
+  // names no script): while the bundle is active (loading or running) it counts as the bundle's, so the
+  // board fails closed, even when the page's own code was the cause.
+  function delegateOwns(ev, url, active) {
+    if (!ev || !url) return false;
+    if (ev.filename) return ev.filename === url;
+    let stack = '';
+    try {
+      const e = ev.error !== undefined ? ev.error : ev.reason;
+      if (e && typeof e === 'object' && typeof e.stack === 'string') stack = e.stack;
+    } catch (_) {} // a stack getter that throws: no stack
+    if (stack.includes(url)) return true;
+    return !!active && !DG_SCRIPT_FRAME.test(stack);
+  }
+  /* delegate:pure:end */
+
+  /* delegate:loader:start */
+  const DG_SCRIPT_MS = 10000, DG_RETRY_MS = 30000, DG_SETTLE_MS = 300;
+  // state: idle (not fetched yet), loading, ready (the bundle ran), off (no bundle, or it failed: until reload).
+  const DG = { state: 'idle', api: null, handle: null, el: null, retryAt: 0, url: '' };
+  function dgForget() {
+    DG.api = null;
+    // A bundle can make the global undeletable; then it is only ignored (DG.api stays null and state off).
+    try { delete window.DelegateBoardBundle; } catch (_) {}
+  }
+  // Turns the board off for good: unmounts it, hides the section, and never loads or mounts again.
+  function dgKill() {
+    DG.state = 'off';
+    dgForget();
+    dgUnmount();
+    dgSync();
+  }
+  // window error and unhandledrejection, from the start of the load on: an uncaught error from the bundle's
+  // code (while it runs, from a timer or promise it started, or later), or one that cannot be traced to a
+  // script, turns the board off.
+  function dgFault(ev) {
+    if (DG.state !== 'off' && delegateOwns(ev, DG.url, DG.state === 'loading' || DG.state === 'ready')) dgKill();
+  }
+  async function dgLoad() {
+    DG.state = 'loading';
+    const ctrl = new AbortController();
+    const killer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch('api/delegate-bundle', {
+        headers: { Authorization: 'tma ' + ((WA && WA.initData) || '') },
+        cache: 'no-store', credentials: 'same-origin', signal: ctrl.signal,
+      });
+    } catch (_) {
+      // The bot did not answer: try again later, the board is not worth a retry storm.
+      clearTimeout(killer);
+      DG.state = 'idle'; DG.retryAt = Date.now() + DG_RETRY_MS;
+      return;
+    }
+    let url = '';
+    try {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const code = await res.text();
+      clearTimeout(killer);
+      url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+      DG.url = url;
+      dgForget(); // nothing set before this load counts
+      // The script's load event fires even when its code throws, so a throw while it runs only shows up as a
+      // window error event naming the blob URL. These listeners stay for later faults too.
+      window.addEventListener('error', dgFault);
+      window.addEventListener('unhandledrejection', dgFault);
+      // A CSP block or a load failure fires the script's own error event.
+      await new Promise((ok, bad) => {
+        const s = doc.createElement('script');
+        const t = setTimeout(() => bad(new Error('timeout')), DG_SCRIPT_MS);
+        s.onload = () => { clearTimeout(t); ok(); };
+        s.onerror = () => { clearTimeout(t); bad(new Error('load')); };
+        s.src = url;
+        doc.head.appendChild(s);
+      });
+      // A short wait, so a throw from a timer or promise the bundle started fails the load before anything mounts.
+      await new Promise(ok => setTimeout(ok, DG_SETTLE_MS));
+      if (DG.state !== 'loading') throw new Error('fault');
+      DG.api = delegateApi(window);
+      if (!DG.api) throw new Error('version');
+      DG.state = 'ready';
+    } catch (_) {
+      DG.state = 'off';
+      dgForget();
+    } finally {
+      clearTimeout(killer);
+      if (url) URL.revokeObjectURL(url);
+    }
+    dgSync();
+  }
+  function dgUnmount() {
+    const h = DG.handle;
+    DG.handle = null; DG.el = null;
+    if (h) { try { h.unmount(); } catch (_) {} }
+  }
+  // Called on every town render and theme change: loads the bundle once, then mounts or updates the board.
+  function dgSync() {
+    const sec = $('#tw-dg'), el = $('#tw-dg-mount');
+    if (!sec || !el) return;
+    if (DG.state === 'idle' && T.data && Date.now() >= DG.retryAt) dgLoad();
+    if (DG.state !== 'ready' || !T.data) {
+      if (DG.state === 'off') { dgUnmount(); if (el.firstChild) el.innerHTML = ''; }
+      sec.hidden = !DG.handle;
+      return;
+    }
+    const props = delegateProps(T.data, scheme());
+    try {
+      if (DG.handle && DG.el === el) DG.handle.update(props);
+      else {
+        dgUnmount();
+        const h = DG.api.mount(el, props);
+        if (!delegateHandle(h)) {
+          try { if (h && typeof h.unmount === 'function') h.unmount(); } catch (_) {}
+          throw new Error('mount');
+        }
+        DG.handle = h; DG.el = el;
+      }
+      sec.hidden = false;
+    } catch (_) {
+      dgKill();
+    }
+  }
+  /* delegate:loader:end */
+
   function renderTown() {
     const box = $('#town');
     if (box.hidden) return;
     if (!box._ready) {
       box.innerHTML = `<div class="tw-bar" id="tw-bar"></div><div id="tw-usage" hidden></div><div class="tw-rooms" id="tw-rooms"></div>
+        <section class="u-card dg-card" id="tw-dg" aria-labelledby="dg-title" hidden><div class="u-head"><h3 class="u-title" id="dg-title">${svg('board')}<span>Delegate</span></h3></div><div class="u-body dg-body" id="tw-dg-mount"></div></section>
         <div class="block-head tw-mail-head" id="tw-mail-head" hidden><h3>Messages</h3><span class="count" id="tw-mail-count"></span></div>
         <div id="tw-mail" hidden></div><div class="tw-layer" id="tw-layer" aria-hidden="true"></div>`;
       box._ready = true; box._rooms = new Map(); box._ags = new Map();
@@ -2186,6 +2343,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     rooms._ready = true;
     twBar(d);
     twUsage(d);
+    dgSync();
     twMail(d);
     setText($('#s-count'), d.agents.length ? plural(d.agents.length, 'agent', 'agents') : '');
   }

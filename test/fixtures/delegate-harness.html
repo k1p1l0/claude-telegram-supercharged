@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Delegate loader harness</title>
+</head>
+<body>
+<!-- test/miniapp-delegate.browser.test.ts serves this page with the Mini App's real headers (CSP included) and puts
+     the delegate:pure and delegate:loader blocks of miniapp/index.html where the marker below is. The rest stands in
+     for the page around them: the Town section, one town snapshot, no Telegram. -->
+<section id="tw-dg" hidden><div id="tw-dg-mount"></div></section>
+<script>
+(() => {
+  'use strict';
+  const doc = document, WA = null, TIMEOUT_MS = 5000;
+  const $ = (s, r) => (r || doc).querySelector(s);
+  const T = { data: { agents: [], tasks: [] } };
+  const scheme = () => 'light';
+  window.calls = [];
+  /* DELEGATE_CODE */
+  window.__dg = { DG, dgLoad, dgSync };
+  // An uncaught error from the page's own code (this file), not from the bundle.
+  window.pageThrow = () => setTimeout(() => { throw new Error('page'); }, 0);
+  window.pageReject = () => { Promise.reject(new Error('page')); };
+})();
+</script>
+</body>
+</html>

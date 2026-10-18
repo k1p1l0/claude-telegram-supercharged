@@ -11,6 +11,8 @@
  * With TELEGRAM_WEBHOOK=on the same server also takes Telegram's updates at
  * POST /telegram/webhook (server.ts checks the secret token).
  * With TELEGRAM_MINIAPP_TOWN_FEED the page also gets a Town view (GET /api/town, see parseTownFeed).
+ * The Town can also show a Delegate board from an optional private bundle that is not part of this
+ * repo (GET /api/delegate-bundle, see delegateBundlePath).
  * Users that server.ts lets control sessions can also read a session's messages,
  * send it a message, start background tasks, stop them and signal terminal
  * sessions (POST /api/control). TELEGRAM_MINIAPP_CONTROL=off turns that off.
@@ -21,9 +23,22 @@
  * keeps byte offsets, and only polls while someone has the app open.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  type Stats,
+  closeSync,
+  existsSync,
+  constants as fsc,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 // ── Shared types (the page in miniapp/index.html renders these) ───────
 
@@ -311,13 +326,14 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-const HTML_HEADERS = {
+// blob: lets the page run the Delegate board bundle, which it fetches with the Telegram sign-in.
+export const HTML_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Content-Security-Policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
 };
 
 // ── Main thread: session controls ─────────────────────────────────────
@@ -556,6 +572,7 @@ interface TownTask {
   state: string;
   owner: string;
   updated_at: number | null;
+  priority?: string;
 }
 /** One usage window of a Claude account: 5 h, 7 d, or a scoped one such as Fable. */
 interface UsageWindow {
@@ -687,6 +704,7 @@ export function parseTownFeed(raw: unknown): TownFeed | null {
       state: townText(t.state, 32),
       owner: townText(t.owner, 64),
       updated_at: townTime(t.updated_at),
+      ...(townText(t.priority, 16) ? { priority: townText(t.priority, 16) } : {}),
     });
   }
 
@@ -793,6 +811,158 @@ export async function fetchTownFeed(url: string, token: string): Promise<Reply> 
   }
 }
 
+// ── Delegate board: an optional private bundle from outside this repo ──
+
+export const DELEGATE_BUNDLE_MAX = 3 << 20;
+const DELEGATE_HEADERS = {
+  "Content-Type": "application/javascript; charset=utf-8",
+  "Cache-Control": "private, no-store",
+  "X-Content-Type-Options": "nosniff",
+};
+
+/**
+ * Where the bundle sits: TELEGRAM_MINIAPP_DELEGATE_BUNDLE (an absolute path) or
+ * ~/.claude/channels/telegram/private/delegate-board.miniapp.js. "" when the variable is not absolute.
+ */
+export function delegateBundlePath(env: Record<string, string | undefined> = process.env, home = homedir()): string {
+  const v = (env.TELEGRAM_MINIAPP_DELEGATE_BUNDLE ?? "").trim();
+  if (v) return isAbsolute(v) ? v : "";
+  return join(home, ".claude", "channels", "telegram", "private", "delegate-board.miniapp.js");
+}
+
+// O_NOFOLLOW refuses a symlink as the last part of the path; O_NONBLOCK keeps open() from waiting on a FIFO;
+// O_NOCTTY keeps a terminal from becoming ours. -1 where the platform has no O_NOFOLLOW (Windows): the board stays off.
+export const DELEGATE_OPEN =
+  fsc.O_NOFOLLOW === undefined || fsc.O_NONBLOCK === undefined
+    ? -1
+    : fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK | (fsc.O_NOCTTY ?? 0);
+
+/** What readDelegateBundle found: the code (left out when it matches cachedKey), or why there is none ("" = no file). */
+export type DelegateRead = { key: string; code?: Uint8Array<ArrayBuffer> } | { why: string };
+
+/** "" when st is a folder we can trust: a real directory (not a symlink) of this user that group and others cannot write. */
+function delegateDirProblem(st: Stats, uid: number): string {
+  if (!st.isDirectory()) return "its folder is a symlink or not a folder";
+  if (st.uid !== uid) return "its folder belongs to another user";
+  if (st.mode & 0o022) return "its folder is writable by group or others";
+  return "";
+}
+
+/**
+ * Test hooks for readDelegateBundle: beforeOpen runs after the first checks, afterOpen right after open(), afterStat
+ * between the fstat checks and the read.
+ */
+export type DelegateHooks = { beforeOpen?: () => void; afterOpen?: () => void; afterStat?: (fd: number) => void };
+
+const delegateKey = (st: Stats) => `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+
+/**
+ * Reads the bundle once, through one opened descriptor, so nothing can be swapped in between the checks and the read.
+ * The folder must be one we trust (delegateDirProblem) and the file a regular file of this user that group and others
+ * cannot write, at most max bytes. A symlink, FIFO, socket or device is never opened (lstat first), and if one is
+ * swapped in after that, O_NOFOLLOW, O_NONBLOCK and the fstat of the opened descriptor refuse it. After the open, the
+ * folder must be the same one and the path must still lead to the opened file. That catches a folder swapped in for
+ * the open and back before these checks, but not every swap: each check walks the path again, so someone who controls
+ * a folder above can swap it in and out between them. At most size + 1 (so at most max + 1) bytes are read; a file
+ * that grows or shrinks while it is read is refused, and so is one whose device, inode, size, mtime or ctime differ
+ * after the read (a same-size write in place). A write that leaves all of them the same (within one tick of a file
+ * system's clock) is not seen. The folders above the file's folder are not checked or pinned: the caller must trust
+ * them, and that trust is the real protection against swaps.
+ */
+export function readDelegateBundle(
+  path: string,
+  max: number,
+  uid: number,
+  cachedKey = "",
+  hooks: DelegateHooks = {},
+): DelegateRead {
+  if (DELEGATE_OPEN < 0 || uid < 0) return { why: "this platform has no O_NOFOLLOW or user ids" };
+  const parent = dirname(path);
+  let fd = -1;
+  try {
+    const dir = lstatSync(parent);
+    const bad = delegateDirProblem(dir, uid);
+    if (bad) return { why: bad };
+    if (!lstatSync(path).isFile()) return { why: "it is not a regular file" };
+    hooks.beforeOpen?.();
+    fd = openSync(path, DELEGATE_OPEN);
+    hooks.afterOpen?.();
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { why: "it is not a regular file" };
+    if (st.uid !== uid) return { why: "it belongs to another user" };
+    if (st.mode & 0o022) return { why: "it is writable by group or others" };
+    if (st.size > max) return { why: `it is over ${max} bytes` };
+    // O_NOFOLLOW only covers the last part of the path, so the folder must still be the one checked above.
+    const now = lstatSync(parent);
+    if (now.dev !== dir.dev || now.ino !== dir.ino || delegateDirProblem(now, uid))
+      return { why: "its folder changed" };
+    // And the path must lead to the file we opened. This narrows a folder swap, it does not rule one out.
+    const at = lstatSync(path);
+    if (at.dev !== st.dev || at.ino !== st.ino) return { why: "it was replaced while it was opened" };
+    const key = delegateKey(st);
+    if (key === cachedKey) return { key };
+    hooks.afterStat?.(fd);
+    const buf = new Uint8Array(st.size + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+    }
+    if (n !== st.size) return { why: n > st.size ? "it grew while it was read" : "it shrank while it was read" };
+    if (delegateKey(fstatSync(fd)) !== key) return { why: "it changed while it was read" };
+    return { key, code: buf.slice(0, n) };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return { why: code === "ENOENT" ? "" : `it cannot be read (${code ?? "error"})` };
+  } finally {
+    if (fd >= 0)
+      try {
+        closeSync(fd);
+      } catch {}
+  }
+}
+
+/**
+ * Reads the bundle at one fixed path (readDelegateBundle), and reads it again only when the opened file's device,
+ * inode, size, mtime or ctime change. null when there is no usable bundle. log hears each new reason for a refusal
+ * once; a missing file is not one.
+ */
+export function delegateBundleReader(
+  path: string,
+  o: { max?: number; uid?: number; log?: (msg: string) => void; afterStat?: (fd: number) => void } = {},
+): () => Uint8Array<ArrayBuffer> | null {
+  const max = o.max ?? DELEGATE_BUNDLE_MAX;
+  const uid = o.uid ?? process.getuid?.() ?? -1;
+  let cache: { key: string; code: Uint8Array<ArrayBuffer> } | null = null;
+  let said = "";
+  return () => {
+    if (!path) return null;
+    const r = readDelegateBundle(path, max, uid, cache?.key, { afterStat: o.afterStat });
+    if ("why" in r) {
+      cache = null;
+      if (r.why && r.why !== said) o.log?.(`mini app: the Delegate board bundle is refused, ${r.why}: ${path}`);
+      said = r.why;
+      return null;
+    }
+    said = "";
+    if (r.code) cache = { key: r.key, code: r.code };
+    return cache?.code ?? null;
+  };
+}
+
+/** GET /api/delegate-bundle: users on the allowlist only, and a 404 without detail when there is no bundle. */
+export function delegateBundleResponse(userId: string | null, read: () => Uint8Array<ArrayBuffer> | null): Response {
+  if (!userId)
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  const code = read();
+  if (!code) return new Response(null, { status: 404, headers: { "Cache-Control": "no-store" } });
+  return new Response(code, { headers: DELEGATE_HEADERS });
+}
+
 export function startMiniApp(opts: {
   token: string;
   isAllowed: (userId: string) => boolean;
@@ -845,6 +1015,12 @@ export function startMiniApp(opts: {
     townCache = { at: Date.now(), reply };
     return reply;
   };
+
+  // Delegate board: the path is fixed at start, so the route never serves anything else.
+  const delegatePath = delegateBundlePath();
+  if (process.env.TELEGRAM_MINIAPP_DELEGATE_BUNDLE?.trim() && !delegatePath)
+    opts.log("mini app: TELEGRAM_MINIAPP_DELEGATE_BUNDLE must be an absolute path; the Delegate board stays off");
+  const delegateBundle = delegateBundleReader(delegatePath, { log: opts.log });
 
   const touch = () => {
     if (!worker) {
@@ -1221,6 +1397,7 @@ export function startMiniApp(opts: {
       const [status, body] = await town();
       return json(body, status);
     }
+    if (pathname === "/api/delegate-bundle") return delegateBundleResponse(telegramUser(req), delegateBundle);
     if (pathname === "/api/session/messages") {
       const userId = telegramUser(req);
       if (!userId) return json({ error: "unauthorized" }, 401);

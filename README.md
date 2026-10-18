@@ -435,6 +435,7 @@ For a fixed address, use your own HTTPS setup:
 | `TELEGRAM_MINIAPP_CONTROL` | on | `off` turns the session controls off. The board stays read-only. |
 | `TELEGRAM_MINIAPP_TOWN_FEED` | not set | URL of a town feed (see [Town view](#town-view)). Without it the Town view is hidden. |
 | `TELEGRAM_MINIAPP_TOWN_TOKEN` | not set | Sent to the town feed as `Authorization: Bearer <token>`. It stays on the server. |
+| `TELEGRAM_MINIAPP_DELEGATE_BUNDLE` | `~/.claude/channels/telegram/private/delegate-board.miniapp.js` | Absolute path of an optional Delegate board bundle (see [Delegate board](#delegate-board)). |
 
 **Several machines.** If you run Claude Code on more than one computer, one board can show all of them. Tap the machine name in the header to switch. Every machine runs this plugin with its own bot.
 
@@ -487,7 +488,19 @@ The feed is JSON, schema version 1. Times can be ISO strings or epoch seconds or
 }
 ```
 
-`kind` is `claude-daemon`, `pi`, `claude-session` or `other`. `state` is `busy`, `waiting`, `idle` or `offline`. `messages` are newest first, at most 50. A task counts as open unless its state is done, closed, completed, cancelled, merged, resolved or archived. Agents and tasks whose room is unknown go to the hub.
+`kind` is `claude-daemon`, `pi`, `claude-session` or `other`. `state` is `busy`, `waiting`, `idle` or `offline`. `messages` are newest first, at most 50. A task may also carry a short `priority`. A task counts as open unless its state is done, closed, completed, cancelled, merged, resolved or archived. Agents and tasks whose room is unknown go to the hub.
+
+#### Delegate board
+
+The Town can also show a read-only Delegate board under the rooms. The board is not part of this repo: it is an optional, private JavaScript bundle that you put on the machine yourself. Without it the section stays hidden and nothing else changes.
+
+- **Where:** `~/.claude/channels/telegram/private/delegate-board.miniapp.js`, or the absolute path in `TELEGRAM_MINIAPP_DELEGATE_BUNDLE`. The path is read once at start; the file is read again when it changes. Files over 3 MB are refused.
+- **File and folder:** the file must be a regular file that you own and that group and others cannot write. Its folder must be a real folder (not a symlink) that you own and that group and others cannot write. Symlinks, FIFOs, sockets and devices are refused. A refused bundle hides the section, and the bot logs the reason once. On Linux with a umask of 002, new folders and files are group-writable, so set the modes yourself: `chmod 700` on the folder and `chmod 600` on the file. The file is read through one opened descriptor. It is refused for that request if its size, inode or modification time changes while it is read, or if after the open the path no longer leads to the file that was opened. A same-size write within one tick of the file system's clock can still go unnoticed. On Windows the board is always off.
+- **Folders above it:** only the folder that holds the file is checked. The folders above it are not checked or pinned, and they may be symlinks (on macOS `/var` and `/tmp` are). The reader trusts them: each one must be owned by you or by root, and no one else may be able to write to it. Your home folder is fine. Someone who can rename or replace a folder above the bundle can race the reader. After the open, the reader checks again that the path leads to the file it opened. That catches some swaps, such as a folder swapped in for the open and back before the check, but each check walks the path again, so it does not rule out a swap and restore timed around the checks. Folders above the bundle that only you or root can change are the real protection.
+- **Who gets it:** the board serves the file at `GET /api/delegate-bundle` with the same Telegram sign-in as the rest of the board, so only users on the allowlist can download it, even through a public tunnel. It is never cached (`Cache-Control: private, no-store`). With no file the route answers 404.
+- **What the bundle must do:** be one self-contained script that sets `window.DelegateBoardBundle = { version: 1, mount(el, props) }`, where `mount` returns `{ update(props), unmount() }`. `props` is `{ town: { agents, tasks }, theme: "light" | "dark" }`, with `agents` and `tasks` exactly as `GET /api/town` returns them. The page calls `update` on every town refresh and theme change.
+- **Failures:** a 404, a network error or another `version` hides the section. So does a bundle that throws: while it runs, from a timer or promise it started, in `mount`, in `update`, or later. The page tells the bundle's errors from its own by the file or stack trace that an error names. An uncaught error or rejection that names no script (a rejection with a plain value, or an error with no stack) cannot be traced, so from the start of the load on it also turns the board off, even when the page's own code caused it. The page then unmounts the board and does not load the bundle again until the Mini App is reloaded.
+- **Trust:** the bundle runs from a `blob:` URL as trusted same-origin code, with the viewer's privileges in the Mini App. It can call every API route the page can, session controls included. The loader is no sandbox. The only check on who gets the bundle is the Mini App's Telegram sign-in and allowlist; there is no separate entitlement check. Only put a bundle you trust at that path. The page's Content-Security-Policy allows `blob:` scripts for it.
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
 

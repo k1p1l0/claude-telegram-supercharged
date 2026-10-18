@@ -11,6 +11,8 @@
  * With TELEGRAM_WEBHOOK=on the same server also takes Telegram's updates at
  * POST /telegram/webhook (server.ts checks the secret token).
  * With TELEGRAM_MINIAPP_TOWN_FEED the page also gets a Town view (GET /api/town, see parseTownFeed).
+ * The Town can also show a Delegate board from an optional private bundle that is not part of this
+ * repo (GET /api/delegate-bundle, see delegateBundlePath).
  * Users that server.ts lets control sessions can also read a session's messages,
  * send it a message, start background tasks, stop them and signal terminal
  * sessions (POST /api/control). TELEGRAM_MINIAPP_CONTROL=off turns that off.
@@ -23,7 +25,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 
 // ── Shared types (the page in miniapp/index.html renders these) ───────
 
@@ -311,13 +313,14 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-const HTML_HEADERS = {
+// blob: lets the page run the Delegate board bundle, which it fetches with the Telegram sign-in.
+export const HTML_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Content-Security-Policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
 };
 
 // ── Main thread: session controls ─────────────────────────────────────
@@ -556,6 +559,7 @@ interface TownTask {
   state: string;
   owner: string;
   updated_at: number | null;
+  priority?: string;
 }
 /** One usage window of a Claude account: 5 h, 7 d, or a scoped one such as Fable. */
 interface UsageWindow {
@@ -687,6 +691,7 @@ export function parseTownFeed(raw: unknown): TownFeed | null {
       state: townText(t.state, 32),
       owner: townText(t.owner, 64),
       updated_at: townTime(t.updated_at),
+      ...(townText(t.priority, 16) ? { priority: townText(t.priority, 16) } : {}),
     });
   }
 
@@ -793,6 +798,60 @@ export async function fetchTownFeed(url: string, token: string): Promise<Reply> 
   }
 }
 
+// ── Delegate board: an optional private bundle from outside this repo ──
+
+export const DELEGATE_BUNDLE_MAX = 3 << 20;
+const DELEGATE_HEADERS = {
+  "Content-Type": "application/javascript; charset=utf-8",
+  "Cache-Control": "private, no-store",
+  "X-Content-Type-Options": "nosniff",
+};
+
+/**
+ * Where the bundle sits: TELEGRAM_MINIAPP_DELEGATE_BUNDLE (an absolute path) or
+ * ~/.claude/channels/telegram/private/delegate-board.miniapp.js. "" when the variable is not absolute.
+ */
+export function delegateBundlePath(env: Record<string, string | undefined> = process.env, home = homedir()): string {
+  const v = (env.TELEGRAM_MINIAPP_DELEGATE_BUNDLE ?? "").trim();
+  if (v) return isAbsolute(v) ? v : "";
+  return join(home, ".claude", "channels", "telegram", "private", "delegate-board.miniapp.js");
+}
+
+/** Reads the bundle at one fixed path, again only when its mtime or size changes. null when it is missing, not a file or too big. */
+export function delegateBundleReader(path: string, max = DELEGATE_BUNDLE_MAX): () => Uint8Array<ArrayBuffer> | null {
+  let cache: { key: string; code: Uint8Array<ArrayBuffer> } | null = null;
+  return () => {
+    if (!path) return null;
+    try {
+      const st = statSync(path);
+      if (!st.isFile() || st.size > max) return null;
+      const key = `${st.mtimeMs}:${st.size}`;
+      if (cache?.key !== key) {
+        const code = readFileSync(path);
+        // The file can grow between stat and read.
+        if (code.length > max) return null;
+        cache = { key, code };
+      }
+      return cache.code;
+    } catch {
+      cache = null;
+      return null;
+    }
+  };
+}
+
+/** GET /api/delegate-bundle: users on the allowlist only, and a 404 without detail when there is no bundle. */
+export function delegateBundleResponse(userId: string | null, read: () => Uint8Array<ArrayBuffer> | null): Response {
+  if (!userId)
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  const code = read();
+  if (!code) return new Response(null, { status: 404, headers: { "Cache-Control": "no-store" } });
+  return new Response(code, { headers: DELEGATE_HEADERS });
+}
+
 export function startMiniApp(opts: {
   token: string;
   isAllowed: (userId: string) => boolean;
@@ -845,6 +904,12 @@ export function startMiniApp(opts: {
     townCache = { at: Date.now(), reply };
     return reply;
   };
+
+  // Delegate board: the path is fixed at start, so the route never serves anything else.
+  const delegatePath = delegateBundlePath();
+  if (process.env.TELEGRAM_MINIAPP_DELEGATE_BUNDLE?.trim() && !delegatePath)
+    opts.log("mini app: TELEGRAM_MINIAPP_DELEGATE_BUNDLE must be an absolute path; the Delegate board stays off");
+  const delegateBundle = delegateBundleReader(delegatePath);
 
   const touch = () => {
     if (!worker) {
@@ -1221,6 +1286,7 @@ export function startMiniApp(opts: {
       const [status, body] = await town();
       return json(body, status);
     }
+    if (pathname === "/api/delegate-bundle") return delegateBundleResponse(telegramUser(req), delegateBundle);
     if (pathname === "/api/session/messages") {
       const userId = telegramUser(req);
       if (!userId) return json({ error: "unauthorized" }, 401);

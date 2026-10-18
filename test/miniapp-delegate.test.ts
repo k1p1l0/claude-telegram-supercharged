@@ -379,7 +379,7 @@ type Page = {
   delegateApi: (w: unknown) => { mount: unknown } | null;
   delegateProps: (d: unknown, theme: unknown) => { town: { agents: unknown[]; tasks: unknown[] }; theme: string };
   delegateHandle: (h: unknown) => boolean;
-  delegateOwns: (ev: unknown, url: string, loading?: boolean) => boolean;
+  delegateOwns: (ev: unknown, url: string, active?: boolean) => boolean;
 };
 const page = new Function(
   `${block?.[1] ?? ""}; return { delegateApi, delegateProps, delegateHandle, delegateOwns };`,
@@ -429,15 +429,36 @@ describe("delegateOwns (which errors are the bundle's)", () => {
     expect(page.delegateOwns(null, url, true)).toBe(false);
   });
 
-  test("otherwise the stack must name it; with no stack, only while the bundle loads", () => {
+  test("otherwise a stack that names it counts, and one that names only another script does not", () => {
     const own = { stack: `Error: x\n    at f (${url}:1:20)` };
     expect(page.delegateOwns({ reason: own }, url)).toBe(true);
     expect(page.delegateOwns({ error: own }, url)).toBe(true);
     expect(page.delegateOwns({ reason: { stack: "Error: x\n    at g (https://board.example/:9:1)" } }, url, true)).toBe(
       false,
     );
-    expect(page.delegateOwns({ reason: "plain value" }, url, true)).toBe(true);
-    expect(page.delegateOwns({ reason: "plain value" }, url, false)).toBe(false);
+    expect(page.delegateOwns({ reason: { stack: "g@https://board.example/app.js:9:1" } }, url, true)).toBe(false);
+  });
+
+  test("an error that names no script counts while the bundle is active, loading or running (fails closed)", () => {
+    for (const reason of [
+      "plain value",
+      undefined,
+      null,
+      42,
+      {},
+      { stack: "TypeError: Failed to fetch" },
+      // Another blob: URL is not the page's own code (the bundle could have made it).
+      { stack: "Error: x\n    at h (blob:https://board.example/5678:1:2)" },
+      {
+        get stack() {
+          throw new Error("no stack");
+        },
+      },
+    ]) {
+      expect(page.delegateOwns({ reason }, url, true)).toBe(true);
+      expect(page.delegateOwns({ reason }, url, false)).toBe(false);
+    }
+    expect(page.delegateOwns({ error: null, message: "Script error." }, url, true)).toBe(true);
   });
 });
 
@@ -590,6 +611,35 @@ describe("Delegate loader fails closed (fake page)", () => {
     expectOffForGood(p);
   });
 
+  test("a later rejection with a plain value or no stack unmounts the board and hides it for good", async () => {
+    const reasons = [
+      "'late'",
+      "undefined",
+      "{}",
+      "{ stack: 'TypeError: Failed to fetch' }",
+      "{ get stack() { throw 1; } }",
+    ];
+    await Promise.all(
+      reasons.map(async (reason) => {
+        const p = fakePage(`${REGISTER}\nreject(${reason}, 450);`);
+        await p.dg.dgLoad();
+        expect(p.dg.DG.state).toBe("ready");
+        expect(p.sec.hidden).toBe(false);
+        await wait(400);
+        expect(p.win.calls).toEqual(["mount", "unmount"]);
+        expectOffForGood(p);
+      }),
+    );
+  });
+
+  test("a plain-value rejection from anywhere turns a running board off: it cannot be traced", async () => {
+    const p = fakePage(REGISTER);
+    await p.dg.dgLoad();
+    p.fire("unhandledrejection", { reason: "plain value" });
+    expect(p.win.calls).toEqual(["mount", "unmount"]);
+    expectOffForGood(p);
+  });
+
   test("mount throws: hidden, the global deleted, no retry", async () => {
     const p = fakePage(
       "window.DelegateBoardBundle = { version: 1, mount(el) { window.calls.push('mount'); el.innerHTML = 'half'; throw new Error('m'); } };",
@@ -643,7 +693,7 @@ describe("Delegate loader fails closed (fake page)", () => {
     await p.dg.dgLoad();
     p.fire("error", { filename: "https://board.example/", error: new Error("page") });
     p.fire("unhandledrejection", { reason: { stack: "Error: page\n    at x (https://board.example/:1:1)" } });
-    p.fire("unhandledrejection", { reason: "plain value" });
+    p.fire("unhandledrejection", { reason: { stack: "x@https://board.example/:1:1" } });
     expect(p.dg.DG.state).toBe("ready");
     expect(p.sec.hidden).toBe(false);
   });

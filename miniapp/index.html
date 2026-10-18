@@ -2167,15 +2167,23 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     };
   }
   const delegateHandle = h => !!h && typeof h.update === 'function' && typeof h.unmount === 'function';
+  // A stack frame in a script loaded from a web or file URL (the page's own code). A blob: URL is not one.
+  const DG_SCRIPT_FRAME = /(?:^|[^:\w])(?:https?|file):\/\/[^\s()]*:\d+:\d+/m;
   // Whether an error event or an unhandled rejection came from the bundle at url. An error in its code names
-  // url as the file; otherwise the stack must name it. While it loads, an error with no file and no stack
-  // (a rejection with a plain value, say) counts too.
-  function delegateOwns(ev, url, loading) {
+  // url as the file, or its stack names url. One whose file or stack names another script is the page's.
+  // Anything else cannot be traced (a rejection with a plain value, an error with no stack or a stack that
+  // names no script): while the bundle is active (loading or running) it counts as the bundle's, so the
+  // board fails closed, even when the page's own code was the cause.
+  function delegateOwns(ev, url, active) {
     if (!ev || !url) return false;
     if (ev.filename) return ev.filename === url;
-    const e = ev.error !== undefined ? ev.error : ev.reason;
-    const stack = e && typeof e === 'object' && typeof e.stack === 'string' ? e.stack : '';
-    return stack ? stack.includes(url) : !!loading;
+    let stack = '';
+    try {
+      const e = ev.error !== undefined ? ev.error : ev.reason;
+      if (e && typeof e === 'object' && typeof e.stack === 'string') stack = e.stack;
+    } catch (_) {} // a stack getter that throws: no stack
+    if (stack.includes(url)) return true;
+    return !!active && !DG_SCRIPT_FRAME.test(stack);
   }
   /* delegate:pure:end */
 
@@ -2196,9 +2204,10 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     dgSync();
   }
   // window error and unhandledrejection, from the start of the load on: an uncaught error from the bundle's
-  // code (while it runs, from a timer or promise it started, or later) turns the board off.
+  // code (while it runs, from a timer or promise it started, or later), or one that cannot be traced to a
+  // script, turns the board off.
   function dgFault(ev) {
-    if (DG.state !== 'off' && delegateOwns(ev, DG.url, DG.state === 'loading')) dgKill();
+    if (DG.state !== 'off' && delegateOwns(ev, DG.url, DG.state === 'loading' || DG.state === 'ready')) dgKill();
   }
   async function dgLoad() {
     DG.state = 'loading';

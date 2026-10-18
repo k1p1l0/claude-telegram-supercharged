@@ -32,6 +32,7 @@ const BUNDLES: Record<string, string> = {
   "reject-error": `${REGISTER}\nPromise.reject(new Error('from a promise'));`,
   "reject-plain": `${REGISTER}\nPromise.reject('plain value');`,
   late: `${REGISTER}\nsetTimeout(() => { throw new Error('late'); }, 1000);`,
+  "late-plain": `${REGISTER}\nsetTimeout(() => { Promise.reject('late plain value'); }, 1000);`,
   "mount-throws":
     "window.DelegateBoardBundle = { version: 1, mount(el) { window.calls.push('mount'); el.textContent = 'half'; throw new Error('m'); } };",
   // A top-level var in a classic script is a global that delete cannot remove.
@@ -132,14 +133,16 @@ describe.skipIf(!on)("Delegate loader in Chromium", () => {
     }, 15000);
   }
 
-  test("late: a throw after mounting unmounts the board and hides it for good", async () => {
-    const l = await load("late");
-    expect((await l.seen()).hidden).toBe(false);
-    await l.page.waitForTimeout(1200);
-    expect((await l.seen()).calls).toEqual(["mount", "unmount"]);
-    await expectOffForGood("late", l);
-    await l.page.close();
-  }, 15000);
+  for (const name of ["late", "late-plain"]) {
+    test(`${name}: a throw or a plain-value rejection after mounting unmounts the board and hides it for good`, async () => {
+      const l = await load(name);
+      expect((await l.seen()).hidden).toBe(false);
+      await l.page.waitForTimeout(1200);
+      expect((await l.seen()).calls).toEqual(["mount", "unmount"]);
+      await expectOffForGood(name, l);
+      await l.page.close();
+    }, 15000);
+  }
 
   test("mount-throws: the half-drawn board is emptied and hidden, the global deleted", async () => {
     const l = await load("mount-throws");

@@ -23,9 +23,22 @@
  * keeps byte offsets, and only polls while someone has the app open.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  type Stats,
+  closeSync,
+  existsSync,
+  constants as fsc,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 // ── Shared types (the page in miniapp/index.html renders these) ───────
 
@@ -817,26 +830,105 @@ export function delegateBundlePath(env: Record<string, string | undefined> = pro
   return join(home, ".claude", "channels", "telegram", "private", "delegate-board.miniapp.js");
 }
 
-/** Reads the bundle at one fixed path, again only when its mtime or size changes. null when it is missing, not a file or too big. */
-export function delegateBundleReader(path: string, max = DELEGATE_BUNDLE_MAX): () => Uint8Array<ArrayBuffer> | null {
+// O_NOFOLLOW refuses a symlink as the last part of the path; O_NONBLOCK keeps open() from waiting on a FIFO;
+// O_NOCTTY keeps a terminal from becoming ours. -1 where the platform has no O_NOFOLLOW (Windows): the board stays off.
+export const DELEGATE_OPEN =
+  fsc.O_NOFOLLOW === undefined || fsc.O_NONBLOCK === undefined
+    ? -1
+    : fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK | (fsc.O_NOCTTY ?? 0);
+
+/** What readDelegateBundle found: the code (left out when it matches cachedKey), or why there is none ("" = no file). */
+export type DelegateRead = { key: string; code?: Uint8Array<ArrayBuffer> } | { why: string };
+
+/** "" when st is a folder we can trust: a real directory (not a symlink) of this user that group and others cannot write. */
+function delegateDirProblem(st: Stats, uid: number): string {
+  if (!st.isDirectory()) return "its folder is a symlink or not a folder";
+  if (st.uid !== uid) return "its folder belongs to another user";
+  if (st.mode & 0o022) return "its folder is writable by group or others";
+  return "";
+}
+
+/**
+ * Reads the bundle once, through one opened descriptor, so nothing can be swapped in between the checks and the read.
+ * The folder must be one we trust (delegateDirProblem) and the file a regular file of this user that group and others
+ * cannot write, at most max bytes. A symlink, FIFO, socket or device is never opened (lstat first), and if one is
+ * swapped in after that, O_NOFOLLOW, O_NONBLOCK and the fstat of the opened descriptor refuse it. At most size + 1
+ * (so at most max + 1) bytes are read; a file that grows or shrinks while it is read is refused.
+ * afterStat is for tests: it runs between the fstat and the read.
+ */
+export function readDelegateBundle(
+  path: string,
+  max: number,
+  uid: number,
+  cachedKey = "",
+  afterStat?: (fd: number) => void,
+): DelegateRead {
+  if (DELEGATE_OPEN < 0 || uid < 0) return { why: "this platform has no O_NOFOLLOW or user ids" };
+  const parent = dirname(path);
+  let fd = -1;
+  try {
+    const dir = lstatSync(parent);
+    const bad = delegateDirProblem(dir, uid);
+    if (bad) return { why: bad };
+    if (!lstatSync(path).isFile()) return { why: "it is not a regular file" };
+    fd = openSync(path, DELEGATE_OPEN);
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { why: "it is not a regular file" };
+    if (st.uid !== uid) return { why: "it belongs to another user" };
+    if (st.mode & 0o022) return { why: "it is writable by group or others" };
+    if (st.size > max) return { why: `it is over ${max} bytes` };
+    // O_NOFOLLOW only covers the last part of the path, so the folder must still be the one checked above.
+    const now = lstatSync(parent);
+    if (now.dev !== dir.dev || now.ino !== dir.ino || delegateDirProblem(now, uid))
+      return { why: "its folder changed" };
+    const key = `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+    if (key === cachedKey) return { key };
+    afterStat?.(fd);
+    const buf = new Uint8Array(st.size + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+    }
+    if (n !== st.size) return { why: n > st.size ? "it grew while it was read" : "it shrank while it was read" };
+    return { key, code: buf.slice(0, n) };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return { why: code === "ENOENT" ? "" : `it cannot be read (${code ?? "error"})` };
+  } finally {
+    if (fd >= 0)
+      try {
+        closeSync(fd);
+      } catch {}
+  }
+}
+
+/**
+ * Reads the bundle at one fixed path (readDelegateBundle), and reads it again only when the opened file's device,
+ * inode, size, mtime or ctime change. null when there is no usable bundle. log hears each new reason for a refusal
+ * once; a missing file is not one.
+ */
+export function delegateBundleReader(
+  path: string,
+  o: { max?: number; uid?: number; log?: (msg: string) => void; afterStat?: (fd: number) => void } = {},
+): () => Uint8Array<ArrayBuffer> | null {
+  const max = o.max ?? DELEGATE_BUNDLE_MAX;
+  const uid = o.uid ?? process.getuid?.() ?? -1;
   let cache: { key: string; code: Uint8Array<ArrayBuffer> } | null = null;
+  let said = "";
   return () => {
     if (!path) return null;
-    try {
-      const st = statSync(path);
-      if (!st.isFile() || st.size > max) return null;
-      const key = `${st.mtimeMs}:${st.size}`;
-      if (cache?.key !== key) {
-        const code = readFileSync(path);
-        // The file can grow between stat and read.
-        if (code.length > max) return null;
-        cache = { key, code };
-      }
-      return cache.code;
-    } catch {
+    const r = readDelegateBundle(path, max, uid, cache?.key, o.afterStat);
+    if ("why" in r) {
       cache = null;
+      if (r.why && r.why !== said) o.log?.(`mini app: the Delegate board bundle is refused, ${r.why}: ${path}`);
+      said = r.why;
       return null;
     }
+    said = "";
+    if (r.code) cache = { key: r.key, code: r.code };
+    return cache?.code ?? null;
   };
 }
 
@@ -909,7 +1001,7 @@ export function startMiniApp(opts: {
   const delegatePath = delegateBundlePath();
   if (process.env.TELEGRAM_MINIAPP_DELEGATE_BUNDLE?.trim() && !delegatePath)
     opts.log("mini app: TELEGRAM_MINIAPP_DELEGATE_BUNDLE must be an absolute path; the Delegate board stays off");
-  const delegateBundle = delegateBundleReader(delegatePath);
+  const delegateBundle = delegateBundleReader(delegatePath, { log: opts.log });
 
   const touch = () => {
     if (!worker) {

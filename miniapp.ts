@@ -354,6 +354,13 @@ export async function needsRoute(
   log(
     `mini app: needs answer ${str(body.code).slice(0, 64)} -> ${status}${reply.reason ? ` ${str(reply.reason)}` : ""}`,
   );
+  if (status === 200 && reply.ok === true) {
+    // One line per accepted answer: which decision, which option. Never initData, a token, a user id or the text.
+    const a = (reply.answer ?? {}) as { code?: unknown; version?: unknown; option?: unknown };
+    log(
+      `mini app: needs answer surface=miniapp code=${str(a.code).slice(0, 64)} version=${Number(a.version) || 0} option=${str(a.option).slice(0, 32)}`,
+    );
+  }
   return json(reply, status);
 }
 

@@ -353,30 +353,36 @@ button.f-row:active { background: var(--press); }
 .block-head.sh, .block-head.sh .bh-r { align-items: center; }
 /* Board | List: equal halves, so one thumb slides between them. The active label colour comes from
    a clipped copy of the labels, so text and thumb change in one motion instead of two crossfades. */
-.seg-v { --n: 2; --i: 0; position: relative; display: inline-grid; grid-template-columns: repeat(var(--n), 1fr); margin: -4px 0; isolation: isolate; }
+.seg-v { --n: 2; --i: 0; --l: 0; --wd: .5; position: relative; display: inline-grid; grid-template-columns: var(--cols, repeat(var(--n), 1fr)); margin: -4px 0; isolation: isolate; }
 .seg-v button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px 0 8px; transition: transform 160ms var(--ease-out); }
 .seg-v button[aria-pressed] { background: none; box-shadow: none; color: var(--hint); }
 .seg-v button:active { transform: scale(.96); }
 .seg-v .ico { width: 14px; height: 14px; }
 .seg-thumb, .seg-copy { position: absolute; top: 2px; bottom: 2px; left: 2px; pointer-events: none; }
 .seg-thumb {
-  z-index: -1; width: calc((100% - 4px) / var(--n)); border-radius: 8px; background: var(--ui-pill);
+  z-index: -1; width: calc((100% - 4px) * var(--wd)); border-radius: 8px; background: var(--ui-pill);
   box-shadow: var(--ui-pill-shadow);
-  transform: translateX(calc(var(--i) * 100%));
+  transform: translateX(calc(var(--l) / var(--wd) * 100%));
   transition: transform 250ms var(--ease-in-out);
 }
 .seg-copy {
-  right: 2px; display: grid; grid-template-columns: repeat(var(--n), 1fr); color: var(--text);
-  clip-path: inset(0 calc(100% - (var(--i) + 1) * 100% / var(--n)) 0 calc(var(--i) * 100% / var(--n)) round 8px);
+  right: 2px; display: grid; grid-template-columns: var(--cols, repeat(var(--n), 1fr)); color: var(--text);
+  clip-path: inset(0 calc(100% - (var(--l) + var(--wd)) * 100%) 0 calc(var(--l) * 100%) round 8px);
   transition: clip-path 250ms var(--ease-in-out);
 }
 .seg-copy > span { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px 0 8px; font-size: 12.5px; font-weight: 600; }
-/* Three views on a phone: icons only, the label stays for screen readers */
+/* A count of what waits for you, on the Needs you button */
+.seg-b { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--bad); color: #fff; font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; font-variant-numeric: tabular-nums; }
+.seg-b[hidden] { display: none; }
+/* Three or more views on a phone: icons only, the label stays for screen readers. Needs you keeps its text (the grid weights in syncView give it the room). */
 @media (max-width: 439.98px) {
-  .seg-v.n3 button { padding: 0 11px; }
-  .seg-v.n3 button .seg-l { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .seg-v.n3 .seg-copy > span { padding: 0 11px; }
-  .seg-v.n3 .seg-copy .seg-l { display: none; }
+  /* With the label on Needs you, Sessions + New task + the toggle can be wider than the phone: the toggle drops to its own line */
+  .block-head.sh { flex-wrap: wrap; row-gap: 8px; }
+  .block-head.sh .bh-r { margin-left: auto; }
+  .seg-v.n3 button:not([data-sview="needs"]) { padding: 0 11px; }
+  .seg-v.n3 button:not([data-sview="needs"]) .seg-l { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .seg-v.n3 .seg-copy > span:not([data-cview="needs"]) { padding: 0 11px; }
+  .seg-v.n3 .seg-copy > span:not([data-cview="needs"]) .seg-l { display: none; }
 }
 /* Keyboard-driven changes happen instantly: animation there only adds delay */
 .k-instant .seg-thumb, .k-instant .seg-copy, .k-instant .kc-wrap, .k-instant .kc-inner, .k-instant .kc-reveal { transition: none !important; }
@@ -1865,13 +1871,16 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
   const townAvail = () => S.townOn === true || (S.townOn == null && S.sview === 'town');
   const viewNow = () => (S.sview === 'town' && !townAvail() ? 'board' : S.sview);
   const viewSegHTML = views => `<span class="seg-thumb" aria-hidden="true"></span>` +
-    views.map(([v, label]) => `<button type="button" data-sview="${v}" aria-pressed="false">${svg(v)}<span class="seg-l">${label}</span></button>`).join('') +
-    `<span class="seg-copy" aria-hidden="true">${views.map(([v, label]) => `<span>${svg(v)}<span class="seg-l">${label}</span></span>`).join('')}</span>`;
+    views.map(([v, label]) => `<button type="button" data-sview="${v}" aria-pressed="false"${v === 'needs' ? needsAria() : ''}>${svg(v)}<span class="seg-l">${label}</span>${v === 'needs' ? needsBadgeHTML() : ''}</button>`).join('') +
+    `<span class="seg-copy" aria-hidden="true">${views.map(([v, label]) => `<span data-cview="${v}">${svg(v)}<span class="seg-l">${label}</span>${v === 'needs' ? needsBadgeHTML() : ''}</span>`).join('')}</span>`;
+  // The Needs you button is the widest on a phone; the grid columns follow these weights so the thumb and the clip can follow them too.
+  const narrowMQ = matchMedia('(max-width: 439.98px)');
+  const viewWeights = views => views.map(([v]) => (narrowMQ.matches && views.length > 2 && v === 'needs' ? 3.3 : 1));
   // Board shows only with live data and at least one session; otherwise #sessions holds skeletons or the empty state.
   function syncView() {
     const seg = $('#view-seg');
     const views = VIEWS.filter(([v]) => v !== 'town' || townAvail());
-    const key = views.map(x => x[0]).join();
+    const key = views.map(x => x[0]).join() + (narrowMQ.matches ? '/n' : '');
     const v = viewNow();
     const place = () => {
       if (seg._k !== key) {
@@ -1881,7 +1890,12 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
         seg.classList.toggle('n3', views.length > 2);
       }
       $$('button', seg).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.sview === v)));
-      seg.style.setProperty('--i', Math.max(0, views.findIndex(x => x[0] === v)));
+      const idx = Math.max(0, views.findIndex(x => x[0] === v));
+      const wts = viewWeights(views), sum = wts.reduce((a, b) => a + b, 0);
+      seg.style.setProperty('--i', idx);
+      seg.style.setProperty('--cols', wts.map(w => `${w}fr`).join(' '));
+      seg.style.setProperty('--l', wts.slice(0, idx).reduce((a, b) => a + b, 0) / sum);
+      seg.style.setProperty('--wd', wts[idx] / sum);
     };
     // A toggle that gains or loses the Town button jumps into place: sliding there would be motion nobody asked for.
     if (seg._k !== key && seg._k != null) instantly(seg, place); else place();
@@ -1936,11 +1950,11 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     if (b && !b.hidden && b.getClientRects().length && Math.abs(b.scrollLeft - S.kScroll) > 1) b.scrollLeft = S.kScroll;
   }
   let viewFade = null;
-  function setView(v, instant) {
+  function setView(v, instant, auto) {
     if (!VIEWS.some(x => x[0] === v) || (v === 'town' && !townAvail()) || v === S.sview) return;
     S.sview = v;
-    try { localStorage.setItem('ccab.view', v); } catch (_) {}
-    haptic();
+    // An automatic switch (first open with something waiting) is not the user's choice: it neither locks the toggle nor replaces the remembered view.
+    if (!auto) { N.userChose = true; try { localStorage.setItem('ccab.view', v); } catch (_) {} haptic(); }
     if (instant) instantly($('#view-seg'), render); else render();
     // The incoming view fades in (opacity only), so the swap under the toggle doesn't feel like a jump cut.
     const shown = !$('#needs').hidden ? $('#needs') : !$('#town').hidden ? $('#town') : $('#board').hidden ? $('#sessions') : $('#board');
@@ -1954,21 +1968,61 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
      and task approvals, which are read-only here. A tap posts api/needs/answer; the server checks the
      decision again and runs the same code as a button tap in Telegram. */
   const NEEDS_MS = 5000;
-  const N = { data: null, err: '', inflight: null, timer: 0, readAt: 0, done: new Map(), busy: new Set(), errs: new Map() };
+  const NEEDS_BG_MS = 15000;   // while another view is on screen: only the count on the button
+  const NEEDS_FIRST_MS = 1500; // how long the first open waits for the count before it stays on the remembered view
+  const N = { data: null, ok: false, err: '', inflight: null, timer: 0, ms: 0, readAt: 0, done: new Map(), busy: new Set(), errs: new Map(), userChose: false, decided: false, firstT: 0 };
+  /* needs:pure:start */
+  // "9+" above nine, nothing for none, so the button shows no badge at all.
+  function badgeText(count) {
+    const n = Math.floor(Number(count));
+    return n > 0 ? (n > 9 ? '9+' : String(n)) : '';
+  }
+  // Open on Needs you once, on the first open of a session, when something waits and the user has not picked a view yet.
+  function shouldAutoOpenNeeds({ count, userChose, rememberedView, firstOpenDecided }) {
+    return !firstOpenDecided && !userChose && Number(count) > 0 && rememberedView !== 'needs';
+  }
+  /* needs:pure:end */
   const needsActive = () => S.view === 'main' && viewNow() === 'needs' && !doc.hidden && !S.paused && S.mode !== 'auth' && S.mode !== 'unreachable';
+  // The light background poll: page visible, not paused, signed in (the main poll has an answer).
+  const needsBg = () => !doc.hidden && !S.paused && (S.mode === 'live' || S.mode === 'stale');
   function needsStop() {
     clearTimeout(N.timer); N.timer = 0;
     if (N.inflight) { N.inflight.abort(); N.inflight = null; }
   }
-  // Called on every render and every clock tick: polls every 5 s while the list is on screen.
+  // Decisions still open plus pending approvals. An answered decision leaves the count at once; Later keeps it open.
+  function needsCount() {
+    const d = N.ok && N.data;
+    if (!d) return 0;
+    const decs = d.decisions.items.filter(x => !N.done.has(needKey(x))).length;
+    const apps = d.approvals && Array.isArray(d.approvals.items) ? d.approvals.items.length : 0;
+    return decs + apps;
+  }
+  const needsAria = () => { const n = needsCount(); return n > 0 ? ` aria-label="Needs you, ${n} open"` : ''; };
+  const needsBadgeHTML = () => { const t = badgeText(needsCount()); return `<span class="seg-b" data-nbadge${t ? '' : ' hidden'}>${t}</span>`; };
+  function needsBadge() {
+    const n = needsCount(), t = badgeText(n);
+    $$('[data-nbadge]').forEach(b => { setText(b, t); b.hidden = !t; });
+    const b = $('#view-seg [data-sview="needs"]');
+    if (b) { if (n > 0) b.setAttribute('aria-label', `Needs you, ${n} open`); else b.removeAttribute('aria-label'); }
+  }
+  // The first-open default is decided once: on the first answer, or after 1.5 s without one.
+  function needsDecide() {
+    if (N.decided) return;
+    N.decided = true;
+    clearTimeout(N.firstT);
+    if (S.view === 'main' && shouldAutoOpenNeeds({ count: needsCount(), userChose: N.userChose, rememberedView: S.sview, firstOpenDecided: false })) setView('needs', false, true);
+  }
+  // Called on every render and every clock tick: polls every 5 s while the list is on screen, every 15 s in the background.
   function needsSync() {
-    if (!needsActive()) needsStop();
+    if (!needsBg()) needsStop();
+    else if (needsActive() && N.timer && N.ms > NEEDS_MS && !N.inflight) needsPoll(); // just switched to the list: refresh now
     else if (!N.timer && !N.inflight) needsPoll();
   }
   const needKey = d => `${d.project}/${d.code}#${d.version}`;
   async function needsPoll() {
     clearTimeout(N.timer); N.timer = 0;
-    if (!needsActive() || N.inflight) return;
+    if (!needsBg() || N.inflight) return;
+    if (!N.decided && !N.firstT) N.firstT = setTimeout(needsDecide, NEEDS_FIRST_MS);
     const ctrl = new AbortController();
     N.inflight = ctrl;
     const killer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
@@ -1977,24 +2031,29 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
         headers: { Authorization: 'tma ' + ((WA && WA.initData) || '') },
         cache: 'no-store', credentials: 'same-origin', signal: ctrl.signal,
       });
-      if (res.status === 401 || res.status === 403) return; // the main poll shows the sign-in state
+      if (res.status === 401 || res.status === 403) { N.ok = false; needsBadge(); return; } // the main poll shows the sign-in state
       const body = await res.json().catch(() => null);
+      N.ok = false;
       if (res.ok && body && body.decisions && Array.isArray(body.decisions.items)) {
-        N.data = body; N.err = ''; N.readAt = Date.now();
+        N.data = body; N.ok = true; N.err = ''; N.readAt = Date.now();
         // A decision that left the list is settled: forget the optimistic mark and any old error for it.
         const live = new Set(body.decisions.items.map(needKey));
         for (const k of [...N.done.keys()]) if (!live.has(k)) N.done.delete(k);
         for (const k of [...N.errs.keys()]) if (!live.has(k)) N.errs.delete(k);
       } else N.err = (body && typeof body.error === 'string' && body.error) || (res.status === 404 ? 'The bot does not have the Needs you list installed.' : 'unexpected answer');
       renderNeeds();
+      needsBadge();
+      if (N.ok) needsDecide();
     } catch (_) {
       if (N.inflight !== ctrl) return; // stopped on purpose
+      N.ok = false;
       N.err = 'no answer from the bot';
       renderNeeds();
+      needsBadge();
     } finally {
       clearTimeout(killer);
       if (N.inflight === ctrl) N.inflight = null;
-      if (needsActive() && !N.timer) N.timer = setTimeout(needsPoll, NEEDS_MS);
+      if (needsBg() && !N.timer) { N.ms = needsActive() ? NEEDS_MS : NEEDS_BG_MS; N.timer = setTimeout(needsPoll, N.ms); }
     }
   }
   function needsCard(d) {
@@ -2049,6 +2108,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     N.busy.add(key); N.errs.delete(key);
     N.done.set(key, `✅ ${o.label}`); // optimistic: rolled back below when the server refuses
     renderNeeds();
+    needsBadge();
     const r = await api('api/needs/answer', { body: { project: item.project, code: item.code, version: item.version, option: opt }, timeout: 15000 });
     N.busy.delete(key);
     if (r.ok) {
@@ -2062,6 +2122,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
       if (r.status === 409) { needsStop(); needsPoll(); }
     }
     renderNeeds();
+    needsBadge();
   }
 
   /* ================= Town (AffectUI cards) =================
@@ -3724,6 +3785,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
   }, { passive: true });
   $('#board').addEventListener('scrollend', boardSettled);
   wideMQ.addEventListener && wideMQ.addEventListener('change', () => fitBoard());
+  narrowMQ.addEventListener && narrowMQ.addEventListener('change', () => syncView());
   window.addEventListener('resize', () => { if (S.menu) placeMenu(); });
   window.addEventListener('scroll', () => { if (S.menu) placeMenu(); }, { passive: true });
 

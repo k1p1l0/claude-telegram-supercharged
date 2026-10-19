@@ -13,6 +13,12 @@ export function parseDecisionData(data: string): { code: string; key: string } |
   return { code: m[1], key: m[2] };
 }
 
+/** A button label as the tap stores it: whitespace collapsed, trimmed, at most 200 characters. Null when empty. */
+export function cleanLabel(text: string): string | null {
+  const label = String(text).replace(/\s+/g, " ").trim().slice(0, 200);
+  return label.length ? label : null;
+}
+
 /** Find the button whose callback_data equals `data` in an inline_keyboard (array of rows) and return its label. */
 export function labelFromKeyboard(keyboard: unknown, data: string): string | null {
   if (!Array.isArray(keyboard)) return null;
@@ -22,8 +28,7 @@ export function labelFromKeyboard(keyboard: unknown, data: string): string | nul
       if (btn && typeof btn === "object" && (btn as any).callback_data === data) {
         const text = (btn as any).text;
         if (typeof text !== "string") return null;
-        const label = text.replace(/\s+/g, " ").trim().slice(0, 200);
-        return label.length ? label : null;
+        return cleanLabel(text);
       }
     }
   }
@@ -53,4 +58,68 @@ export function syntheticTapId(callbackQueryId: string, nowMs: number): number {
   // h < 2^32; nowMs < 2^41 => h * 2^20 + (nowMs mod 2^20) < 2^52, a safe integer.
   const n = h * 1048576 + (Math.floor(Math.abs(nowMs)) % 1048576);
   return -(n + 1);
+}
+
+/** The reserved option key every decision card carries as its last button. */
+export const LATER_KEY = "later";
+
+/** The label of the inert button that replaces the keyboard once a decision is answered. */
+export function doneButtonText(label: string): string {
+  return `✅ ${label}`;
+}
+
+/** The part of the message store a tap needs. MessageStore in server.ts satisfies it. */
+export interface TapStore {
+  store(msg: {
+    message_id: number;
+    chat_id: string;
+    user_id?: string;
+    username?: string;
+    first_name?: string;
+    text?: string;
+    reply_to_msg_id?: number;
+    date: number;
+    is_outgoing?: boolean;
+    bot?: string;
+  }): void;
+}
+
+export interface TapInput {
+  /** Id that makes the synthetic message id unique: the Telegram callback query id, or a Mini App request id. */
+  tapId: string;
+  nowMs: number;
+  chatId: string;
+  userId?: string;
+  username?: string;
+  firstName?: string;
+  code: string;
+  key: string;
+  label: string;
+  /** The decision message that carried the buttons. */
+  decisionMsgId: number;
+  /** History key of the bot that sent it ("" for the primary bot). */
+  bot: string;
+}
+
+/**
+ * Records one decision tap as a messages row: text "<CODE> <label>", a negative synthetic id and
+ * reply_to_msg_id = the decision message. Both the Telegram button and the Mini App go through here,
+ * so the row is the same. Throws when the store fails.
+ */
+export function recordDecisionTap(store: TapStore, t: TapInput): { messageId: number; text: string; later: boolean } {
+  const messageId = syntheticTapId(t.tapId, t.nowMs);
+  const text = tapRowText(t.code, t.label);
+  store.store({
+    message_id: messageId,
+    chat_id: t.chatId,
+    user_id: t.userId,
+    username: t.username,
+    first_name: t.firstName,
+    text,
+    reply_to_msg_id: t.decisionMsgId,
+    date: Math.floor(t.nowMs / 1000),
+    is_outgoing: false,
+    bot: t.bot,
+  });
+  return { messageId, text, later: t.key === LATER_KEY };
 }

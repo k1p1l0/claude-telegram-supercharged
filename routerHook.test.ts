@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type HookDeps,
   NOT_INSTALLED,
+  ROUTER_TIMEOUT_MS,
   type RouterModule,
   type RouterResult,
   decodeButton,
@@ -169,10 +170,11 @@ describe("routeOwnerCallback", () => {
     expect(await routeOwnerCallback(deps(fake({ action: "hold", reply: "ok" })), cb("stp:c:12:3", "99"))).toEqual({
       handled: true,
       reply: "Not authorized.",
+      noEdit: true,
     });
     expect(
       await routeOwnerCallback(deps(fake({ action: "hold", reply: "ok" })), cb("stp:c:12:3", "42", "-100")),
-    ).toEqual({ handled: true, reply: "Not authorized." });
+    ).toEqual({ handled: true, reply: "Not authorized.", noEdit: true });
     expect(calls.length).toBe(0);
   });
   test("stale confirm shows the router's rejection text", async () => {
@@ -346,10 +348,15 @@ describe("aut: and gol: callback tokens", () => {
     expect(calls[0].text).toBe("/auto undo 7");
     expect(await routeOwnerCallback(d, cb("gol:s:2"))).toEqual({ handled: true, reply: "ok" });
     expect(calls[1].text).toBe("/goal stop 2");
-    expect(await routeOwnerCallback(d, cb("aut:c:1", "99"))).toEqual({ handled: true, reply: "Not authorized." });
+    expect(await routeOwnerCallback(d, cb("aut:c:1", "99"))).toEqual({
+      handled: true,
+      reply: "Not authorized.",
+      noEdit: true,
+    });
     expect(await routeOwnerCallback(d, cb("gol:c:1", "42", "-100", "supergroup"))).toEqual({
       handled: true,
       reply: "Not authorized.",
+      noEdit: true,
     });
     expect(calls.length).toBe(2);
   });
@@ -367,5 +374,117 @@ describe("aut: and gol: callback tokens", () => {
   test("isRouterCallbackData covers the three prefixes only", () => {
     expect(["stp:c:1:1", "aut:s", "gol:c:1"].every(isRouterCallbackData)).toBe(true);
     expect(["perm:allow:x", "dec:1", "auto:1"].some(isRouterCallbackData)).toBe(false);
+  });
+});
+
+describe("review fixes (PR 56)", () => {
+  const never: RouterModule = { routeTelegram: () => new Promise<RouterResult>(() => {}) };
+  const ctxFor = (data: string, userId: number, chat: { id: number; type: string }, log: unknown[][]) => ({
+    from: { id: userId },
+    me: { username: "MyBot" },
+    callbackQuery: { data, message: { chat, message_id: 7 } },
+    reply: async () => {},
+    answerCallbackQuery: async (...a: unknown[]) => {
+      log.push(["answer", ...a]);
+    },
+    editMessageText: async (...a: unknown[]) => {
+      log.push(["edit", ...a]);
+    },
+  });
+
+  test("a router that never answers times out with a neutral error and no keyboard", async () => {
+    const out = await routeOwnerCommand({ ...deps(never), timeoutMs: 20 }, dm("/auto on 2"));
+    expect(out).toEqual({ handled: true, reply: "The command timed out. The result is unknown. Check /auto status." });
+  });
+  test("the timeout is a named 20 second default", () => {
+    expect(ROUTER_TIMEOUT_MS).toBe(20_000);
+  });
+  test("timeout hint matches the command", async () => {
+    const goal = await routeOwnerCommand({ ...deps(never), timeoutMs: 10 }, dm("/goal new x"));
+    expect((goal as { reply: string }).reply).toContain("Check /goals.");
+    const stop = await routeOwnerCommand({ ...deps(never), timeoutMs: 10 }, dm("/stopall"));
+    expect((stop as { reply: string }).reply).toContain("Check /stops.");
+  });
+  test("an async router result works", async () => {
+    const mod: RouterModule = {
+      routeTelegram: async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        return { action: "hold", reply: "async ok", buttons: [{ label: "Undo", text: "/auto undo 4" }] };
+      },
+    };
+    const out = await routeOwnerCommand({ ...deps(mod), timeoutMs: 1000 }, dm("/auto on"));
+    expect(out).toEqual({ handled: true, reply: "async ok", keyboard: [{ text: "Undo", callback_data: "aut:u:4" }] });
+  });
+  test("an async rejection is reported as unknown state", async () => {
+    const mod: RouterModule = { routeTelegram: async () => Promise.reject(new Error("boom")) };
+    const out = await routeOwnerCommand(deps(mod), dm("/goals"));
+    const reply = (out as { reply: string }).reply;
+    expect(reply).toContain("boom");
+    expect(reply).toContain("Check /goals.");
+    expect(reply).not.toContain("Nothing was changed");
+    expect(out).not.toHaveProperty("keyboard");
+  });
+  test("error and bypass wording is command-neutral and never claims nothing changed", async () => {
+    const texts: string[] = [];
+    texts.push(NOT_INSTALLED);
+    for (const r of [{ action: "weird" }, { action: "hold" }] as RouterResult[]) {
+      const out = await routeOwnerCommand(deps(fake(r)), dm("/auto status"));
+      texts.push((out as { reply: string }).reply);
+    }
+    const thrown = await routeOwnerCommand(
+      deps(
+        fake(() => {
+          throw new Error("x");
+        }),
+      ),
+      dm("/auto status"),
+    );
+    texts.push((thrown as { reply: string }).reply);
+    for (const t of texts) {
+      expect(t).not.toContain("Stop controls");
+      expect(t).not.toContain("Nothing was changed");
+    }
+    expect(texts[1]).toContain("Check /auto status.");
+  });
+
+  test("the edit keeps the keyboard the router returned", async () => {
+    const log: unknown[][] = [];
+    const mod = fake({ action: "hold", reply: "Auto on.", buttons: [{ label: "Undo", text: "/auto undo 9" }] });
+    await handleRouterCallback(ctxFor("aut:c:5", 42, { id: 42, type: "private" }, log), deps(mod));
+    expect(log).toEqual([
+      ["answer", { text: "Auto on." }],
+      ["edit", "Auto on.", { reply_markup: { inline_keyboard: [[{ text: "Undo", callback_data: "aut:u:9" }]] } }],
+    ]);
+  });
+  test("a non-owner tap, in a DM or a group, answers only and does not edit", async () => {
+    for (const data of ["stp:c:1:1", "aut:c:5", "gol:s:3"]) {
+      for (const [uid, chat] of [
+        [99, { id: 99, type: "private" }],
+        [42, { id: -100, type: "supergroup" }],
+        [99, { id: -100, type: "supergroup" }],
+      ] as const) {
+        calls.length = 0;
+        const log: unknown[][] = [];
+        await handleRouterCallback(ctxFor(data, uid, chat, log), deps(fake({ action: "hold", reply: "ok" })));
+        expect(log).toEqual([["answer", { text: "Not authorized." }]]);
+        expect(calls.length).toBe(0);
+      }
+    }
+  });
+  test("a non-owner tap on a garbage token also leaves the message alone", async () => {
+    const log: unknown[][] = [];
+    await handleRouterCallback(ctxFor("stp:nope", 99, { id: 99, type: "private" }, log), deps(undefined));
+    expect(log).toEqual([["answer", { text: "Not authorized." }]]);
+  });
+
+  test("goal ids are integers (migration 8): 1 to 9 digits round trip, other forms are refused", () => {
+    expect(encodeButton("/goal stop 123456789")).toBe("gol:s:123456789");
+    expect(decodeButton("gol:s:123456789")).toBe("/goal stop 123456789");
+    expect(encodeButton("/goal stop 1234567890")).toBeNull();
+    expect(encodeButton("/goal stop mvd1n9s8")).toBeNull();
+    expect(encodeButton("/goal stop -1")).toBeNull();
+    expect(decodeButton("gol:s:mvd1n9s8")).toBeNull();
+    expect(decodeButton("gol:s:1234567890")).toBeNull();
+    expect(new TextEncoder().encode("gol:s:123456789").length).toBeLessThanOrEqual(64);
   });
 });

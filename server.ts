@@ -37,7 +37,14 @@ import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 import { doneButtonText, labelFromKeyboard, parseDecisionData, recordDecisionTap } from "./decisionTap";
 import { createNeeds, defaultTasksDb, lockedRead, readApprovalsDb } from "./needsList";
-import { handleRouterCallback, handleRouterMessage, makeRouterLoader, routerPath, type HookDeps } from "./routerHook";
+import {
+  handleRouterCallback,
+  handleRouterMessage,
+  isRouterCallbackData,
+  makeRouterLoader,
+  routerPath,
+  type HookDeps,
+} from "./routerHook";
 
 // The Agents Board is optional. If miniapp.ts is missing next to this file, only /agents stops working.
 const miniapp = await import("./miniapp").catch((err) => {
@@ -3441,7 +3448,7 @@ bot.on("callback_query:data", async (ctx) => {
     await handlePermissionCallback(ctx, data);
     return;
   }
-  if (data.startsWith("stp:")) {
+  if (isRouterCallbackData(data)) {
     await handleRouterCallback(ctx, routerHookDeps(ctx));
     return;
   }

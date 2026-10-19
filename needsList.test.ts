@@ -87,7 +87,7 @@ function memStore() {
   };
 }
 
-function harness(stateText: string | null | Error, approvals?: Source<NeedsApproval>) {
+function harness(stateText: string | null | Error, approvals?: Source<NeedsApproval>, cardChat?: () => string | null) {
   const store = memStore();
   const edits: Array<[string, number, string]> = [];
   let reads = 0;
@@ -107,6 +107,7 @@ function harness(stateText: string | null | Error, approvals?: Source<NeedsAppro
       edits.push([c, m, t]);
     },
     bot: "",
+    cardChat,
     now: () => clock,
     log: () => {},
   };
@@ -234,6 +235,89 @@ describe("needsRoute: initData and allowlist", () => {
     expect(mine[0]).not.toContain("hash=");
     expect(mine[0]).not.toContain(TOKEN);
     expect(mine[0]).not.toContain(OWNER);
+  });
+});
+
+describe("answer: owner chat, freshness, strict shown (review of PR 57)", () => {
+  const body = { project: "p1", code: "D1", version: 1, option: "a" };
+  const OTHER = "222";
+
+  test("B2: only the user of the card chat can answer; nothing is written for anyone else", async () => {
+    const h = harness(stateJson({ "p1/D1": dec() }), undefined, () => OWNER);
+    const [status, reply] = await h.needs.answer(OTHER, body);
+    expect(status).toBe(403);
+    expect(reply.reason).toBe("not_owner");
+    expect(h.store.rows()).toHaveLength(0);
+    expect(h.edits).toEqual([]);
+    const [ok] = await h.needs.answer(OWNER, body);
+    expect(ok).toBe(200);
+    expect(h.edits).toEqual([[OWNER, 500, "✅ Approve"]]);
+  });
+
+  test("B2: no known card chat means no answer", async () => {
+    const h = harness(stateJson({ "p1/D1": dec() }), undefined, () => null);
+    expect((await h.needs.answer(OWNER, body))[0]).toBe(403);
+    expect(h.store.rows()).toHaveLength(0);
+  });
+
+  test("I3: a decision with shown missing or 0 is not answerable, like verdict() in the skill", async () => {
+    for (const shown of [undefined, 0, 2]) {
+      const h = harness(stateJson({ "p1/D1": dec({ shown }) }));
+      const [status, reply] = await h.needs.answer(OWNER, body);
+      expect(status).toBe(409);
+      expect(reply.reason).toBe("not_answerable");
+    }
+  });
+
+  test("L3: a non-string queued_at or answered.at in one entry does not blank the list", async () => {
+    const h = harness(
+      stateJson({
+        "p1/D1": dec({ queued_at: 12345 }),
+        "p1/D2": dec({ code: "D2", queued_at: "2026-10-19T12:00:00Z", msg: 501 }),
+      }),
+    );
+    const r = (await h.needs.list()) as any;
+    expect(r.decisions.status).toBe("ok");
+    expect(r.decisions.items).toHaveLength(2);
+  });
+});
+
+describe("needsRoute: owner only and fresh initData for answers (review of PR 57)", () => {
+  const h = harness(stateJson({ "p1/D1": dec() }));
+  const everyone = telegramUserOf(TOKEN, () => true);
+  const fresh10 = telegramUserOf(TOKEN, () => true, 600);
+  const now = Math.floor(Date.now() / 1000);
+  const call = (path: string, init: RequestInit & { auth?: string }, canSee: (u: string) => boolean = () => true) =>
+    needsRoute(req(path, init), path, everyone, h.needs, () => {}, canSee, fresh10);
+
+  test("I1: a user that is not owner or admin gets 403 on the list and on the answer", async () => {
+    const auth = signed("222", now);
+    expect((await call("/api/needs", { auth }, (u) => u === OWNER))!.status).toBe(403);
+    const r = await call("/api/needs/answer", { method: "POST", auth, body: "{}" }, (u) => u === OWNER);
+    expect(r!.status).toBe(403);
+  });
+
+  test("I2: the list accepts a day-old initData, the answer needs one younger than ten minutes", async () => {
+    const old = signed(OWNER, now - 3600);
+    expect((await call("/api/needs", { auth: old }))!.status).toBe(200);
+    const r = await call("/api/needs/answer", { method: "POST", auth: old, body: "{}" });
+    expect(r!.status).toBe(401);
+  });
+
+  test("L1: a code with newlines or control characters is cleaned before it is logged", async () => {
+    const lines: string[] = [];
+    await needsRoute(
+      req("/api/needs/answer", {
+        method: "POST",
+        auth: signed(OWNER, now),
+        body: JSON.stringify({ code: "D1\nforged line", version: 1, option: "a" }),
+      }),
+      "/api/needs/answer",
+      everyone,
+      h.needs,
+      (m) => lines.push(m),
+    );
+    expect(lines.join("")).not.toContain("\n");
   });
 });
 
@@ -699,7 +783,7 @@ describe("miniapp/index.html", () => {
     expect(badgeText(0)).toBe("");
     expect(badgeText(-3)).toBe("");
     expect(badgeText(undefined)).toBe("");
-    expect(badgeText(NaN)).toBe("");
+    expect(badgeText(Number.NaN)).toBe("");
     expect(badgeText(1)).toBe("1");
     expect(badgeText(9)).toBe("9");
     expect(badgeText(10)).toBe("9+");

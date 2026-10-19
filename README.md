@@ -850,7 +850,7 @@ If your supergroup has **Topics** enabled, the plugin forwards `thread_id` (Tele
 - `AGENT_HARNESS_ROUTER` sets the router file. Default: `~/Projects/agent-harness/telegram-router.ts`. The router reads the plugin's `access.json` and needs its own opt-in file (`~/agent-inbox/telegram-router.json`).
 - `AGENT_HARNESS_STATUS_TEXT` sets the text sent to the router for `/stops`. Default: `/status`. Set it to `/stops` once the router renames its command.
 - Fail rules: for a non-owner nothing is handled, so nothing changes. For the owner a stop is never swallowed: if the router file or its opt-in is missing, the bot replies "Stop controls are not installed."; if the router throws, the bot replies with the error.
-- `/stopall` replies with Confirm and Cancel buttons (`stp:c:<id>:<generation>` and `stp:x:<id>:<generation>`, 24 bytes at most). A tap re-checks the allowlist, runs the same router command and replaces the message with the result and no buttons. The router rejects an old or used confirm.
+- `/stopall` replies with Confirm and Cancel buttons (`stp:c:<id>:<generation>` and `stp:x:<id>:<generation>`, 25 bytes at most). A tap re-checks the allowlist, runs the same router command and replaces the message with the result and no buttons. The router rejects an old or used confirm.
 
 ## Access Control
 

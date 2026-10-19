@@ -290,10 +290,10 @@ export function verifyInitData(raw: string, token: string, maxAgeSec = DAY / 100
 }
 
 /** The request's Telegram user id when its `Authorization: tma <initData>` is valid, fresh and allowlisted. */
-export function telegramUserOf(token: string, isAllowed: (userId: string) => boolean) {
+export function telegramUserOf(token: string, isAllowed: (userId: string) => boolean, maxAgeSec?: number) {
   return (req: Request): string | null => {
     const m = /^tma (.+)$/.exec(req.headers.get("authorization") ?? "");
-    const userId = m ? verifyInitData(m[1], token) : null;
+    const userId = m ? verifyInitData(m[1], token, maxAgeSec) : null;
     return userId && isAllowed(userId) ? userId : null;
   };
 }
@@ -313,6 +313,10 @@ export async function needsRoute(
   userOf: (req: Request) => string | null,
   needs: NeedsApi | undefined,
   log: (msg: string) => void,
+  /** Who may see and answer decisions (owner or admin). Default: every user that passed userOf. */
+  canSee: (userId: string) => boolean = () => true,
+  /** For answers only: a user lookup with a short initData age, so captured initData cannot approve for a day. */
+  freshUserOf: (req: Request) => string | null = userOf,
 ): Promise<Response | null> {
   if (pathname !== "/api/needs" && pathname !== "/api/needs/answer") return null;
   const json = (body: unknown, status = 200) =>
@@ -322,8 +326,9 @@ export async function needsRoute(
     });
   const answer = pathname === "/api/needs/answer";
   if (req.method !== (answer ? "POST" : "GET")) return new Response("Method not allowed", { status: 405 });
-  const userId = userOf(req);
+  const userId = answer ? freshUserOf(req) : userOf(req);
   if (!userId) return json({ error: "unauthorized" }, 401);
+  if (!canSee(userId)) return json({ error: "forbidden" }, 403);
   if (!needs) return json({ error: "needs list is not installed" }, 404);
   if (!answer) {
     try {
@@ -337,7 +342,9 @@ export async function needsRoute(
   if (typeof body === "string") return json({ error: body }, 400);
   const [status, reply] = await needs.answer(userId, body);
   log(
-    `mini app: needs answer ${str(body.code).slice(0, 64)} -> ${status}${reply.reason ? ` ${str(reply.reason)}` : ""}`,
+    `mini app: needs answer ${str(body.code)
+      .replace(/[^\w./@:-]/g, "?")
+      .slice(0, 64)} -> ${status}${reply.reason ? ` ${str(reply.reason)}` : ""}`,
   );
   if (status === 200 && reply.ok === true) {
     // One line per accepted answer: which decision, which option. Never initData, a token, a user id or the text.
@@ -930,6 +937,8 @@ export function startMiniApp(opts: {
     });
 
   const telegramUser = telegramUserOf(opts.token, opts.isAllowed);
+  // Answers need initData younger than ten minutes (the Mini App re-signs on every open).
+  const telegramUserFresh = telegramUserOf(opts.token, opts.isAllowed, 600);
 
   const isPeer = (req: Request) =>
     !!peerSecret && sameSecret(req.headers.get("authorization") ?? "", `Bearer ${peerSecret}`);
@@ -1238,7 +1247,15 @@ export function startMiniApp(opts: {
       if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
       return pathname === "/api/control" ? controlRoute(req, url) : peerControlRoute(req);
     }
-    const needsReply = await needsRoute(req, pathname, telegramUser, opts.needs, opts.log);
+    const needsReply = await needsRoute(
+      req,
+      pathname,
+      telegramUser,
+      opts.needs,
+      opts.log,
+      opts.canControl ?? (() => true),
+      telegramUserFresh,
+    );
     if (needsReply) return needsReply;
     if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
     if (pathname === "/" || pathname === "/index.html") {
@@ -1728,9 +1745,18 @@ function runWorker(post: (msg: unknown) => void, onTouch: (fn: () => void) => vo
       // session. Skill text, other isMeta lines without an origin and background task notices belong to
       // the turn they are in.
       const origin = e.origin?.kind;
-      const prompt = !result && !e.isCompactSummary && !e.isSidechain && (origin ? origin !== "task-notification" : !e.isMeta);
+      const prompt =
+        !result && !e.isCompactSummary && !e.isSidechain && (origin ? origin !== "task-notification" : !e.isMeta);
       if (prompt && t) {
-        f.turn = { prompt: promptText(m.content), text: "", startedAt: t, endedAt: t, searches: 0, tools: 0, steps: [] };
+        f.turn = {
+          prompt: promptText(m.content),
+          text: "",
+          startedAt: t,
+          endedAt: t,
+          searches: 0,
+          tools: 0,
+          steps: [],
+        };
       }
     }
   }

@@ -2039,7 +2039,8 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
         headers: { Authorization: 'tma ' + ((WA && WA.initData) || '') },
         cache: 'no-store', credentials: 'same-origin', signal: ctrl.signal,
       });
-      if (res.status === 401 || res.status === 403) { N.ok = false; needsBadge(); return; } // the main poll shows the sign-in state
+      if (res.status === 403) { N.ok = false; N.data = null; N.err = 'The Needs you list is only for the owner of this bot.'; needsBadge(); renderNeeds(); return; }
+      if (res.status === 401) { N.ok = false; needsBadge(); return; } // the main poll shows the sign-in state
       const body = await res.json().catch(() => null);
       N.ok = false;
       if (res.ok && body && body.decisions && Array.isArray(body.decisions.items)) {

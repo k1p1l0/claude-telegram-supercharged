@@ -107,7 +107,7 @@ function harness(stateText: string | null | Error, approvals?: Source<NeedsAppro
       edits.push([c, m, t]);
     },
     bot: "",
-    cardChat,
+    cardChat: cardChat ?? (() => OWNER),
     now: () => clock,
     log: () => {},
   };
@@ -159,7 +159,15 @@ describe("needsRoute: initData and allowlist", () => {
   const h = harness(stateJson({ "p1/D1": dec() }));
   const user = telegramUserOf(TOKEN, (id) => id === OWNER);
   const call = (path: string, init: RequestInit & { auth?: string } = {}) =>
-    needsRoute(req(path, init), path, user, h.needs, () => {});
+    needsRoute(
+      req(path, init),
+      path,
+      user,
+      h.needs,
+      () => {},
+      () => true,
+      user,
+    );
   const fresh = Math.floor(Date.now() / 1000);
 
   test("not a needs path is null", async () => {
@@ -191,6 +199,8 @@ describe("needsRoute: initData and allowlist", () => {
       user,
       undefined,
       () => {},
+      () => true,
+      user,
     );
     expect(r!.status).toBe(404);
   });
@@ -207,6 +217,8 @@ describe("needsRoute: initData and allowlist", () => {
       user,
       h.needs,
       (m) => lines.push(m),
+      () => true,
+      user,
     );
     expect(lines.length).toBe(2); // the result line and the accepted-answer line
     expect(lines.join("")).not.toContain(auth);
@@ -223,6 +235,8 @@ describe("needsRoute: initData and allowlist", () => {
         user,
         hh.needs,
         (m) => lines.push(m),
+        () => true,
+        user,
       );
     const bad = await post({ project: "p1", code: "D1", version: 1, option: "nope" });
     expect(bad!.status).not.toBe(200);
@@ -285,7 +299,7 @@ describe("answer: owner chat, freshness, strict shown (review of PR 57)", () => 
 describe("needsRoute: owner only and fresh initData for answers (review of PR 57)", () => {
   const h = harness(stateJson({ "p1/D1": dec() }));
   const everyone = telegramUserOf(TOKEN, () => true);
-  const fresh10 = telegramUserOf(TOKEN, () => true, 600);
+  const fresh10 = telegramUserOf(TOKEN, () => true, 3600);
   const now = Math.floor(Date.now() / 1000);
   const call = (path: string, init: RequestInit & { auth?: string }, canSee: (u: string) => boolean = () => true) =>
     needsRoute(req(path, init), path, everyone, h.needs, () => {}, canSee, fresh10);
@@ -297,11 +311,19 @@ describe("needsRoute: owner only and fresh initData for answers (review of PR 57
     expect(r!.status).toBe(403);
   });
 
-  test("I2: the list accepts a day-old initData, the answer needs one younger than ten minutes", async () => {
-    const old = signed(OWNER, now - 3600);
+  test("I2: the list accepts a day-old initData, the answer needs one younger than an hour and says to reopen", async () => {
+    const old = signed(OWNER, now - 7200);
     expect((await call("/api/needs", { auth: old }))!.status).toBe(200);
     const r = await call("/api/needs/answer", { method: "POST", auth: old, body: "{}" });
     expect(r!.status).toBe(401);
+    expect(((await r!.json()) as any).reason).toBe("stale_session");
+    // An hour-old session still answers (the app stays open between decisions).
+    const mid = await call("/api/needs/answer", {
+      method: "POST",
+      auth: signed(OWNER, now - 1800),
+      body: JSON.stringify({ project: "p1", code: "D1", version: 1, option: "a" }),
+    });
+    expect(mid!.status).toBe(200);
   });
 
   test("L1: a code with newlines or control characters is cleaned before it is logged", async () => {
@@ -316,6 +338,8 @@ describe("needsRoute: owner only and fresh initData for answers (review of PR 57
       everyone,
       h.needs,
       (m) => lines.push(m),
+      () => true,
+      fresh10,
     );
     expect(lines.join("")).not.toContain("\n");
   });

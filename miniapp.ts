@@ -329,9 +329,9 @@ export async function needsRoute(
   needs: NeedsApi | undefined,
   log: (msg: string) => void,
   /** Who may see and answer decisions (owner or admin). Default: every user that passed userOf. */
-  canSee: (userId: string) => boolean = () => true,
+  canSee: (userId: string) => boolean,
   /** For answers only: a user lookup with a short initData age, so captured initData cannot approve for a day. */
-  freshUserOf: (req: Request) => string | null = userOf,
+  freshUserOf: (req: Request) => string | null,
 ): Promise<Response | null> {
   if (pathname !== "/api/needs" && pathname !== "/api/needs/answer") return null;
   const json = (body: unknown, status = 200) =>
@@ -342,7 +342,16 @@ export async function needsRoute(
   const answer = pathname === "/api/needs/answer";
   if (req.method !== (answer ? "POST" : "GET")) return new Response("Method not allowed", { status: 405 });
   const userId = answer ? freshUserOf(req) : userOf(req);
-  if (!userId) return json({ error: "unauthorized" }, 401);
+  if (!userId) {
+    // initData is signed when the Mini App opens and is not re-signed while it stays open.
+    if (answer && userOf(req)) {
+      return json(
+        { error: "This session is too old to answer. Close the Mini App and open it again.", reason: "stale_session" },
+        401,
+      );
+    }
+    return json({ error: "unauthorized" }, 401);
+  }
   if (!canSee(userId)) return json({ error: "forbidden" }, 403);
   if (!needs) return json({ error: "needs list is not installed" }, 404);
   if (!answer) {
@@ -1113,8 +1122,9 @@ export function startMiniApp(opts: {
     });
 
   const telegramUser = telegramUserOf(opts.token, opts.isAllowed);
-  // Answers need initData younger than ten minutes (the Mini App re-signs on every open).
-  const telegramUserFresh = telegramUserOf(opts.token, opts.isAllowed, 600);
+  // Answers need initData younger than one hour. Telegram signs it when the app opens and does not re-sign it while
+  // it stays open, so an older session is told to reopen the app (reason stale_session).
+  const telegramUserFresh = telegramUserOf(opts.token, opts.isAllowed, 3600);
 
   const isPeer = (req: Request) =>
     !!peerSecret && sameSecret(req.headers.get("authorization") ?? "", `Bearer ${peerSecret}`);
@@ -1429,7 +1439,7 @@ export function startMiniApp(opts: {
       telegramUser,
       opts.needs,
       opts.log,
-      opts.canControl ?? (() => true),
+      opts.canControl ?? ((userId) => opts.isAllowed(userId)),
       telegramUserFresh,
     );
     if (needsReply) return needsReply;

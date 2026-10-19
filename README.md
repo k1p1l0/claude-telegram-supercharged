@@ -426,6 +426,7 @@ For a fixed address, use your own HTTPS setup:
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `TELEGRAM_MINIAPP_URL` | not set | HTTPS address of the board, or `auto` for a Cloudflare quick tunnel (needs `cloudflared`). Until it is set, `/agents` replies with these setup steps. |
+| `TELEGRAM_DECISIONS_OWNER` | first admin, else first allowlisted user | The chat the telegram-decisions skill sends decision cards to (its `OWNER`). The Needs you list answers only for this user, because the tap row and the card edit go to this chat. Set it when the skill's owner is not the first admin or allowlisted user. |
 | `TELEGRAM_MINIAPP_PORT` | `8790` | Local port of the board. |
 | `TELEGRAM_MINIAPP_NAME` | computer name | Machine name in the board header. |
 | `TELEGRAM_MINIAPP` | on | `off` turns the board off. |

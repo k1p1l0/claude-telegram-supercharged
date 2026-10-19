@@ -266,9 +266,9 @@ export interface NeedsDeps {
   /**
    * The chat the decision cards live in (the owner's private chat). Only that user can answer from the Mini App:
    * the tap row and the card edit go to this chat, so an answer from anyone else would be written to a chat that
-   * does not hold the card. Undefined (tests only) means the requester's own chat.
+   * does not hold the card. It must be the chat the telegram-decisions skill sends to (its OWNER).
    */
-  cardChat?: () => string | null;
+  cardChat: () => string | null;
   now?: () => number;
   log?: (msg: string) => void;
   /** Where the "needs list codes=…" lines are appended with a timestamp, next to state.json. Off when unset. */
@@ -400,7 +400,7 @@ export function createNeeds(deps: NeedsDeps) {
     const label = cleanLabel(String(d.options[option]));
     if (!label) return [409, { error: "That option has no label.", reason: "not_answerable" }];
 
-    const chatId = deps.cardChat ? deps.cardChat() : userId;
+    const chatId = deps.cardChat();
     if (!chatId || chatId !== userId)
       return [
         403,

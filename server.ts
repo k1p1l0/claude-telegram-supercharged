@@ -5247,8 +5247,11 @@ const needs = miniapp
         });
       },
       bot: botKey(bots[0]),
-      // Decision cards go to the owner's private chat: the first allowlisted DM, or the first admin when set.
+      // Decision cards go to the owner's private chat, the skill's OWNER. TELEGRAM_DECISIONS_OWNER names it; without it
+      // the first admin, or the first allowlisted user, is taken.
       cardChat: () => {
+        const set = (process.env.TELEGRAM_DECISIONS_OWNER ?? "").trim();
+        if (/^\d+$/.test(set)) return set;
         const a = loadAccess();
         return (a.admins?.length ? a.admins[0] : a.allowFrom[0]) ?? null;
       },

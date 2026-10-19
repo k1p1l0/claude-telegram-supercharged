@@ -13,11 +13,14 @@ export type RouterResult =
   | { action: string; [k: string]: unknown };
 export type RouterInput = { chatId: string; userId: string; threadId?: string; text: string };
 export type RouterModule = {
-  routeTelegram: (input: RouterInput, options?: { accessFile?: string }) => RouterResult;
+  routeTelegram: (input: RouterInput, options?: { accessFile?: string }) => RouterResult | Promise<RouterResult>;
 };
 
 export type HookKeyboardButton = { text: string; callback_data: string };
-export type HookOutput = { handled: false } | { handled: true; reply: string; keyboard?: HookKeyboardButton[] };
+export type HookOutput =
+  | { handled: false }
+  // noEdit: answer the tap only; the shared message must stay as it is (unauthorized tapper).
+  | { handled: true; reply: string; keyboard?: HookKeyboardButton[]; noEdit?: boolean };
 
 /** Plain-text view of what Telegram needs: one message and an optional inline keyboard. */
 export type HookDeps = {
@@ -28,6 +31,8 @@ export type HookDeps = {
   accessFile: string;
   /** Text sent to the router for /stops. The router names its status command; see docs. */
   statusText?: string;
+  /** Router call timeout in ms. Default ROUTER_TIMEOUT_MS. Injected for tests. */
+  timeoutMs?: number;
 };
 
 export type HookInput = {
@@ -40,7 +45,9 @@ export type HookInput = {
   botUsername: string;
 };
 
-export const NOT_INSTALLED = "Stop controls are not installed.";
+export const NOT_INSTALLED = "Owner commands are not installed.";
+/** How long the hook waits for the router before it gives up and replies with an error. */
+export const ROUTER_TIMEOUT_MS = 20_000;
 const CMD_RE = /^\/(stop|stopall|resume|pause|stops|auto|goal|goals)(?:@(\w+))?(?:\s+([\s\S]*))?$/i;
 export const DEFAULT_ROUTER_PATH = "~/Projects/agent-harness/telegram-router.ts";
 
@@ -85,6 +92,8 @@ const CONFIRM_RE = /^\/stopall (confirm|cancel) (\d{1,9}) (\d{1,9})$/;
 const TOKEN_RE = /^stp:([cx]):(\d{1,9}):(\d{1,9})$/;
 const AUTO_BTN_RE = /^\/auto (confirm|cancel|undo) (\d{1,9})$/;
 const AUTO_STOP_RE = /^\/auto stop$/;
+// Goal ids are SQLite INTEGER PRIMARY KEY AUTOINCREMENT (agent-harness migration 8), so digits only,
+// with the same 1 to 9 digit bound the router applies to every id and generation.
 const GOAL_BTN_RE = /^\/goal (confirm|cancel|stop) (\d{1,9})$/;
 const AUTO_TOKEN_RE = /^aut:(?:([cxu]):(\d{1,9})|(s))$/;
 const GOAL_TOKEN_RE = /^gol:([cxs]):(\d{1,9})$/;
@@ -118,25 +127,48 @@ export function decodeButton(data: string): string | null {
   return null;
 }
 
+/** Which status command the owner should check when the outcome of a command is not known. */
+function statusHint(routerText: string): string {
+  if (/^\/auto\b/.test(routerText)) return "/auto status";
+  if (/^\/goal/.test(routerText)) return "/goals";
+  return "/stops";
+}
+
+const TIMED_OUT = Symbol("timed out");
+
 async function run(deps: HookDeps, input: Omit<HookInput, "text">, routerText: string): Promise<HookOutput> {
   const router = await deps.loadRouter();
   if (!router) return { handled: true, reply: NOT_INSTALLED };
-  let result: RouterResult;
+  const unknown = `The result is unknown. Check ${statusHint(routerText)}.`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let result: RouterResult | typeof TIMED_OUT;
   try {
-    result = router.routeTelegram(
-      { chatId: input.chatId, userId: input.userId, threadId: input.threadId, text: routerText },
-      { accessFile: deps.accessFile },
+    const call = Promise.resolve(
+      router.routeTelegram(
+        { chatId: input.chatId, userId: input.userId, threadId: input.threadId, text: routerText },
+        { accessFile: deps.accessFile },
+      ),
     );
+    call.catch(() => {}); // a call that loses the race must not become an unhandled rejection
+    const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), deps.timeoutMs ?? ROUTER_TIMEOUT_MS);
+    });
+    result = await Promise.race([call, timeout]);
   } catch (err) {
     return {
       handled: true,
-      reply: `Stop controls failed: ${String((err as Error)?.message ?? err).slice(0, 200)}. Nothing was changed.`,
+      reply: `The command failed: ${String((err as Error)?.message ?? err).slice(0, 200)}. ${unknown}`,
     };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
+  if (result === TIMED_OUT) return { handled: true, reply: `The command timed out. ${unknown}` };
+  if (!result || typeof result !== "object")
+    return { handled: true, reply: `Unexpected reply from the router. ${unknown}` };
   if (result.action === "bypass") return { handled: true, reply: NOT_INSTALLED };
   if (result.action === "drop") return { handled: true, reply: "Not authorized." };
   if (result.action !== "hold" || typeof (result as { reply?: unknown }).reply !== "string") {
-    return { handled: true, reply: "Stop controls returned an unexpected result. Nothing was changed." };
+    return { handled: true, reply: `Unexpected reply from the router. ${unknown}` };
   }
   const hold = result as Extract<RouterResult, { action: "hold" }>;
   let reply = hold.reply;
@@ -163,11 +195,12 @@ export async function routeOwnerCallback(
   deps: HookDeps,
   input: Omit<HookInput, "text"> & { data: string },
 ): Promise<HookOutput> {
+  // Check the tapper before anything else: a stranger must not learn or change anything.
+  if (input.chatType !== "private" || input.chatId !== input.userId || !deps.isOwner(input.userId)) {
+    return { handled: true, reply: "Not authorized.", noEdit: true };
+  }
   const routerText = decodeButton(input.data);
   if (routerText === null) return { handled: true, reply: "This button is no longer valid." };
-  if (input.chatType !== "private" || input.chatId !== input.userId || !deps.isOwner(input.userId)) {
-    return { handled: true, reply: "Not authorized." };
-  }
   return run(deps, input, routerText);
 }
 
@@ -210,6 +243,10 @@ export async function handleRouterCallback(ctx: CtxLike, deps: HookDeps): Promis
   });
   if (!out.handled) return;
   await ctx.answerCallbackQuery({ text: out.reply.slice(0, 200) }).catch(() => {});
-  // Edit without a keyboard so a second tap cannot repeat the action.
-  if (msg) await ctx.editMessageText(out.reply.slice(0, 4000)).catch(() => {});
+  // An unauthorized tapper only gets the callback answer; the shared message stays untouched.
+  if (out.noEdit || !msg) return;
+  // Edit without a keyboard so a second tap cannot repeat the action, except for the follow-up
+  // buttons (undo, stop) the router returned with this result.
+  const text = out.reply.slice(0, 4000);
+  await (out.keyboard ? ctx.editMessageText(text, markup(out.keyboard)) : ctx.editMessageText(text)).catch(() => {});
 }

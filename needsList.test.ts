@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 // The "Needs you" list and its answer route. No bot, no network, no real state: temp folders and sqlite files.
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordDecisionTap, tapRowText } from "./decisionTap";
@@ -87,7 +87,7 @@ function memStore() {
   };
 }
 
-function harness(stateText: string | null | Error, approvals?: Source<NeedsApproval>) {
+function harness(stateText: string | null | Error, approvals?: Source<NeedsApproval>, cardChat?: () => string | null) {
   const store = memStore();
   const edits: Array<[string, number, string]> = [];
   let reads = 0;
@@ -107,6 +107,7 @@ function harness(stateText: string | null | Error, approvals?: Source<NeedsAppro
       edits.push([c, m, t]);
     },
     bot: "",
+    cardChat: cardChat ?? (() => OWNER),
     now: () => clock,
     log: () => {},
   };
@@ -158,7 +159,15 @@ describe("needsRoute: initData and allowlist", () => {
   const h = harness(stateJson({ "p1/D1": dec() }));
   const user = telegramUserOf(TOKEN, (id) => id === OWNER);
   const call = (path: string, init: RequestInit & { auth?: string } = {}) =>
-    needsRoute(req(path, init), path, user, h.needs, () => {});
+    needsRoute(
+      req(path, init),
+      path,
+      user,
+      h.needs,
+      () => {},
+      () => true,
+      user,
+    );
   const fresh = Math.floor(Date.now() / 1000);
 
   test("not a needs path is null", async () => {
@@ -190,6 +199,8 @@ describe("needsRoute: initData and allowlist", () => {
       user,
       undefined,
       () => {},
+      () => true,
+      user,
     );
     expect(r!.status).toBe(404);
   });
@@ -206,6 +217,8 @@ describe("needsRoute: initData and allowlist", () => {
       user,
       h.needs,
       (m) => lines.push(m),
+      () => true,
+      user,
     );
     expect(lines.length).toBe(2); // the result line and the accepted-answer line
     expect(lines.join("")).not.toContain(auth);
@@ -222,6 +235,8 @@ describe("needsRoute: initData and allowlist", () => {
         user,
         hh.needs,
         (m) => lines.push(m),
+        () => true,
+        user,
       );
     const bad = await post({ project: "p1", code: "D1", version: 1, option: "nope" });
     expect(bad!.status).not.toBe(200);
@@ -234,6 +249,99 @@ describe("needsRoute: initData and allowlist", () => {
     expect(mine[0]).not.toContain("hash=");
     expect(mine[0]).not.toContain(TOKEN);
     expect(mine[0]).not.toContain(OWNER);
+  });
+});
+
+describe("answer: owner chat, freshness, strict shown (review of PR 57)", () => {
+  const body = { project: "p1", code: "D1", version: 1, option: "a" };
+  const OTHER = "222";
+
+  test("B2: only the user of the card chat can answer; nothing is written for anyone else", async () => {
+    const h = harness(stateJson({ "p1/D1": dec() }), undefined, () => OWNER);
+    const [status, reply] = await h.needs.answer(OTHER, body);
+    expect(status).toBe(403);
+    expect(reply.reason).toBe("not_owner");
+    expect(h.store.rows()).toHaveLength(0);
+    expect(h.edits).toEqual([]);
+    const [ok] = await h.needs.answer(OWNER, body);
+    expect(ok).toBe(200);
+    expect(h.edits).toEqual([[OWNER, 500, "✅ Approve"]]);
+  });
+
+  test("B2: no known card chat means no answer", async () => {
+    const h = harness(stateJson({ "p1/D1": dec() }), undefined, () => null);
+    expect((await h.needs.answer(OWNER, body))[0]).toBe(403);
+    expect(h.store.rows()).toHaveLength(0);
+  });
+
+  test("I3: a decision with shown missing or 0 is not answerable, like verdict() in the skill", async () => {
+    for (const shown of [undefined, 0, 2]) {
+      const h = harness(stateJson({ "p1/D1": dec({ shown }) }));
+      const [status, reply] = await h.needs.answer(OWNER, body);
+      expect(status).toBe(409);
+      expect(reply.reason).toBe("not_answerable");
+    }
+  });
+
+  test("L3: a non-string queued_at or answered.at in one entry does not blank the list", async () => {
+    const h = harness(
+      stateJson({
+        "p1/D1": dec({ queued_at: 12345 }),
+        "p1/D2": dec({ code: "D2", queued_at: "2026-10-19T12:00:00Z", msg: 501 }),
+      }),
+    );
+    const r = (await h.needs.list()) as any;
+    expect(r.decisions.status).toBe("ok");
+    expect(r.decisions.items).toHaveLength(2);
+  });
+});
+
+describe("needsRoute: owner only and fresh initData for answers (review of PR 57)", () => {
+  const h = harness(stateJson({ "p1/D1": dec() }));
+  const everyone = telegramUserOf(TOKEN, () => true);
+  const fresh10 = telegramUserOf(TOKEN, () => true, 3600);
+  const now = Math.floor(Date.now() / 1000);
+  const call = (path: string, init: RequestInit & { auth?: string }, canSee: (u: string) => boolean = () => true) =>
+    needsRoute(req(path, init), path, everyone, h.needs, () => {}, canSee, fresh10);
+
+  test("I1: a user that is not owner or admin gets 403 on the list and on the answer", async () => {
+    const auth = signed("222", now);
+    expect((await call("/api/needs", { auth }, (u) => u === OWNER))!.status).toBe(403);
+    const r = await call("/api/needs/answer", { method: "POST", auth, body: "{}" }, (u) => u === OWNER);
+    expect(r!.status).toBe(403);
+  });
+
+  test("I2: the list accepts a day-old initData, the answer needs one younger than an hour and says to reopen", async () => {
+    const old = signed(OWNER, now - 7200);
+    expect((await call("/api/needs", { auth: old }))!.status).toBe(200);
+    const r = await call("/api/needs/answer", { method: "POST", auth: old, body: "{}" });
+    expect(r!.status).toBe(401);
+    expect(((await r!.json()) as any).reason).toBe("stale_session");
+    // An hour-old session still answers (the app stays open between decisions).
+    const mid = await call("/api/needs/answer", {
+      method: "POST",
+      auth: signed(OWNER, now - 1800),
+      body: JSON.stringify({ project: "p1", code: "D1", version: 1, option: "a" }),
+    });
+    expect(mid!.status).toBe(200);
+  });
+
+  test("L1: a code with newlines or control characters is cleaned before it is logged", async () => {
+    const lines: string[] = [];
+    await needsRoute(
+      req("/api/needs/answer", {
+        method: "POST",
+        auth: signed(OWNER, now),
+        body: JSON.stringify({ code: "D1\nforged line", version: 1, option: "a" }),
+      }),
+      "/api/needs/answer",
+      everyone,
+      h.needs,
+      (m) => lines.push(m),
+      () => true,
+      fresh10,
+    );
+    expect(lines.join("")).not.toContain("\n");
   });
 });
 
@@ -374,6 +482,39 @@ describe("list: sources and their status", () => {
     h.tick(2);
     await h.needs.list();
     expect(h.reads()).toBe(2);
+  });
+  test("one 'needs list codes=' line when the set of codes changes, in the log and in needs-answers.log", async () => {
+    const lines: string[] = [];
+    const file = join(dir, "needs-answers.log");
+    let clock = NOW;
+    let current = stateJson({ "p1/D2": dec({ code: "D2" }), "p1/D1": dec() });
+    const needs = createNeeds({
+      readState: async () => current,
+      readApprovals: () => ({ status: "ok", items: [] }),
+      store: memStore(),
+      editCard: async () => {},
+      bot: "",
+      now: () => clock,
+      log: (m) => lines.push(m),
+      answersLog: file,
+    });
+    const codeLines = () => lines.filter((l) => l.startsWith("mini app: needs list codes="));
+    await needs.list();
+    expect(codeLines()).toEqual(["mini app: needs list codes=D1,D2"]);
+    clock += 3000;
+    await needs.list(); // same set: no second line
+    expect(codeLines()).toHaveLength(1);
+    current = stateJson({ "p1/D2": dec({ code: "D2" }), "p1/D1": dec({ answered: { option: "a", version: 1 } }) });
+    clock += 3000;
+    await needs.list(); // D1 answered elsewhere: the set changed
+    expect(codeLines()).toEqual(["mini app: needs list codes=D1,D2", "mini app: needs list codes=D2"]);
+    current = new Error("lock busy") as unknown as string;
+    clock += 3000;
+    await needs.list(); // an unreadable state is not a change of the set
+    expect(codeLines()).toHaveLength(2);
+    expect(readFileSync(file, "utf8")).toBe(
+      "2026-10-19T12:00:00.000Z mini app: needs list codes=D1,D2\n2026-10-19T12:00:06.000Z mini app: needs list codes=D2\n",
+    );
   });
 });
 
@@ -666,7 +807,7 @@ describe("miniapp/index.html", () => {
     expect(badgeText(0)).toBe("");
     expect(badgeText(-3)).toBe("");
     expect(badgeText(undefined)).toBe("");
-    expect(badgeText(NaN)).toBe("");
+    expect(badgeText(Number.NaN)).toBe("");
     expect(badgeText(1)).toBe("1");
     expect(badgeText(9)).toBe("9");
     expect(badgeText(10)).toBe("9+");
@@ -688,5 +829,16 @@ describe("miniapp/index.html", () => {
     expect(t).toContain("data-nbadge");
     expect(t).toContain("NEEDS_BG_MS");
     expect(t).toContain("setView('needs', false, true)");
+  });
+  test("the list is read every 5 s while on screen and refreshed at once when the page comes back", async () => {
+    const t = await html;
+    expect(t).toContain("const NEEDS_MS = 5000;");
+    expect(t).toContain("N.ms - (Date.now() - started)");
+    expect(t).toContain("window.addEventListener('focus', needsRefresh);");
+    const vis = t.match(/doc\.addEventListener\('visibilitychange', \(\) => \{([\s\S]*?)\n {2}\}\);/);
+    expect(vis).not.toBeNull();
+    expect(vis?.[1]).toContain("needsStop();");
+    expect(vis?.[1]).toContain("needsRefresh();");
+    expect(t).toContain("WA.onEvent('activated', () => { S.paused = false; needsRefresh();");
   });
 });

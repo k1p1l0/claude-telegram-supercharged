@@ -5,7 +5,7 @@
 
 import { Database } from "bun:sqlite";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { LATER_KEY, type TapStore, cleanLabel, doneButtonText, recordDecisionTap, tapRowText } from "./decisionTap";
@@ -165,7 +165,8 @@ export function notAnswerable(d: RawDecision): string | null {
   if (d.answered) return "closed";
   if (d.kind !== "inline") return "This is an old reply-keyboard decision. Answer it in Telegram.";
   if (!d.msg) return "The card is not sent yet.";
-  if (d.shown && d.shown !== d.version) return "The card shows an older version. Answer the newest card in Telegram.";
+  if (Number(d.shown) !== Number(d.version))
+    return "The card shows an older version. Answer the newest card in Telegram.";
   return null;
 }
 
@@ -174,7 +175,7 @@ export function buildDecisions(st: RawState, nowMs: number): NeedsDecision[] {
   const seen = new Set<string>();
   const inline = Object.keys(st.decisions)
     .filter((k) => isOpen(st.decisions[k]) && st.decisions[k].kind === "inline")
-    .sort((a, b) => (st.decisions[a].queued_at ?? "").localeCompare(st.decisions[b].queued_at ?? ""));
+    .sort((a, b) => String(st.decisions[a].queued_at ?? "").localeCompare(String(st.decisions[b].queued_at ?? "")));
   const keys = [...(st.live ? [st.live] : []), ...st.queue, ...inline].filter((k) => {
     if (seen.has(k) || !isOpen(st.decisions[k])) return false;
     seen.add(k);
@@ -262,8 +263,16 @@ export interface NeedsDeps {
   editCard: (chatId: string, messageId: number, buttonText: string) => Promise<void>;
   /** History key of the primary bot, as botKey() gives it. */
   bot: string;
+  /**
+   * The chat the decision cards live in (the owner's private chat). Only that user can answer from the Mini App:
+   * the tap row and the card edit go to this chat, so an answer from anyone else would be written to a chat that
+   * does not hold the card. It must be the chat the telegram-decisions skill sends to (its OWNER).
+   */
+  cardChat: () => string | null;
   now?: () => number;
   log?: (msg: string) => void;
+  /** Where the "needs list codes=…" lines are appended with a timestamp, next to state.json. Off when unset. */
+  answersLog?: string;
 }
 
 export type Reply = [number, Record<string, unknown>];
@@ -276,12 +285,38 @@ export function createNeeds(deps: NeedsDeps) {
   let cache: { at: number; value: Promise<NeedsResponse> } | null = null;
   const chain = new Map<string, Promise<unknown>>();
   let counter = 0;
+  let lastCodes: string | null = null;
+  let appendFailed = false;
+
+  /**
+   * One line when the set of open decision codes in the answer changes (also the first answer): to the plugin log and,
+   * with a timestamp, to needs-answers.log next to the state file, so a later report has server evidence of what the
+   * Mini App was told and when. Only the codes, never the text.
+   */
+  function noteCodes(items: NeedsDecision[]): void {
+    const codes = items
+      .map((d) => d.code)
+      .sort()
+      .join(",");
+    if (codes === lastCodes) return;
+    lastCodes = codes;
+    const line = `mini app: needs list codes=${codes}`;
+    deps.log?.(line);
+    if (!deps.answersLog) return;
+    try {
+      appendFileSync(deps.answersLog, `${new Date(now()).toISOString()} ${line}\n`);
+    } catch (err) {
+      if (!appendFailed) deps.log?.(`needs: could not append to ${deps.answersLog}: ${err}`);
+      appendFailed = true;
+    }
+  }
 
   async function build(): Promise<NeedsResponse> {
     const nowMs = now();
     let decisions: Source<NeedsDecision>;
     try {
       decisions = { status: "ok", items: buildDecisions(parseState(await deps.readState()), nowMs) };
+      noteCodes(decisions.items);
     } catch (err) {
       decisions = { status: "error", items: [], error: String((err as Error).message ?? err).slice(0, 200) };
     }
@@ -349,7 +384,7 @@ export function createNeeds(deps: NeedsDeps) {
     if (!open.length) {
       const newest = matches
         .map(([, d]) => d)
-        .sort((a, b) => (b.answered?.at ?? "").localeCompare(a.answered?.at ?? ""))[0];
+        .sort((a, b) => String(b.answered?.at ?? "").localeCompare(String(a.answered?.at ?? "")))[0];
       return answeredReply(newest) ?? [409, { error: "This decision is already closed.", reason: "closed" }];
     }
     const d = open[0][1];
@@ -365,7 +400,15 @@ export function createNeeds(deps: NeedsDeps) {
     const label = cleanLabel(String(d.options[option]));
     if (!label) return [409, { error: "That option has no label.", reason: "not_answerable" }];
 
-    const chatId = userId; // a private chat id is the user id, as for a Telegram tap
+    const chatId = deps.cardChat();
+    if (!chatId || chatId !== userId)
+      return [
+        403,
+        {
+          error: "Only the owner of the decision chat can answer here. Use the card in Telegram.",
+          reason: "not_owner",
+        },
+      ];
     const decisionMsg = Number(d.msg);
     // A tap row for this card is the first answer. It lives in messages.db, so a restart cannot lose it.
     let prior: string[] = [];

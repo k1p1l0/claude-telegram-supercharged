@@ -5229,6 +5229,7 @@ const needs = miniapp
       },
       bot: botKey(bots[0]),
       log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
+      answersLog: join(DECISIONS_DIR, "needs-answers.log"),
     })
   : null;
 

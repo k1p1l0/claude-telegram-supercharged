@@ -35,7 +35,9 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
-import { labelFromKeyboard, parseDecisionData, syntheticTapId, tapRowText } from "./decisionTap";
+import { doneButtonText, labelFromKeyboard, parseDecisionData, recordDecisionTap } from "./decisionTap";
+import { createNeeds, defaultTasksDb, lockedRead, readApprovalsDb } from "./needsList";
+import { handleRouterCallback, handleRouterMessage, makeRouterLoader, routerPath, type HookDeps } from "./routerHook";
 
 // The Agents Board is optional. If miniapp.ts is missing next to this file, only /agents stops working.
 const miniapp = await import("./miniapp").catch((err) => {
@@ -777,6 +779,16 @@ class MessageStore {
         `SELECT * FROM messages WHERE chat_id = ? AND bot = ? AND text LIKE ? ESCAPE '\\' ORDER BY date DESC LIMIT ?`,
       )
       .all(chatId, bot, `%${escaped}%`, limit) as Array<Record<string, unknown>>;
+  }
+
+  /** Texts of the button-tap rows (negative message id) that reply to one decision message. */
+  taps(chatId: string, replyTo: number, bot = ""): string[] {
+    const rows = this.db
+      .query(
+        "SELECT text FROM messages WHERE chat_id = ? AND bot = ? AND reply_to_msg_id = ? AND message_id < 0 AND is_outgoing = 0",
+      )
+      .all(chatId, bot, replyTo) as Array<{ text: string | null }>;
+    return rows.map((r) => r.text ?? "");
   }
 
   /** Bot key of the newest inbound message in a chat: routing fallback after a restart. */
@@ -1779,32 +1791,33 @@ async function handleDecisionCallback(ctx: Context, data: string): Promise<void>
     await ctx.answerCallbackQuery({ text: "This button is no longer valid." }).catch(() => {});
     return;
   }
-  const now = Date.now();
+  let later: boolean;
   try {
-    messageStore.store({
-      message_id: syntheticTapId(ctx.callbackQuery!.id, now),
-      chat_id: chatId,
-      user_id: ctx.from ? String(ctx.from.id) : undefined,
+    ({ later } = recordDecisionTap(messageStore, {
+      tapId: ctx.callbackQuery!.id,
+      nowMs: Date.now(),
+      chatId,
+      userId: ctx.from ? String(ctx.from.id) : undefined,
       username: ctx.from?.username,
-      first_name: ctx.from?.first_name,
-      text: tapRowText(parsed.code, label),
-      reply_to_msg_id: message.message_id,
-      date: Math.floor(now / 1000),
-      is_outgoing: false,
+      firstName: ctx.from?.first_name,
+      code: parsed.code,
+      key: parsed.key,
+      label,
+      decisionMsgId: message.message_id,
       bot: botKey(botOf(ctx)),
-    });
+    }));
   } catch (err) {
     process.stderr.write(`telegram channel: decision tap store failed: ${err}\n`);
     await ctx.answerCallbackQuery({ text: "Could not record the tap." }).catch(() => {});
     return;
   }
-  if (parsed.key === "later") {
+  if (later) {
     await ctx.answerCallbackQuery({ text: "Kept for later" }).catch(() => {});
     return;
   }
-  await ctx.answerCallbackQuery({ text: `✅ ${label}`.slice(0, 200) }).catch(() => {});
+  await ctx.answerCallbackQuery({ text: doneButtonText(label).slice(0, 200) }).catch(() => {});
   await ctx
-    .editMessageReplyMarkup({ reply_markup: new InlineKeyboard().text(`✅ ${label}`, "dec:done") })
+    .editMessageReplyMarkup({ reply_markup: new InlineKeyboard().text(doneButtonText(label), "dec:done") })
     .catch(() => {});
 }
 
@@ -3214,7 +3227,16 @@ bot.on("message", async (ctx, next) => {
   await next();
 });
 
+// Owner stop controls go to the agent-harness router (routerHook.ts).
+const routerHookDeps = (ctx: Context): HookDeps => ({
+  loadRouter: makeRouterLoader(routerPath()),
+  isOwner: (id) => botAccess(loadAccess(), botOf(ctx)).allowFrom.includes(id),
+  accessFile: ACCESS_FILE,
+  statusText: process.env.AGENT_HARNESS_STATUS_TEXT,
+});
+
 bot.on("message:text", async (ctx) => {
+  if (await handleRouterMessage(ctx, routerHookDeps(ctx))) return;
   if (await handleAgenticCommand(ctx)) return;
   await handleInbound(ctx, ctx.message.text, undefined, matchCustomCommand(ctx));
 });
@@ -3417,6 +3439,10 @@ bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data.startsWith("perm:")) {
     await handlePermissionCallback(ctx, data);
+    return;
+  }
+  if (data.startsWith("stp:")) {
+    await handleRouterCallback(ctx, routerHookDeps(ctx));
     return;
   }
   if (data.startsWith("dec:")) {
@@ -5182,6 +5208,23 @@ function fetchBotInfo(b: BotEntry): void {
 // Extra bots run the handlers registered on the primary; ctx carries their own api and username.
 for (const b of bots.slice(1)) b.bot.use(bot.middleware());
 
+// "Needs you" list and its answer buttons for the Mini App. The state lives in the decision skill's folder.
+const DECISIONS_DIR = join(homedir(), ".claude", "tg-decisions");
+const needs = miniapp
+  ? createNeeds({
+      readState: () => lockedRead(join(DECISIONS_DIR, "state.json"), join(DECISIONS_DIR, ".state.lock")),
+      readApprovals: (nowMs) => readApprovalsDb(defaultTasksDb(), nowMs),
+      store: messageStore,
+      editCard: async (chatId, messageId, buttonText) => {
+        await bots[0].bot.api.editMessageReplyMarkup(chatId, messageId, {
+          reply_markup: new InlineKeyboard().text(buttonText, "dec:done"),
+        });
+      },
+      bot: botKey(bots[0]),
+      log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
+    })
+  : null;
+
 if (!isSecondary) {
   miniapp?.startMiniApp({
     token: TOKEN,
@@ -5191,6 +5234,7 @@ if (!isSecondary) {
     notify: (userId, text) => bots[0].bot.api.sendMessage(userId, text),
     dataDir: DATA_DIR,
     log: (msg) => process.stderr.write(`telegram channel: ${msg}\n`),
+    needs: needs ?? undefined,
     webhook: WEBHOOK_MODE ? (req) => webhookHandler?.(req) ?? new Response("Not ready", { status: 503 }) : undefined,
   });
   startPolling(bots[0]);

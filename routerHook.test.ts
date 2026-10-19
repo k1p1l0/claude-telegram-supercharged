@@ -239,7 +239,15 @@ describe("/auto and /goal commands", () => {
     );
   });
   test("not matched", () => {
-    for (const t of ["/auto@otherbot on", "/goal@otherbot 1", "/autopilot", "/goalie", "/goalsx", "/automate on", "auto on"]) {
+    for (const t of [
+      "/auto@otherbot on",
+      "/goal@otherbot 1",
+      "/autopilot",
+      "/goalie",
+      "/goalsx",
+      "/automate on",
+      "auto on",
+    ]) {
       expect(matchOwnerCommand(t, "MyBot")).toBeNull();
     }
   });
@@ -306,7 +314,17 @@ describe("aut: and gol: callback tokens", () => {
     expect(encodeButton("/stopall confirm 12 3")).toBe("stp:c:12:3");
   });
   test("malformed tokens and unknown forms are refused", () => {
-    for (const d of ["aut:c", "aut:c:1234567890", "aut:z:1", "aut:s:1", "aut:", "gol:u:1", "gol:c:", "gol:c:1:2", "gol:s"]) {
+    for (const d of [
+      "aut:c",
+      "aut:c:1234567890",
+      "aut:z:1",
+      "aut:s:1",
+      "aut:",
+      "gol:u:1",
+      "gol:c:",
+      "gol:c:1:2",
+      "gol:s",
+    ]) {
       expect(decodeButton(d)).toBeNull();
     }
     expect(encodeButton("/auto on 2")).toBeNull();

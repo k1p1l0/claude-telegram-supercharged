@@ -1,4 +1,5 @@
-// Owner stop controls (/stop, /stopall, /resume, /pause, /stops) forwarded to the
+// Owner stop controls (/stop, /stopall, /resume, /pause, /stops) and the /auto and /goal(s)
+// commands forwarded to the
 // agent-harness Telegram router. Pure and injectable: no grammy, no server state.
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -40,7 +41,7 @@ export type HookInput = {
 };
 
 export const NOT_INSTALLED = "Stop controls are not installed.";
-const CMD_RE = /^\/(stop|stopall|resume|pause|stops)(?:@(\w+))?(?:\s+([\s\S]*))?$/i;
+const CMD_RE = /^\/(stop|stopall|resume|pause|stops|auto|goal|goals)(?:@(\w+))?(?:\s+([\s\S]*))?$/i;
 export const DEFAULT_ROUTER_PATH = "~/Projects/agent-harness/telegram-router.ts";
 
 /** Resolve the router file path from env, expanding a leading ~. */
@@ -72,20 +73,49 @@ export function matchOwnerCommand(text: string, botUsername: string, statusText 
   return arg ? `/${cmd} ${arg}` : `/${cmd}`;
 }
 
-// callback_data: stp:c:<id>:<generation> (confirm) or stp:x:<id>:<generation> (cancel).
-// Longest realistic form is "stp:c:999999999:999999999" (25 bytes), far under 64.
+// callback_data tokens. The token only names a router command; the router validates it and the
+// tapper is re-checked on every tap. All forms are far under Telegram's 64 byte limit.
+//   stp:c|x:<id>:<generation>   /stopall confirm|cancel   (25 bytes at most)
+//   aut:c|x:<generation>        /auto confirm|cancel      (15 bytes at most)
+//   aut:u:<id>                  /auto undo <id>           (15 bytes at most)
+//   aut:s                       /auto stop
+//   gol:c|x:<generation>        /goal confirm|cancel      (15 bytes at most)
+//   gol:s:<id>                  /goal stop <id>           (15 bytes at most)
 const CONFIRM_RE = /^\/stopall (confirm|cancel) (\d{1,9}) (\d{1,9})$/;
 const TOKEN_RE = /^stp:([cx]):(\d{1,9}):(\d{1,9})$/;
+const AUTO_BTN_RE = /^\/auto (confirm|cancel|undo) (\d{1,9})$/;
+const AUTO_STOP_RE = /^\/auto stop$/;
+const GOAL_BTN_RE = /^\/goal (confirm|cancel|stop) (\d{1,9})$/;
+const AUTO_TOKEN_RE = /^aut:(?:([cxu]):(\d{1,9})|(s))$/;
+const GOAL_TOKEN_RE = /^gol:([cxs]):(\d{1,9})$/;
+const AUTO_VERB: Record<string, string> = { c: "confirm", x: "cancel", u: "undo" };
+const GOAL_VERB: Record<string, string> = { c: "confirm", x: "cancel", s: "stop" };
+const AUTO_CODE: Record<string, string> = { confirm: "c", cancel: "x", undo: "u" };
+const GOAL_CODE: Record<string, string> = { confirm: "c", cancel: "x", stop: "s" };
+
+/** True for any callback_data this hook owns. */
+export const isRouterCallbackData = (data: string): boolean => /^(?:stp|aut|gol):/.test(data);
 
 export function encodeButton(commandText: string): string | null {
-  const m = CONFIRM_RE.exec(commandText);
-  return m ? `stp:${m[1] === "confirm" ? "c" : "x"}:${m[2]}:${m[3]}` : null;
+  let m = CONFIRM_RE.exec(commandText);
+  if (m) return `stp:${m[1] === "confirm" ? "c" : "x"}:${m[2]}:${m[3]}`;
+  if (AUTO_STOP_RE.test(commandText)) return "aut:s";
+  m = AUTO_BTN_RE.exec(commandText);
+  if (m) return `aut:${AUTO_CODE[m[1]]}:${m[2]}`;
+  m = GOAL_BTN_RE.exec(commandText);
+  if (m) return `gol:${GOAL_CODE[m[1]]}:${m[2]}`;
+  return null;
 }
 
 export function decodeButton(data: string): string | null {
   if (new TextEncoder().encode(data).length > 64) return null;
-  const m = TOKEN_RE.exec(data);
-  return m ? `/stopall ${m[1] === "c" ? "confirm" : "cancel"} ${m[2]} ${m[3]}` : null;
+  let m = TOKEN_RE.exec(data);
+  if (m) return `/stopall ${m[1] === "c" ? "confirm" : "cancel"} ${m[2]} ${m[3]}`;
+  m = AUTO_TOKEN_RE.exec(data);
+  if (m) return m[3] ? "/auto stop" : `/auto ${AUTO_VERB[m[1]]} ${m[2]}`;
+  m = GOAL_TOKEN_RE.exec(data);
+  if (m) return `/goal ${GOAL_VERB[m[1]]} ${m[2]}`;
+  return null;
 }
 
 async function run(deps: HookDeps, input: Omit<HookInput, "text">, routerText: string): Promise<HookOutput> {
@@ -128,7 +158,7 @@ export async function routeOwnerCommand(deps: HookDeps, input: HookInput): Promi
   return run(deps, input, routerText);
 }
 
-/** A tapped `stp:` button. Always handled: the tapper is re-checked, never trusted from the token. */
+/** A tapped `stp:`, `aut:` or `gol:` button. Always handled: the tapper is re-checked, never trusted from the token. */
 export async function routeOwnerCallback(
   deps: HookDeps,
   input: Omit<HookInput, "text"> & { data: string },

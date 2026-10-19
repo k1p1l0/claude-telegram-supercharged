@@ -1,4 +1,4 @@
-// Owner stop controls (/stop, /stopall, /resume, /pause, /stops) and the /auto and /goal(s)
+// Owner stop controls (/stop, /stopall, /resume, /pause, /stops) and the /auto, /goal(s) and /mandate
 // commands forwarded to the
 // agent-harness Telegram router. Pure and injectable: no grammy, no server state.
 import { homedir } from "node:os";
@@ -11,7 +11,7 @@ export type RouterResult =
   | { action: "drop" }
   | { action: "hold"; reply: string; project?: string; buttons?: RouterButton[] }
   | { action: string; [k: string]: unknown };
-export type RouterInput = { chatId: string; userId: string; threadId?: string; text: string };
+export type RouterInput = { chatId: string; userId: string; threadId?: string; text: string; messageId?: string };
 export type RouterModule = {
   routeTelegram: (input: RouterInput, options?: { accessFile?: string }) => RouterResult | Promise<RouterResult>;
 };
@@ -41,6 +41,8 @@ export type HookInput = {
   chatId: string;
   userId: string;
   threadId?: string;
+  /** The Telegram message id of the typed line or of the message that carries the tapped button. */
+  messageId?: string;
   /** Username of this bot, without @. */
   botUsername: string;
 };
@@ -48,7 +50,9 @@ export type HookInput = {
 export const NOT_INSTALLED = "Owner commands are not installed.";
 /** How long the hook waits for the router before it gives up and replies with an error. */
 export const ROUTER_TIMEOUT_MS = 20_000;
-const CMD_RE = /^\/(stop|stopall|resume|pause|stops|auto|goal|goals)(?:@(\w+))?(?:\s+([\s\S]*))?$/i;
+// EVERY owner command the router handles must be named here, or Telegram never reaches it (the router itself is not
+// the gate: this regex is). Add a new router command here, to the callback tokens below and to statusHint.
+const CMD_RE = /^\/(stop|stopall|resume|pause|stops|auto|goal|goals|mandate)(?:@(\w+))?(?:\s+([\s\S]*))?$/i;
 export const DEFAULT_ROUTER_PATH = "~/Projects/agent-harness/telegram-router.ts";
 
 /** Resolve the router file path from env, expanding a leading ~. */
@@ -88,6 +92,7 @@ export function matchOwnerCommand(text: string, botUsername: string, statusText 
 //   aut:s                       /auto stop
 //   gol:c|x:<generation>        /goal confirm|cancel      (15 bytes at most)
 //   gol:s:<id>                  /goal stop <id>           (15 bytes at most)
+//   mdt:a|x:<generation>        /mandate apply|cancel     (15 bytes at most)
 const CONFIRM_RE = /^\/stopall (confirm|cancel) (\d{1,9}) (\d{1,9})$/;
 const TOKEN_RE = /^stp:([cx]):(\d{1,9}):(\d{1,9})$/;
 const AUTO_BTN_RE = /^\/auto (confirm|cancel|undo) (\d{1,9})$/;
@@ -97,13 +102,15 @@ const AUTO_STOP_RE = /^\/auto stop$/;
 const GOAL_BTN_RE = /^\/goal (confirm|cancel|stop) (\d{1,9})$/;
 const AUTO_TOKEN_RE = /^aut:(?:([cxu]):(\d{1,9})|(s))$/;
 const GOAL_TOKEN_RE = /^gol:([cxs]):(\d{1,9})$/;
+const MANDATE_BTN_RE = /^\/mandate (apply|cancel) (\d{1,9})$/;
+const MANDATE_TOKEN_RE = /^mdt:([ax]):(\d{1,9})$/;
 const AUTO_VERB: Record<string, string> = { c: "confirm", x: "cancel", u: "undo" };
 const GOAL_VERB: Record<string, string> = { c: "confirm", x: "cancel", s: "stop" };
 const AUTO_CODE: Record<string, string> = { confirm: "c", cancel: "x", undo: "u" };
 const GOAL_CODE: Record<string, string> = { confirm: "c", cancel: "x", stop: "s" };
 
 /** True for any callback_data this hook owns. */
-export const isRouterCallbackData = (data: string): boolean => /^(?:stp|aut|gol):/.test(data);
+export const isRouterCallbackData = (data: string): boolean => /^(?:stp|aut|gol|mdt):/.test(data);
 
 export function encodeButton(commandText: string): string | null {
   let m = CONFIRM_RE.exec(commandText);
@@ -113,6 +120,8 @@ export function encodeButton(commandText: string): string | null {
   if (m) return `aut:${AUTO_CODE[m[1]]}:${m[2]}`;
   m = GOAL_BTN_RE.exec(commandText);
   if (m) return `gol:${GOAL_CODE[m[1]]}:${m[2]}`;
+  m = MANDATE_BTN_RE.exec(commandText);
+  if (m) return `mdt:${m[1] === "apply" ? "a" : "x"}:${m[2]}`;
   return null;
 }
 
@@ -124,6 +133,8 @@ export function decodeButton(data: string): string | null {
   if (m) return m[3] ? "/auto stop" : `/auto ${AUTO_VERB[m[1]]} ${m[2]}`;
   m = GOAL_TOKEN_RE.exec(data);
   if (m) return `/goal ${GOAL_VERB[m[1]]} ${m[2]}`;
+  m = MANDATE_TOKEN_RE.exec(data);
+  if (m) return `/mandate ${m[1] === "a" ? "apply" : "cancel"} ${m[2]}`;
   return null;
 }
 
@@ -131,6 +142,7 @@ export function decodeButton(data: string): string | null {
 function statusHint(routerText: string): string {
   if (/^\/auto\b/.test(routerText)) return "/auto status";
   if (/^\/goal/.test(routerText)) return "/goals";
+  if (/^\/mandate\b/.test(routerText)) return "/mandate";
   return "/stops";
 }
 
@@ -145,7 +157,13 @@ async function run(deps: HookDeps, input: Omit<HookInput, "text">, routerText: s
   try {
     const call = Promise.resolve(
       router.routeTelegram(
-        { chatId: input.chatId, userId: input.userId, threadId: input.threadId, text: routerText },
+        {
+          chatId: input.chatId,
+          userId: input.userId,
+          threadId: input.threadId,
+          text: routerText,
+          ...(input.messageId ? { messageId: input.messageId } : {}),
+        },
         { accessFile: deps.accessFile },
       ),
     );
@@ -190,7 +208,7 @@ export async function routeOwnerCommand(deps: HookDeps, input: HookInput): Promi
   return run(deps, input, routerText);
 }
 
-/** A tapped `stp:`, `aut:` or `gol:` button. Always handled: the tapper is re-checked, never trusted from the token. */
+/** A tapped `stp:`, `aut:`, `gol:` or `mdt:` button. Always handled: the tapper is re-checked, never trusted from the token. */
 export async function routeOwnerCallback(
   deps: HookDeps,
   input: Omit<HookInput, "text"> & { data: string },
@@ -209,7 +227,7 @@ type CtxLike = {
   chat?: { id: number | string; type: string };
   from?: { id: number | string };
   me: { username: string };
-  message?: { text?: string; message_thread_id?: number };
+  message?: { text?: string; message_thread_id?: number; message_id?: number };
   callbackQuery?: { data?: string; message?: { chat: { id: number | string; type: string }; message_id: number } };
   reply: (text: string, ...rest: any[]) => Promise<unknown>;
   answerCallbackQuery: (...rest: any[]) => Promise<unknown>;
@@ -225,6 +243,7 @@ export async function handleRouterMessage(ctx: CtxLike, deps: HookDeps): Promise
     chatId: String(ctx.chat?.id ?? ""),
     userId: String(ctx.from?.id ?? ""),
     threadId: ctx.message?.message_thread_id === undefined ? undefined : String(ctx.message.message_thread_id),
+    messageId: ctx.message?.message_id === undefined ? undefined : String(ctx.message.message_id),
     botUsername: ctx.me.username,
   });
   if (!out.handled) return false;
@@ -239,6 +258,7 @@ export async function handleRouterCallback(ctx: CtxLike, deps: HookDeps): Promis
     chatType: msg?.chat.type,
     chatId: String(msg?.chat.id ?? ""),
     userId: String(ctx.from?.id ?? ""),
+    messageId: msg?.message_id === undefined ? undefined : String(msg.message_id),
     botUsername: ctx.me.username,
   });
   if (!out.handled) return;

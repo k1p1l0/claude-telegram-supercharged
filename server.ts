@@ -35,6 +35,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
+import { labelFromKeyboard, parseDecisionData, syntheticTapId, tapRowText } from "./decisionTap";
 
 // The Agents Board is optional. If miniapp.ts is missing next to this file, only /agents stops working.
 const miniapp = await import("./miniapp").catch((err) => {
@@ -1747,6 +1748,66 @@ async function handlePermissionCallback(ctx: Context, data: string): Promise<voi
   await ctx.answerCallbackQuery({ text: action === "allow" ? "✅ Allowed" : "❌ Denied" }).catch(() => {});
 }
 
+// Decision buttons: dec:<CODE>:<key> (sent by the telegram-decisions skill).
+// A tap is recorded as a normal row in messages (text "<CODE> <label>") so the
+// skill reads it like a typed answer. It is NOT forwarded to Claude. Only
+// allowlisted senders in an allowlisted chat count; the message text is never edited.
+async function handleDecisionCallback(ctx: Context, data: string): Promise<void> {
+  const parsed = parseDecisionData(data);
+  if (!parsed) {
+    await ctx.answerCallbackQuery().catch(() => {});
+    return;
+  }
+  if (!loadAccess().allowFrom.includes(String(ctx.from?.id ?? ""))) {
+    await ctx.answerCallbackQuery({ text: "Not authorized." }).catch(() => {});
+    return;
+  }
+  const message = ctx.callbackQuery?.message;
+  if (!message) {
+    await ctx.answerCallbackQuery({ text: "This button is no longer valid." }).catch(() => {});
+    return;
+  }
+  const chatId = String(message.chat.id);
+  try {
+    assertAllowedChat(chatId, botOf(ctx));
+  } catch {
+    await ctx.answerCallbackQuery({ text: "Not authorized." }).catch(() => {});
+    return;
+  }
+  const label = labelFromKeyboard((message as any).reply_markup?.inline_keyboard, data);
+  if (!label) {
+    await ctx.answerCallbackQuery({ text: "This button is no longer valid." }).catch(() => {});
+    return;
+  }
+  const now = Date.now();
+  try {
+    messageStore.store({
+      message_id: syntheticTapId(ctx.callbackQuery!.id, now),
+      chat_id: chatId,
+      user_id: ctx.from ? String(ctx.from.id) : undefined,
+      username: ctx.from?.username,
+      first_name: ctx.from?.first_name,
+      text: tapRowText(parsed.code, label),
+      reply_to_msg_id: message.message_id,
+      date: Math.floor(now / 1000),
+      is_outgoing: false,
+      bot: botKey(botOf(ctx)),
+    });
+  } catch (err) {
+    process.stderr.write(`telegram channel: decision tap store failed: ${err}\n`);
+    await ctx.answerCallbackQuery({ text: "Could not record the tap." }).catch(() => {});
+    return;
+  }
+  if (parsed.key === "later") {
+    await ctx.answerCallbackQuery({ text: "Kept for later" }).catch(() => {});
+    return;
+  }
+  await ctx.answerCallbackQuery({ text: `✅ ${label}`.slice(0, 200) }).catch(() => {});
+  await ctx
+    .editMessageReplyMarkup({ reply_markup: new InlineKeyboard().text(`✅ ${label}`, "dec:done") })
+    .catch(() => {});
+}
+
 // Only with extra bots, so a single-bot install keeps its exact tool schemas.
 const BOT_PARAM = MULTI_BOT
   ? {
@@ -3356,6 +3417,10 @@ bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data.startsWith("perm:")) {
     await handlePermissionCallback(ctx, data);
+    return;
+  }
+  if (data.startsWith("dec:")) {
+    await handleDecisionCallback(ctx, data);
     return;
   }
   if (!data.startsWith("ask:")) return;

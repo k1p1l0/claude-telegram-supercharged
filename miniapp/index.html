@@ -1989,6 +1989,13 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     clearTimeout(N.timer); N.timer = 0;
     if (N.inflight) { N.inflight.abort(); N.inflight = null; }
   }
+  // Back on screen (visibilitychange, focus, Telegram's activated): fetch now, so a decision answered in the chat
+  // or on another device leaves the list within one poll instead of one poll plus the time spent hidden.
+  function needsRefresh() {
+    if (!needsBg()) return;
+    needsStop();
+    needsPoll();
+  }
   // Decisions still open plus pending approvals. An answered decision leaves the count at once; Later keeps it open.
   function needsCount() {
     const d = N.ok && N.data;
@@ -2022,6 +2029,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
   async function needsPoll() {
     clearTimeout(N.timer); N.timer = 0;
     if (!needsBg() || N.inflight) return;
+    const started = Date.now();
     if (!N.decided && !N.firstT) N.firstT = setTimeout(needsDecide, NEEDS_FIRST_MS);
     const ctrl = new AbortController();
     N.inflight = ctrl;
@@ -2053,7 +2061,8 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     } finally {
       clearTimeout(killer);
       if (N.inflight === ctrl) N.inflight = null;
-      if (needsBg() && !N.timer) { N.ms = needsActive() ? NEEDS_MS : NEEDS_BG_MS; N.timer = setTimeout(needsPoll, N.ms); }
+      // The interval counts from the start of the request, so the list is read every 5 s on the clock while it is on screen.
+      if (needsBg() && !N.timer) { N.ms = needsActive() ? NEEDS_MS : NEEDS_BG_MS; N.timer = setTimeout(needsPoll, Math.max(0, N.ms - (Date.now() - started))); }
     }
   }
   function needsCard(d) {
@@ -3796,10 +3805,12 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
       needsStop();
       if (inflight) { pausedAbort = true; inflight.abort(); }
     } else {
+      needsRefresh();
       tick();
       poll();
     }
   });
+  window.addEventListener('focus', needsRefresh);
   setInterval(() => { if (!doc.hidden) tick(); }, 1000);
 
   darkMQ.addEventListener && darkMQ.addEventListener('change', applyTheme);
@@ -3813,7 +3824,7 @@ html[data-theme="dark"] .sheet, html[data-theme="dark"] .cfm { background: linea
     try { WA.onEvent('themeChanged', applyTheme); } catch (_) {}
     if (ver('6.1')) { try { WA.BackButton.onClick(onBack); WA.BackButton.hide(); } catch (_) {} }
     if (ver('8.0')) {
-      try { WA.onEvent('activated', () => { S.paused = false; tick(); poll(); }); } catch (_) {}
+      try { WA.onEvent('activated', () => { S.paused = false; needsRefresh(); tick(); poll(); }); } catch (_) {}
       try { WA.onEvent('deactivated', () => { S.paused = true; clearTimeout(timer); townStop(); needsStop(); }); } catch (_) {}
     }
   }

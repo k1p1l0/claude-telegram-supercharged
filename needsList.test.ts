@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 // The "Needs you" list and its answer route. No bot, no network, no real state: temp folders and sqlite files.
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordDecisionTap, tapRowText } from "./decisionTap";
@@ -375,6 +375,39 @@ describe("list: sources and their status", () => {
     await h.needs.list();
     expect(h.reads()).toBe(2);
   });
+  test("one 'needs list codes=' line when the set of codes changes, in the log and in needs-answers.log", async () => {
+    const lines: string[] = [];
+    const file = join(dir, "needs-answers.log");
+    let clock = NOW;
+    let current = stateJson({ "p1/D2": dec({ code: "D2" }), "p1/D1": dec() });
+    const needs = createNeeds({
+      readState: async () => current,
+      readApprovals: () => ({ status: "ok", items: [] }),
+      store: memStore(),
+      editCard: async () => {},
+      bot: "",
+      now: () => clock,
+      log: (m) => lines.push(m),
+      answersLog: file,
+    });
+    const codeLines = () => lines.filter((l) => l.startsWith("mini app: needs list codes="));
+    await needs.list();
+    expect(codeLines()).toEqual(["mini app: needs list codes=D1,D2"]);
+    clock += 3000;
+    await needs.list(); // same set: no second line
+    expect(codeLines()).toHaveLength(1);
+    current = stateJson({ "p1/D2": dec({ code: "D2" }), "p1/D1": dec({ answered: { option: "a", version: 1 } }) });
+    clock += 3000;
+    await needs.list(); // D1 answered elsewhere: the set changed
+    expect(codeLines()).toEqual(["mini app: needs list codes=D1,D2", "mini app: needs list codes=D2"]);
+    current = new Error("lock busy") as unknown as string;
+    clock += 3000;
+    await needs.list(); // an unreadable state is not a change of the set
+    expect(codeLines()).toHaveLength(2);
+    expect(readFileSync(file, "utf8")).toBe(
+      "2026-10-19T12:00:00.000Z mini app: needs list codes=D1,D2\n2026-10-19T12:00:06.000Z mini app: needs list codes=D2\n",
+    );
+  });
 });
 
 describe("approvals from tasks.db (read-only)", () => {
@@ -688,5 +721,16 @@ describe("miniapp/index.html", () => {
     expect(t).toContain("data-nbadge");
     expect(t).toContain("NEEDS_BG_MS");
     expect(t).toContain("setView('needs', false, true)");
+  });
+  test("the list is read every 5 s while on screen and refreshed at once when the page comes back", async () => {
+    const t = await html;
+    expect(t).toContain("const NEEDS_MS = 5000;");
+    expect(t).toContain("N.ms - (Date.now() - started)");
+    expect(t).toContain("window.addEventListener('focus', needsRefresh);");
+    const vis = t.match(/doc\.addEventListener\('visibilitychange', \(\) => \{([\s\S]*?)\n {2}\}\);/);
+    expect(vis).not.toBeNull();
+    expect(vis?.[1]).toContain("needsStop();");
+    expect(vis?.[1]).toContain("needsRefresh();");
+    expect(t).toContain("WA.onEvent('activated', () => { S.paused = false; needsRefresh();");
   });
 });

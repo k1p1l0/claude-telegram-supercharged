@@ -16,9 +16,7 @@ export type RouterModule = {
 };
 
 export type HookKeyboardButton = { text: string; callback_data: string };
-export type HookOutput =
-  | { handled: false }
-  | { handled: true; reply: string; keyboard?: HookKeyboardButton[] };
+export type HookOutput = { handled: false } | { handled: true; reply: string; keyboard?: HookKeyboardButton[] };
 
 /** Plain-text view of what Telegram needs: one message and an optional inline keyboard. */
 export type HookDeps = {
@@ -75,7 +73,7 @@ export function matchOwnerCommand(text: string, botUsername: string, statusText 
 }
 
 // callback_data: stp:c:<id>:<generation> (confirm) or stp:x:<id>:<generation> (cancel).
-// Longest realistic form is "stp:c:999999999:999999999" (24 bytes), far under 64.
+// Longest realistic form is "stp:c:999999999:999999999" (25 bytes), far under 64.
 const CONFIRM_RE = /^\/stopall (confirm|cancel) (\d{1,9}) (\d{1,9})$/;
 const TOKEN_RE = /^stp:([cx]):(\d{1,9}):(\d{1,9})$/;
 
@@ -90,7 +88,7 @@ export function decodeButton(data: string): string | null {
   return m ? `/stopall ${m[1] === "c" ? "confirm" : "cancel"} ${m[2]} ${m[3]}` : null;
 }
 
-async function run(deps: HookDeps, input: HookInput, routerText: string): Promise<HookOutput> {
+async function run(deps: HookDeps, input: Omit<HookInput, "text">, routerText: string): Promise<HookOutput> {
   const router = await deps.loadRouter();
   if (!router) return { handled: true, reply: NOT_INSTALLED };
   let result: RouterResult;
@@ -100,7 +98,10 @@ async function run(deps: HookDeps, input: HookInput, routerText: string): Promis
       { accessFile: deps.accessFile },
     );
   } catch (err) {
-    return { handled: true, reply: `Stop controls failed: ${String((err as Error)?.message ?? err).slice(0, 200)}. Nothing was changed.` };
+    return {
+      handled: true,
+      reply: `Stop controls failed: ${String((err as Error)?.message ?? err).slice(0, 200)}. Nothing was changed.`,
+    };
   }
   if (result.action === "bypass") return { handled: true, reply: NOT_INSTALLED };
   if (result.action === "drop") return { handled: true, reply: "Not authorized." };
@@ -128,7 +129,10 @@ export async function routeOwnerCommand(deps: HookDeps, input: HookInput): Promi
 }
 
 /** A tapped `stp:` button. Always handled: the tapper is re-checked, never trusted from the token. */
-export async function routeOwnerCallback(deps: HookDeps, input: Omit<HookInput, "text"> & { data: string }): Promise<HookOutput> {
+export async function routeOwnerCallback(
+  deps: HookDeps,
+  input: Omit<HookInput, "text"> & { data: string },
+): Promise<HookOutput> {
   const routerText = decodeButton(input.data);
   if (routerText === null) return { handled: true, reply: "This button is no longer valid." };
   if (input.chatType !== "private" || input.chatId !== input.userId || !deps.isOwner(input.userId)) {
@@ -144,9 +148,9 @@ type CtxLike = {
   me: { username: string };
   message?: { text?: string; message_thread_id?: number };
   callbackQuery?: { data?: string; message?: { chat: { id: number | string; type: string }; message_id: number } };
-  reply: (text: string, other?: unknown) => Promise<unknown>;
-  answerCallbackQuery: (other?: unknown) => Promise<unknown>;
-  editMessageText: (text: string, other?: unknown) => Promise<unknown>;
+  reply: (text: string, ...rest: any[]) => Promise<unknown>;
+  answerCallbackQuery: (...rest: any[]) => Promise<unknown>;
+  editMessageText: (text: string, ...rest: any[]) => Promise<unknown>;
 };
 
 const markup = (kb: HookKeyboardButton[]) => ({ reply_markup: { inline_keyboard: [kb] } });

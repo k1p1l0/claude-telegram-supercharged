@@ -15,10 +15,10 @@ import {
   routerPath,
 } from "./routerHook";
 
-const calls: { text: string; opts: unknown }[] = [];
+const calls: { text: string; opts: unknown; messageId?: string }[] = [];
 const fake = (result: RouterResult | (() => RouterResult)): RouterModule => ({
   routeTelegram: (input, opts) => {
-    calls.push({ text: input.text, opts });
+    calls.push({ text: input.text, opts, messageId: input.messageId });
     return typeof result === "function" ? result() : result;
   },
 });
@@ -371,7 +371,7 @@ describe("aut: and gol: callback tokens", () => {
     });
     expect(out).toEqual({ handled: true, reply: stale });
   });
-  test("isRouterCallbackData covers the three prefixes only", () => {
+  test("isRouterCallbackData covers the four prefixes only", () => {
     expect(["stp:c:1:1", "aut:s", "gol:c:1"].every(isRouterCallbackData)).toBe(true);
     expect(["perm:allow:x", "dec:1", "auto:1"].some(isRouterCallbackData)).toBe(false);
   });
@@ -486,5 +486,96 @@ describe("review fixes (PR 56)", () => {
     expect(decodeButton("gol:s:mvd1n9s8")).toBeNull();
     expect(decodeButton("gol:s:1234567890")).toBeNull();
     expect(new TextEncoder().encode("gol:s:123456789").length).toBeLessThanOrEqual(64);
+  });
+});
+
+describe("/mandate", () => {
+  const cb = (data: string, userId = "42", chatId = userId, chatType = "private") => ({
+    data,
+    chatType,
+    chatId,
+    userId,
+    botUsername: "MyBot",
+  });
+  test("matchOwnerCommand passes /mandate with its arguments and refuses look-alikes", () => {
+    expect(matchOwnerCommand("/mandate", "MyBot")).toBe("/mandate");
+    expect(matchOwnerCommand("/mandate set maxOpenGoals=8", "MyBot")).toBe("/mandate set maxOpenGoals=8");
+    expect(matchOwnerCommand("/mandate@MyBot set  pause=yes", "MyBot")).toBe("/mandate set pause=yes");
+    expect(matchOwnerCommand("/mandate@otherbot set x=1", "MyBot")).toBeNull();
+    expect(matchOwnerCommand("/mandates", "MyBot")).toBeNull();
+  });
+  test("Apply and Cancel round trip through mdt: tokens within 64 bytes", () => {
+    for (const t of ["/mandate apply 999999999", "/mandate cancel 999999999"]) {
+      const data = encodeButton(t)!;
+      expect(new TextEncoder().encode(data).length).toBeLessThanOrEqual(64);
+      expect(decodeButton(data)).toBe(t);
+      expect(isRouterCallbackData(data)).toBe(true);
+    }
+    expect(encodeButton("/mandate apply 4")).toBe("mdt:a:4");
+    expect(encodeButton("/mandate cancel 4")).toBe("mdt:x:4");
+    for (const d of ["mdt:", "mdt:a", "mdt:z:1", "mdt:a:1234567890", "mdt:a:1:2"]) expect(decodeButton(d)).toBeNull();
+    expect(encodeButton("/mandate set x=1")).toBeNull();
+    expect(encodeButton("/mandate off")).toBeNull();
+  });
+  test("a typed /mandate set reaches the router, the card buttons become mdt: tokens, and the tap reaches the router", async () => {
+    calls.length = 0;
+    const out = await routeOwnerCommand(
+      deps(
+        fake({
+          action: "hold",
+          reply: "Proposed mandate",
+          buttons: [
+            { label: "Apply", text: "/mandate apply 3" },
+            { label: "Cancel", text: "/mandate cancel 3" },
+          ],
+        }),
+      ),
+      dm("/mandate set maxOpenGoals=8"),
+    );
+    expect(calls[0].text).toBe("/mandate set maxOpenGoals=8");
+    expect(out).toEqual({
+      handled: true,
+      reply: "Proposed mandate",
+      keyboard: [
+        { text: "Apply", callback_data: "mdt:a:3" },
+        { text: "Cancel", callback_data: "mdt:x:3" },
+      ],
+    });
+    calls.length = 0;
+    expect(await routeOwnerCallback(deps(fake({ action: "hold", reply: "set" })), cb("mdt:a:3"))).toEqual({
+      handled: true,
+      reply: "set",
+    });
+    expect(calls[0].text).toBe("/mandate apply 3");
+  });
+  test("a non-owner or a tap outside the owner's DM is refused", async () => {
+    calls.length = 0;
+    expect(await routeOwnerCommand(deps(fake({ action: "hold", reply: "x" })), dm("/mandate off", "99"))).toEqual({
+      handled: false,
+    });
+    expect(await routeOwnerCallback(deps(fake({ action: "hold", reply: "x" })), cb("mdt:a:1", "42", "-100", "supergroup"))).toEqual({
+      handled: true,
+      reply: "Not authorized.",
+      noEdit: true,
+    });
+    expect(calls.length).toBe(0);
+  });
+  test("the message id of a line or of the tapped card goes to the router", async () => {
+    calls.length = 0;
+    await routeOwnerCommand(deps(fake({ action: "hold", reply: "ok" })), { ...dm("/goal deadline 9 2027-03-31"), messageId: "5746" });
+    expect(calls[0].messageId).toBe("5746");
+  });
+  test("a tap passes the id of the card, and a missing id leaves the key out", async () => {
+    calls.length = 0;
+    await routeOwnerCallback(deps(fake({ action: "hold", reply: "ok" })), { ...cb("mdt:a:3"), messageId: "6001" });
+    expect(calls[0].messageId).toBe("6001");
+    calls.length = 0;
+    await routeOwnerCommand(deps(fake({ action: "hold", reply: "ok" })), dm("/mandate"));
+    expect("messageId" in calls[0] && calls[0].messageId !== undefined).toBe(false);
+  });
+  test("an unknown result names /mandate as the status check", async () => {
+    const never = { routeTelegram: () => new Promise<never>(() => {}) };
+    const out = await routeOwnerCommand({ ...deps(never), timeoutMs: 10 }, dm("/mandate off"));
+    expect((out as { reply: string }).reply).toContain("Check /mandate.");
   });
 });

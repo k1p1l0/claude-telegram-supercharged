@@ -855,6 +855,16 @@ claude --channels plugin:telegram@claude-plugins-official
 
 If your supergroup has **Topics** enabled, the plugin forwards `thread_id` (Telegram's `message_thread_id`) and passes it through to replies -- keeping conversations in their correct Forum topic automatically. Topic IDs are persisted in SQLite so context is preserved across restarts.
 
+## Owner stop controls (agent-harness router)
+
+`/stop <task id>`, `/stopall`, `/resume <task id>`, `/resume all`, `/pause` and `/stops` are sent to the agent-harness Telegram router (`routerHook.ts`). `/stops` is this bot's name for the router's status command, because `/status` already shows the bot's own state.
+
+- Only a DM from an allowlisted user is handled. Group messages, other users, `/status` and commands tagged for another bot (`/stopall@otherbot`) follow the normal flow.
+- `AGENT_HARNESS_ROUTER` sets the router file. Default: `~/Projects/agent-harness/telegram-router.ts`. The router reads the plugin's `access.json` and needs its own opt-in file (`~/agent-inbox/telegram-router.json`).
+- `AGENT_HARNESS_STATUS_TEXT` sets the text sent to the router for `/stops`. Default: `/stops`, the router's status command.
+- Fail rules: for a non-owner nothing is handled, so nothing changes. For the owner a stop is never swallowed: if the router file or its opt-in is missing, the bot replies "Stop controls are not installed."; if the router throws, the bot replies with the error.
+- `/stopall` replies with Confirm and Cancel buttons (`stp:c:<id>:<generation>` and `stp:x:<id>:<generation>`, 25 bytes at most). A tap re-checks the allowlist, runs the same router command and replaces the message with the result and no buttons. The router rejects an old or used confirm.
+
 ## Access Control
 
 Full access control docs in [ACCESS.md](./ACCESS.md) -- DM policies, groups, mention detection, delivery config, skill commands, and the `access.json` schema.

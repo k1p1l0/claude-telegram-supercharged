@@ -37,6 +37,7 @@ import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 import { doneButtonText, labelFromKeyboard, parseDecisionData, recordDecisionTap } from "./decisionTap";
 import { createNeeds, defaultTasksDb, lockedRead, readApprovalsDb } from "./needsList";
+import { handleRouterCallback, handleRouterMessage, makeRouterLoader, routerPath, type HookDeps } from "./routerHook";
 
 // The Agents Board is optional. If miniapp.ts is missing next to this file, only /agents stops working.
 const miniapp = await import("./miniapp").catch((err) => {
@@ -3226,7 +3227,16 @@ bot.on("message", async (ctx, next) => {
   await next();
 });
 
+// Owner stop controls go to the agent-harness router (routerHook.ts).
+const routerHookDeps = (ctx: Context): HookDeps => ({
+  loadRouter: makeRouterLoader(routerPath()),
+  isOwner: (id) => botAccess(loadAccess(), botOf(ctx)).allowFrom.includes(id),
+  accessFile: ACCESS_FILE,
+  statusText: process.env.AGENT_HARNESS_STATUS_TEXT,
+});
+
 bot.on("message:text", async (ctx) => {
+  if (await handleRouterMessage(ctx, routerHookDeps(ctx))) return;
   if (await handleAgenticCommand(ctx)) return;
   await handleInbound(ctx, ctx.message.text, undefined, matchCustomCommand(ctx));
 });
@@ -3429,6 +3439,10 @@ bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data.startsWith("perm:")) {
     await handlePermissionCallback(ctx, data);
+    return;
+  }
+  if (data.startsWith("stp:")) {
+    await handleRouterCallback(ctx, routerHookDeps(ctx));
     return;
   }
   if (data.startsWith("dec:")) {

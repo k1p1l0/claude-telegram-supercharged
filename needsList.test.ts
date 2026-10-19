@@ -207,9 +207,33 @@ describe("needsRoute: initData and allowlist", () => {
       h.needs,
       (m) => lines.push(m),
     );
-    expect(lines.length).toBe(1);
+    expect(lines.length).toBe(2); // the result line and the accepted-answer line
     expect(lines.join("")).not.toContain(auth);
     expect(lines.join("")).not.toContain("hash=");
+  });
+  test("a successful answer logs one surface=miniapp line, a rejected one does not", async () => {
+    const hh = harness(stateJson({ "p1/D1": dec() }));
+    const lines: string[] = [];
+    const auth = signed(OWNER, fresh);
+    const post = (body: unknown) =>
+      needsRoute(
+        req("/api/needs/answer", { method: "POST", auth, body: JSON.stringify(body) }),
+        "/api/needs/answer",
+        user,
+        hh.needs,
+        (m) => lines.push(m),
+      );
+    const bad = await post({ project: "p1", code: "D1", version: 1, option: "nope" });
+    expect(bad!.status).not.toBe(200);
+    expect(lines.filter((l) => l.includes("surface=miniapp"))).toEqual([]);
+    const good = await post({ project: "p1", code: "D1", version: 1, option: "a" });
+    expect(good!.status).toBe(200);
+    const mine = lines.filter((l) => l.includes("surface=miniapp"));
+    expect(mine).toEqual(["mini app: needs answer surface=miniapp code=D1 version=1 option=a"]);
+    expect(mine[0]).not.toContain(auth);
+    expect(mine[0]).not.toContain("hash=");
+    expect(mine[0]).not.toContain(TOKEN);
+    expect(mine[0]).not.toContain(OWNER);
   });
 });
 
@@ -623,5 +647,46 @@ describe("miniapp/index.html", () => {
     expect(t).toContain("['needs', 'Needs you']");
     expect(t).toContain("Nothing needs you");
     expect(/\['(inbox|lanes)'/i.test(t)).toBe(false);
+  });
+  const pure = async () => {
+    const m = (await html).match(/\/\* needs:pure:start \*\/([\s\S]*?)\/\* needs:pure:end \*\//);
+    expect(m).not.toBeNull();
+    return new Function(`${m?.[1] ?? ""}; return { badgeText, shouldAutoOpenNeeds };`)() as {
+      badgeText: (n: unknown) => string;
+      shouldAutoOpenNeeds: (a: {
+        count: number;
+        userChose: boolean;
+        rememberedView: string | null;
+        firstOpenDecided: boolean;
+      }) => boolean;
+    };
+  };
+  test("badgeText: none shows nothing, 1 to 9 the number, more is 9+", async () => {
+    const { badgeText } = await pure();
+    expect(badgeText(0)).toBe("");
+    expect(badgeText(-3)).toBe("");
+    expect(badgeText(undefined)).toBe("");
+    expect(badgeText(NaN)).toBe("");
+    expect(badgeText(1)).toBe("1");
+    expect(badgeText(9)).toBe("9");
+    expect(badgeText(10)).toBe("9+");
+    expect(badgeText(250)).toBe("9+");
+  });
+  test("shouldAutoOpenNeeds: only once, only with something waiting, never after a manual choice", async () => {
+    const { shouldAutoOpenNeeds } = await pure();
+    const base = { count: 2, userChose: false, rememberedView: "board", firstOpenDecided: false };
+    expect(shouldAutoOpenNeeds(base)).toBe(true);
+    expect(shouldAutoOpenNeeds({ ...base, rememberedView: "list" })).toBe(true);
+    expect(shouldAutoOpenNeeds({ ...base, count: 0 })).toBe(false);
+    expect(shouldAutoOpenNeeds({ ...base, userChose: true })).toBe(false);
+    expect(shouldAutoOpenNeeds({ ...base, firstOpenDecided: true })).toBe(false);
+    expect(shouldAutoOpenNeeds({ ...base, rememberedView: "needs" })).toBe(false); // already there
+  });
+  test("the Needs you button keeps a visible label on a phone and has a badge; the poll is wired", async () => {
+    const t = await html;
+    expect(t).toContain('.seg-v.n3 button:not([data-sview="needs"]) .seg-l');
+    expect(t).toContain("data-nbadge");
+    expect(t).toContain("NEEDS_BG_MS");
+    expect(t).toContain("setView('needs', false, true)");
   });
 });

@@ -565,6 +565,14 @@ describe("/mandate", () => {
     await routeOwnerCommand(deps(fake({ action: "hold", reply: "ok" })), { ...dm("/goal deadline 9 2027-03-31"), messageId: "5746" });
     expect(calls[0].messageId).toBe("5746");
   });
+  test("a tap passes the id of the card, and a missing id leaves the key out", async () => {
+    calls.length = 0;
+    await routeOwnerCallback(deps(fake({ action: "hold", reply: "ok" })), { ...cb("mdt:a:3"), messageId: "6001" });
+    expect(calls[0].messageId).toBe("6001");
+    calls.length = 0;
+    await routeOwnerCommand(deps(fake({ action: "hold", reply: "ok" })), dm("/mandate"));
+    expect("messageId" in calls[0] && calls[0].messageId !== undefined).toBe(false);
+  });
   test("an unknown result names /mandate as the status check", async () => {
     const never = { routeTelegram: () => new Promise<never>(() => {}) };
     const out = await routeOwnerCommand({ ...deps(never), timeoutMs: 10 }, dm("/mandate off"));

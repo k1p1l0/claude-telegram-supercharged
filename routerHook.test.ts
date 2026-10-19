@@ -43,8 +43,8 @@ describe("matchOwnerCommand", () => {
     expect(matchOwnerCommand("/stop   7", "MyBot")).toBe("/stop 7");
   });
   test("/stops maps to the router status text", () => {
-    expect(matchOwnerCommand("/stops", "MyBot")).toBe("/status");
-    expect(matchOwnerCommand("/stops", "MyBot", "/stops")).toBe("/stops");
+    expect(matchOwnerCommand("/stops", "MyBot")).toBe("/stops");
+    expect(matchOwnerCommand("/stops", "MyBot", "/custom")).toBe("/custom");
   });
   test("not handled", () => {
     for (const t of [

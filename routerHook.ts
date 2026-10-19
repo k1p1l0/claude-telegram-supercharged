@@ -62,7 +62,7 @@ export function makeRouterLoader(path: string): () => Promise<RouterModule | und
 }
 
 /** Parse an owner command. Returns the text to hand to the router, or null if it is not one of ours. */
-export function matchOwnerCommand(text: string, botUsername: string, statusText = "/status"): string | null {
+export function matchOwnerCommand(text: string, botUsername: string, statusText = "/stops"): string | null {
   const m = CMD_RE.exec(text.trim());
   if (!m) return null;
   if (m[2] && m[2].toLowerCase() !== botUsername.toLowerCase()) return null;

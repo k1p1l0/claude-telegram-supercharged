@@ -155,7 +155,7 @@ Clone this repo and install both the supercharged server and the daemon supervis
 ```sh
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
 PLUGIN_DIR=~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
-cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts $PLUGIN_DIR/
+cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts claude-telegram-supercharged/decisionTap.ts claude-telegram-supercharged/needsList.ts $PLUGIN_DIR/
 cp -R claude-telegram-supercharged/miniapp $PLUGIN_DIR/
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
@@ -216,7 +216,7 @@ git pull
 # Find the current version (e.g. 0.0.4)
 PLUGIN_VERSION=$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
 echo "Updating to version: $PLUGIN_VERSION"
-cp server.ts miniapp.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
+cp server.ts miniapp.ts decisionTap.ts needsList.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp -R miniapp ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 # Copy skills
@@ -503,6 +503,18 @@ The Town can also show a read-only Delegate board under the rooms. The board is 
 - **Trust:** the bundle runs from a `blob:` URL as trusted same-origin code, with the viewer's privileges in the Mini App. It can call every API route the page can, session controls included. The loader is no sandbox. The only check on who gets the bundle is the Mini App's Telegram sign-in and allowlist; there is no separate entitlement check. Only put a bundle you trust at that path. The page's Content-Security-Policy allows `blob:` scripts for it.
 
 The layout and metrics take ideas from [Claude-Code-Agent-Monitor](https://github.com/hoangsonww/Claude-Code-Agent-Monitor).
+
+### Needs you (Mini App)
+
+The page has a view called **Needs you** next to Board, List and Town. It is one list of what waits for you, with answer buttons. The Board column for sessions that wait on their own prompt is called **Waiting on prompt**.
+
+- **Decisions.** Open decisions from the `telegram-decisions` skill (`~/.claude/tg-decisions/state.json`), live first, then the old queue, then the rest oldest first. Each shows the options of its Telegram card in the same order, Later included. Texts are cut and anything shaped like a token is replaced.
+- **Task approvals.** Pending rows of `~/agent-inbox/tasks.db`, opened read-only (`TELEGRAM_MINIAPP_TASKS_DB` moves the path). They say "Answer in Telegram": the board has no write path to them.
+- **Inbox NEEDS YOU blocks.** Not read yet. The answer says `not wired`.
+- **Status.** `GET /api/needs` returns `decisions`, `approvals` and `inbox`, each with its own `status` (`ok`, `error` or `not wired`) and `items`, so an empty list is different from a broken source. The page polls every 5 s while the view is on screen. The server keeps a result for at most 2 s.
+- **Reading state.json.** The read takes a shared `flock` on `~/.claude/tg-decisions/.state.lock`, the lock the skill's writer holds exclusively, through `flock(1)` or a `python3 -I` helper. A writer that holds the lock for more than a few seconds makes the read fail with an error. There is no retry loop.
+- **Answering.** `POST /api/needs/answer` with `{code, version, option}` (and `project` when two projects use the same code) and the usual Telegram sign-in. The server reads the state again and takes the label from it, never from the page. It refuses with a JSON `error` and `reason`: 409 `stale` (the version changed), 409 `closed`, 409 `not_answerable` (an old reply-keyboard decision, a card that is not sent yet, or a card that shows an older version), 400 `unknown_option`, 400 `ambiguous`, 404 `not_found`, 503 `state_unreadable`. When it accepts, it runs the same code as a button tap in Telegram: one row `<CODE> <label>` with a negative id and `reply_to_msg_id` = the card, and the card's keyboard becomes the inert done button. A second tap on the same version returns the first answer with `already: true` and writes no second row.
+- **Files.** The route needs `needsList.ts` and `decisionTap.ts` next to `server.ts`.
 
 ### Custom commands
 

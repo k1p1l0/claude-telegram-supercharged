@@ -304,6 +304,59 @@ export function verifyInitData(raw: string, token: string, maxAgeSec = DAY / 100
   }
 }
 
+/** The request's Telegram user id when its `Authorization: tma <initData>` is valid, fresh and allowlisted. */
+export function telegramUserOf(token: string, isAllowed: (userId: string) => boolean) {
+  return (req: Request): string | null => {
+    const m = /^tma (.+)$/.exec(req.headers.get("authorization") ?? "");
+    const userId = m ? verifyInitData(m[1], token) : null;
+    return userId && isAllowed(userId) ? userId : null;
+  };
+}
+
+type NeedsApi = {
+  list: () => Promise<unknown>;
+  answer: (userId: string, body: Record<string, unknown>) => Promise<[number, Record<string, unknown>]>;
+};
+
+/**
+ * GET /api/needs and POST /api/needs/answer. Null when the path is not one of them. Both need valid initData
+ * of an allowlisted user. The log line carries the code and the result, never initData or a token.
+ */
+export async function needsRoute(
+  req: Request,
+  pathname: string,
+  userOf: (req: Request) => string | null,
+  needs: NeedsApi | undefined,
+  log: (msg: string) => void,
+): Promise<Response | null> {
+  if (pathname !== "/api/needs" && pathname !== "/api/needs/answer") return null;
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+  const answer = pathname === "/api/needs/answer";
+  if (req.method !== (answer ? "POST" : "GET")) return new Response("Method not allowed", { status: 405 });
+  const userId = userOf(req);
+  if (!userId) return json({ error: "unauthorized" }, 401);
+  if (!needs) return json({ error: "needs list is not installed" }, 404);
+  if (!answer) {
+    try {
+      return json(await needs.list());
+    } catch (err) {
+      log(`mini app: needs list failed: ${err}`);
+      return json({ error: "could not build the list" }, 500);
+    }
+  }
+  const body = await readJsonBody(req);
+  if (typeof body === "string") return json({ error: body }, 400);
+  const [status, reply] = await needs.answer(userId, body);
+  log(
+    `mini app: needs answer ${str(body.code).slice(0, 64)} -> ${status}${reply.reason ? ` ${str(reply.reason)}` : ""}`,
+  );
+  return json(reply, status);
+}
+
 // Other machines the board can switch to: TELEGRAM_MINIAPP_PEERS="name=url,name2=url2". Each one runs
 // this plugin too and shares TELEGRAM_MINIAPP_PEER_TOKEN, which guards its /api/peer/state.
 function peerList(): Map<string, string> {
@@ -972,6 +1025,8 @@ export function startMiniApp(opts: {
   newSession?: () => void;
   /** Sends a Telegram message to a user: the notice when a task from the board finishes. */
   notify?: (userId: string, text: string) => unknown;
+  /** The "Needs you" list: GET /api/needs and POST /api/needs/answer. Without it both routes answer 404. */
+  needs?: NeedsApi;
   /** Where the board keeps the tasks it watches, so a restart does not lose them. */
   dataDir?: string;
   log: (msg: string) => void;
@@ -1043,11 +1098,7 @@ export function startMiniApp(opts: {
       headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
 
-  const telegramUser = (req: Request): string | null => {
-    const m = /^tma (.+)$/.exec(req.headers.get("authorization") ?? "");
-    const userId = m ? verifyInitData(m[1], opts.token) : null;
-    return userId && opts.isAllowed(userId) ? userId : null;
-  };
+  const telegramUser = telegramUserOf(opts.token, opts.isAllowed);
 
   const isPeer = (req: Request) =>
     !!peerSecret && sameSecret(req.headers.get("authorization") ?? "", `Bearer ${peerSecret}`);
@@ -1356,6 +1407,8 @@ export function startMiniApp(opts: {
       if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
       return pathname === "/api/control" ? controlRoute(req, url) : peerControlRoute(req);
     }
+    const needsReply = await needsRoute(req, pathname, telegramUser, opts.needs, opts.log);
+    if (needsReply) return needsReply;
     if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
     if (pathname === "/" || pathname === "/index.html") {
       try {

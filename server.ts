@@ -578,9 +578,20 @@ interface ScheduledJob {
  */
 function createAppleReminder(title: string, dueDate: Date, notes?: string): void {
   try {
-    const dateStr = dueDate.toLocaleString("en-US", { timeZone: "Europe/Lisbon" });
+    // Build the date from its parts: `date "<string>"` is parsed with the Mac's
+    // region format, so an en-US "10/24/2026" became 10 Dec 2027 on a d/m/y Mac.
+    // Day is set to 1 first so changing the month can't overflow.
+    const secs = dueDate.getHours() * 3600 + dueDate.getMinutes() * 60 + dueDate.getSeconds();
     const body = notes ? `, body:"${notes.replace(/"/g, '\\"')}"` : "";
-    const script = `tell application "Reminders" to tell list "Inbox" to make new reminder with properties {name:"${title.replace(/"/g, '\\"')}"${body}, due date:date "${dateStr}"}`;
+    const script = [
+      "set d to current date",
+      "set day of d to 1",
+      `set year of d to ${dueDate.getFullYear()}`,
+      `set month of d to ${dueDate.getMonth() + 1}`,
+      `set day of d to ${dueDate.getDate()}`,
+      `set time of d to ${secs}`,
+      `tell application "Reminders" to tell list "Inbox" to make new reminder with properties {name:"${title.replace(/"/g, '\\"')}"${body}, due date:d}`,
+    ].join("\n");
     spawnSync("osascript", ["-e", script], { timeout: 5000, stdio: "pipe" });
   } catch {
     // Silently fail — Apple Reminders may not be available

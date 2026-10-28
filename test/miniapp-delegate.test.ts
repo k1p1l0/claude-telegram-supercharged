@@ -2,7 +2,8 @@
 // The optional Delegate board: where the server finds the private bundle, how GET /api/delegate-bundle
 // answers, and the page's pure helpers. The bundles here are tiny stand-ins, not the real board.
 // No bot token, no network, no browser (test/miniapp-delegate.browser.test.ts runs the loader in one).
-// POSIX only: the reader needs O_NOFOLLOW and user ids, so on Windows it always reads null.
+// The reader needs O_NOFOLLOW and user ids, so on Windows it refuses every file: the tests that need it to read skip
+// there, and one Windows-only test checks that it refuses with its reason and never opens the file.
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
@@ -24,7 +25,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import {
   DELEGATE_BUNDLE_MAX,
   DELEGATE_OPEN,
@@ -42,13 +43,16 @@ chmodSync(dir, 0o700);
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const STUB = "window.DelegateBoardBundle = { version: 1, mount: function () {} };";
 
+// A path written with /, in the platform's separator (the same on POSIX, \ on Windows), as join() builds it.
+const native = (p: string) => p.replaceAll("/", sep);
+
 describe("delegateBundlePath", () => {
   test("defaults to the private folder in the channel's state dir", () => {
     expect(delegateBundlePath({}, "/home/u")).toBe(
-      "/home/u/.claude/channels/telegram/private/delegate-board.miniapp.js",
+      native("/home/u/.claude/channels/telegram/private/delegate-board.miniapp.js"),
     );
     expect(delegateBundlePath({ TELEGRAM_MINIAPP_DELEGATE_BUNDLE: "   " }, "/home/u")).toBe(
-      "/home/u/.claude/channels/telegram/private/delegate-board.miniapp.js",
+      native("/home/u/.claude/channels/telegram/private/delegate-board.miniapp.js"),
     );
   });
 
@@ -71,6 +75,10 @@ const put = (path: string, body: string | Uint8Array, mode = 0o600) => {
 const text = (b: Uint8Array | null | undefined) => (b ? new TextDecoder().decode(b) : null);
 const uid = process.getuid?.() ?? -1;
 const why = (r: DelegateRead) => ("why" in r ? r.why : "");
+// On Windows the board is off by design (DELEGATE_OPEN is -1, there are no user ids), so a test that needs the
+// reader to read, or POSIX files such as symlinks, FIFOs and modes, runs everywhere else only: posixOnly.
+const onWindows = process.platform === "win32";
+const posixOnly = test.skipIf(onWindows);
 // A private folder of its own, for tests that change the folder.
 let sub = 0;
 const privateDir = () => {
@@ -89,13 +97,13 @@ describe("delegateBundleReader", () => {
     expect(delegateBundleReader(join(dir, "folder.js"))()).toBeNull();
   });
 
-  test("reads a regular file under the cap", () => {
+  posixOnly("reads a regular file under the cap", () => {
     const path = put(join(dir, "ok.js"), STUB);
     expect(text(delegateBundleReader(path)())).toBe(STUB);
     expect(text(delegateBundleReader(put(join(dir, "ok644.js"), STUB, 0o644))())).toBe(STUB);
   });
 
-  test("refuses a file over the cap", () => {
+  posixOnly("refuses a file over the cap", () => {
     const path = put(join(dir, "big.js"), "x".repeat(101));
     expect(delegateBundleReader(path, { max: 100 })()).toBeNull();
     expect(why(readDelegateBundle(path, 100, uid))).toContain("over 100 bytes");
@@ -104,7 +112,7 @@ describe("delegateBundleReader", () => {
     expect(DELEGATE_BUNDLE_MAX).toBe(3 * 1024 * 1024);
   });
 
-  test("keeps the file until it changes, and drops it when it goes away", () => {
+  posixOnly("keeps the file until it changes, and drops it when it goes away", () => {
     const path = put(join(dir, "change.js"), "a");
     const read = delegateBundleReader(path);
     const first = read();
@@ -115,7 +123,7 @@ describe("delegateBundleReader", () => {
     expect(read()).toBeNull();
   });
 
-  test("a file renamed into place with the same size is read again (the key has the inode)", () => {
+  posixOnly("a file renamed into place with the same size is read again (the key has the inode)", () => {
     const d = privateDir();
     const path = put(join(d, "b.js"), "aa");
     const read = delegateBundleReader(path);
@@ -124,7 +132,7 @@ describe("delegateBundleReader", () => {
     expect(text(read())).toBe("bb");
   });
 
-  test("a symlink to a good file is refused, and O_NOFOLLOW refuses it too if one is swapped in", () => {
+  posixOnly("a symlink to a good file is refused, and O_NOFOLLOW refuses it too if one is swapped in", () => {
     const d = privateDir();
     const target = put(join(d, "real.js"), STUB);
     const link = join(d, "b.js");
@@ -135,7 +143,7 @@ describe("delegateBundleReader", () => {
     expect(() => openSync(link, DELEGATE_OPEN)).toThrow();
   });
 
-  test("a symlinked folder is refused, even when the folder it points to is fine", () => {
+  posixOnly("a symlinked folder is refused, even when the folder it points to is fine", () => {
     const d = privateDir();
     put(join(d, "b.js"), STUB);
     const link = join(dir, `link${sub}`);
@@ -144,7 +152,7 @@ describe("delegateBundleReader", () => {
     expect(why(readDelegateBundle(join(link, "b.js"), 100, uid))).toContain("folder is a symlink");
   });
 
-  test("a FIFO is refused at once and never blocks", () => {
+  posixOnly("a FIFO is refused at once and never blocks", () => {
     const d = privateDir();
     const fifo = join(d, "b.js");
     execFileSync("mkfifo", ["-m", "600", fifo]);
@@ -161,7 +169,7 @@ describe("delegateBundleReader", () => {
     expect(Date.now() - t0).toBeLessThan(2000);
   });
 
-  test("a Unix socket is refused", async () => {
+  posixOnly("a Unix socket is refused", async () => {
     const d = privateDir();
     const sock = join(d, "b.js");
     const server = createServer();
@@ -174,7 +182,7 @@ describe("delegateBundleReader", () => {
     }
   });
 
-  test("a file that grows after the fstat is refused, and at most size + 1 bytes are read", () => {
+  posixOnly("a file that grows after the fstat is refused, and at most size + 1 bytes are read", () => {
     const d = privateDir();
     const path = put(join(d, "b.js"), "x".repeat(50));
     const grow = () => appendFileSync(path, "y".repeat(500));
@@ -194,7 +202,7 @@ describe("delegateBundleReader", () => {
     expect(delegateBundleReader(path, { max: 100 })()?.length).toBe(50);
   });
 
-  test("a same-size write in place while it is read is refused (its mtime changed)", () => {
+  posixOnly("a same-size write in place while it is read is refused (its mtime changed)", () => {
     const d = privateDir();
     const path = put(join(d, "b.js"), "a".repeat(50));
     // The file was written a while ago, so the write below moves its mtime even on a clock with coarse ticks.
@@ -215,7 +223,7 @@ describe("delegateBundleReader", () => {
     expect(text(delegateBundleReader(path, { max: 100 })())).toBe("b".repeat(50));
   });
 
-  test("a folder replaced before the open is refused", () => {
+  posixOnly("a folder replaced before the open is refused", () => {
     const d = privateDir();
     const path = put(join(d, "b.js"), STUB);
     const swap = () => {
@@ -227,7 +235,7 @@ describe("delegateBundleReader", () => {
     expect(why(readDelegateBundle(path, 1000, uid, "", { beforeOpen: swap }))).toContain("folder changed");
   });
 
-  test("a folder or a folder above it swapped in for the open and back before the checks is refused", () => {
+  posixOnly("a folder or a folder above it swapped in for the open and back before the checks is refused", () => {
     // One case the check after the open catches. It does not rule out a swap timed around each check: see the README.
     // The file's folder: the check of the folder passes again, but the path no longer leads to the opened file.
     const d = privateDir();
@@ -269,7 +277,7 @@ describe("delegateBundleReader", () => {
     expect(text(delegateBundleReader(deep)())).toBe(STUB);
   });
 
-  test("a folder that group or others can write, or that another user owns, is refused", () => {
+  posixOnly("a folder that group or others can write, or that another user owns, is refused", () => {
     const d = privateDir();
     const path = put(join(d, "b.js"), STUB);
     for (const mode of [0o777, 0o770, 0o730, 0o703]) {
@@ -283,7 +291,7 @@ describe("delegateBundleReader", () => {
     expect(delegateBundleReader(path, { uid: uid + 1 })()).toBeNull();
   });
 
-  test("a file that group or others can write is refused", () => {
+  posixOnly("a file that group or others can write is refused", () => {
     const d = privateDir();
     const path = put(join(d, "b.js"), STUB, 0o664);
     expect(delegateBundleReader(path)()).toBeNull();
@@ -294,7 +302,7 @@ describe("delegateBundleReader", () => {
     expect(text(delegateBundleReader(path)())).toBe(STUB);
   });
 
-  test("logs each new reason once, and never a missing file", () => {
+  posixOnly("logs each new reason once, and never a missing file", () => {
     const d = privateDir();
     const path = join(d, "b.js");
     const logs: string[] = [];
@@ -311,6 +319,29 @@ describe("delegateBundleReader", () => {
     chmodSync(path, 0o666);
     read();
     expect(logs.length).toBe(2);
+  });
+
+  test.skipIf(!onWindows)("Windows: a good file is refused with the reason and never opened", () => {
+    const path = put(join(privateDir(), "b.js"), STUB);
+    const reason = "this platform has no O_NOFOLLOW or user ids";
+    expect(DELEGATE_OPEN).toBe(-1);
+    // The hooks run after the first checks, right after the open and before the read: none of them is reached,
+    // even with a user id given, because O_NOFOLLOW alone is missing.
+    let reached = 0;
+    const hook = () => {
+      reached++;
+    };
+    const hooks = { beforeOpen: hook, afterOpen: hook, afterStat: hook };
+    expect(readDelegateBundle(path, 1000, 0, "", hooks)).toEqual({ why: reason });
+    expect(readDelegateBundle(path, 1000, uid, "", hooks)).toEqual({ why: reason });
+    // The reader logs the reason once, and the route answers a plain 404.
+    const logs: string[] = [];
+    const read = delegateBundleReader(path, { log: (m) => logs.push(m), afterStat: hook });
+    expect(read()).toBeNull();
+    expect(read()).toBeNull();
+    expect(reached).toBe(0);
+    expect(logs).toEqual([`mini app: the Delegate board bundle is refused, ${reason}: ${path}`]);
+    expect(delegateBundleResponse("42", read).status).toBe(404);
   });
 });
 

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { homedir } from "node:os";
+import { join, sep } from "node:path";
 import {
   type HookDeps,
   NOT_INSTALLED,
@@ -221,8 +223,17 @@ describe("handleRouterCallback glue", () => {
 describe("routerPath", () => {
   test("env override and default", () => {
     expect(routerPath({ AGENT_HARNESS_ROUTER: "/opt/r.ts" })).toBe("/opt/r.ts");
-    expect(routerPath({})).toMatch(/\/Projects\/agent-harness\/telegram-router\.ts$/);
+    // In the home folder, with the platform's separator (\ on Windows).
+    expect(routerPath({})).toBe(join(homedir(), "Projects", "agent-harness", "telegram-router.ts"));
     expect(routerPath({})).not.toContain("~");
+  });
+  test("a leading ~ is the home folder, written ~/ or with the platform's own separator", () => {
+    expect(routerPath({ AGENT_HARNESS_ROUTER: "~" })).toBe(homedir());
+    expect(routerPath({ AGENT_HARNESS_ROUTER: "~/r.ts" })).toBe(join(homedir(), "r.ts"));
+    expect(routerPath({ AGENT_HARNESS_ROUTER: `~${sep}h${sep}r.ts` })).toBe(join(homedir(), "h", "r.ts"));
+    // Not a home path: ~user and a ~ further in are kept as they are.
+    expect(routerPath({ AGENT_HARNESS_ROUTER: "~bob/r.ts" })).toBe("~bob/r.ts");
+    expect(routerPath({ AGENT_HARNESS_ROUTER: "/opt/~/r.ts" })).toBe("/opt/~/r.ts");
   });
 });
 

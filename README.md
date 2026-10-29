@@ -155,7 +155,7 @@ Clone this repo and install both the supercharged server and the daemon supervis
 ```sh
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
 PLUGIN_DIR=~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
-cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts claude-telegram-supercharged/decisionTap.ts claude-telegram-supercharged/needsList.ts $PLUGIN_DIR/
+cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts claude-telegram-supercharged/decisionTap.ts claude-telegram-supercharged/needsList.ts claude-telegram-supercharged/routerHook.ts $PLUGIN_DIR/
 cp -R claude-telegram-supercharged/miniapp $PLUGIN_DIR/
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
@@ -216,7 +216,7 @@ git pull
 # Find the current version (e.g. 0.0.4)
 PLUGIN_VERSION=$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
 echo "Updating to version: $PLUGIN_VERSION"
-cp server.ts miniapp.ts decisionTap.ts needsList.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
+cp server.ts miniapp.ts decisionTap.ts needsList.ts routerHook.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp -R miniapp ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 # Copy skills

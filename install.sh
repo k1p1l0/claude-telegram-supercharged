@@ -34,7 +34,7 @@ TARGET="$CACHE/$VERSION"
 # Keep the official server once, so you can go back to it.
 [ -f "$TARGET/server.ts.official" ] || cp "$TARGET/server.ts" "$TARGET/server.ts.official"
 
-cp "$DIR/server.ts" "$DIR/miniapp.ts" "$TARGET/"
+cp "$DIR/server.ts" "$DIR/miniapp.ts" "$DIR/decisionTap.ts" "$DIR/needsList.ts" "$DIR/routerHook.ts" "$TARGET/"
 mkdir -p "$TARGET/miniapp"
 cp -R "$DIR/miniapp/." "$TARGET/miniapp/"
 mkdir -p "$TARGET/skills"

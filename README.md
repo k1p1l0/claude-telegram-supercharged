@@ -621,7 +621,7 @@ Running the supervisor in a terminal (or tmux/screen) works for quick sessions, 
 
 **launchd** is Apple's native process manager — the same system that keeps Spotlight, Time Machine, and iCloud running. It operates at the OS level, outside of any terminal session, so it:
 
-- **Survives lid close** -- the process keeps running when you close your MacBook (on power)
+- **Keeps running with the display off** -- on power, with `caffeinate` below (closing a MacBook's lid is a separate case, see the note at the end of this section)
 - **Survives logout** -- stays alive even if you log out of your user session
 - **Auto-starts on boot** -- no need to remember to start it after a restart
 - **Auto-restarts on crash** -- if the supervisor dies unexpectedly, launchd brings it back
@@ -762,7 +762,7 @@ launchd (OS-level)
 - **supervisor** handles Claude-specific restarts (context reset, crash recovery with backoff)
 - **Claude** runs as a managed child process with the Telegram channel
 
-> **Note:** `caffeinate -s` prevents sleep only when connected to power. On battery with the lid closed, macOS will eventually sleep regardless. For true 24/7 uptime on battery, consider running on a server instead.
+> **Note:** `caffeinate -s` prevents sleep only when connected to power, and no `caffeinate` flag stops lid-close sleep: a MacBook with the lid closed goes to sleep even on power, unless an external display and a keyboard or mouse are connected (closed-display mode). To keep the bot running with the lid closed and no display, `sudo pmset -a disablesleep 1` turns off all sleep, on battery too. It stays on after a restart, so undo it with `sudo pmset -a disablesleep 0` when you are done; `pmset -g | grep SleepDisabled` shows `1` while it is on. [Keep Mac Awake](https://keepmacawake.com/?utm_source=github&utm_medium=community&utm_campaign=docs-fix&utm_content=claude-telegram-supercharged) turns that setting on only for a session you start and puts normal sleep back when it ends. For true 24/7 uptime on battery, consider running on a server instead.
 
 ## Multiple bots
 

@@ -155,7 +155,7 @@ Clone this repo and install both the supercharged server and the daemon supervis
 ```sh
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
 PLUGIN_DIR=~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
-cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts claude-telegram-supercharged/decisionTap.ts claude-telegram-supercharged/needsList.ts claude-telegram-supercharged/routerHook.ts $PLUGIN_DIR/
+cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts claude-telegram-supercharged/decisionTap.ts claude-telegram-supercharged/needsList.ts claude-telegram-supercharged/routerHook.ts claude-telegram-supercharged/progressRender.ts claude-telegram-supercharged/topicRouter.ts $PLUGIN_DIR/
 cp -R claude-telegram-supercharged/miniapp $PLUGIN_DIR/
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
@@ -216,7 +216,7 @@ git pull
 # Find the current version (e.g. 0.0.4)
 PLUGIN_VERSION=$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
 echo "Updating to version: $PLUGIN_VERSION"
-cp server.ts miniapp.ts decisionTap.ts needsList.ts routerHook.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
+cp server.ts miniapp.ts decisionTap.ts needsList.ts routerHook.ts progressRender.ts topicRouter.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp -R miniapp ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 # Copy skills
@@ -361,7 +361,7 @@ In daemon mode you can watch Claude work, the way you would in the terminal:
 
 ```
 You: Read the README and check package.json for the scripts
-Bot: Working... (14s)
+Bot: ✱ Cooking… (14s)
      💬 Reading the README to see the install steps.
      💻 Bash: Read README intro
      💬 Now checking package.json for the scripts.
@@ -374,7 +374,9 @@ Bot: [the answer replaces the Working message]
 - **Working message** once a turn runs longer than 2.5 seconds, so quick replies never get one. It shows Claude's short notes (💬), each tool call as it starts (Read, Edit, Bash, Grep, WebFetch, Agent, Skill, MCP tools and so on), and what Claude is doing right now: `💭 Thinking…` after a tool returns, `✍️ Writing…` once it is producing output.
 - **The answer replaces the Working message** in place. Telegram sends no push notification for edits, so these answers arrive silently. Quick answers, multi-part answers, files and quote-replies arrive as normal messages.
 - The Working message is always the newest message. If you write while Claude works, it moves below your message. Telegram's own tools (reply, react and so on) and `ToolSearch` aren't listed.
-- DMs only, because tool lines can show file paths and commands.
+- The first line is an animated Claude asterisk and a verb that changes every 6 seconds (Thinking, Brewing, Cooking, Untangling and so on), with the elapsed time. The asterisk is a custom emoji, which Telegram shows when the bot owner has Telegram Premium. If Telegram refuses it, the bubble falls back to a plain 💬 for the rest of the run. `TELEGRAM_PROGRESS_SPIN=off` brings back the static `Working... (14s)` line.
+- The answer waits for an in-flight edit of the Working message for at most 10 seconds. After that it deletes the message and arrives as a new one, so a stuck Telegram call can never hold an answer back.
+- DMs only, because tool lines can show file paths and commands. With the [topic map](#topic-map) on, a mapped forum topic gets the Working message too, inside that topic.
 
 | Command | What it does |
 | --- | --- |
@@ -391,7 +393,7 @@ The built-in commands answer allowlisted users in DMs. `/usage` also answers gro
 
 **How it works.** The supervisor passes `scripts/telegram-progress-hook.ts` to Claude as a `PreToolUse`, `PostToolUse` and `Stop` hook via `--settings`, so it never runs in your interactive sessions. The hook appends each event to `~/.claude/channels/telegram/data/progress.jsonl`, and the server tails that file and edits the Working message (at most one edit per 1.5 seconds). Claude's notes and the thinking/writing phase come from the session transcript. The server's instructions ask Claude to write one short sentence before each tool call.
 
-**Config** (supervisor environment): `TELEGRAM_VERBOSE` sets the default level (1). `TELEGRAM_AGENTIC_MODE=off` turns the hook off.
+**Config** (supervisor environment): `TELEGRAM_VERBOSE` sets the default level (1). `TELEGRAM_AGENTIC_MODE=off` turns the hook off. `TELEGRAM_PROGRESS_SPIN=off` turns the animated first line off.
 
 ### Agents Board (Mini App)
 
@@ -856,6 +858,30 @@ claude --channels plugin:telegram@claude-plugins-official
 ### Forum Topics
 
 If your supergroup has **Topics** enabled, the plugin forwards `thread_id` (Telegram's `message_thread_id`) and passes it through to replies -- keeping conversations in their correct Forum topic automatically. Topic IDs are persisted in SQLite so context is preserved across restarts.
+
+### Topic map
+
+A forum group can hold topics for different machines or purposes: one topic for this bot, one that a second machine answers, one that needs an @mention and one that does not. The topic map gives each topic its own rule. It is off by default; set `TELEGRAM_TOPIC_ROUTER=on` in the supervisor environment and write `~/.claude/channels/telegram/data/topic-map.json`:
+
+```json
+{
+  "-1001234567890": {
+    "40": { "name": "Ops", "owner": "daemon", "requireMention": false },
+    "41": { "name": "Research", "owner": "daemon" },
+    "25": { "name": "Other machine", "owner": "silent" }
+  }
+}
+```
+
+The outer key is the group's chat id, the inner key the topic's thread id (`thread_id` in the inbound event). Each entry has a `name`, an `owner` and an optional `requireMention`:
+
+- `owner: "daemon"`: this bot reads and answers the topic.
+- `owner: "silent"`: another machine owns the topic. This bot drops every message there, with no reaction, no reply and no answer to commands, and the `reply` tool refuses to post into it. Two machines with the same bot token can share one group this way: each lists the other's topics as `silent`.
+- `requireMention` replaces the group's own setting for that topic. A topic without it keeps the group's rule.
+
+A topic or a group the map does not list keeps the group's rule, as before. The file is read again whenever it changes, so an edit needs no restart. An entry with a bad shape is left out and the rest stay. A file over 64 KB counts as empty.
+
+With the map on, the `reply` tool fills `thread_id` from the message it answers when the caller left it out, so a reply never lands in General by mistake. A message in a mapped topic that is not `silent` gets the Agentic Mode Working message inside that topic, and the answer replaces it there. General, an unmapped topic and other groups get no Working message, as before. Messages that wait for an @mention are buffered per topic, so a mention in one topic does not release a message from another.
 
 ## Owner stop controls (agent-harness router)
 

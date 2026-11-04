@@ -38,6 +38,21 @@ import { z } from "zod";
 import { doneButtonText, labelFromKeyboard, parseDecisionData, recordDecisionTap } from "./decisionTap";
 import { createNeeds, defaultTasksDb, lockedRead, readApprovalsDb } from "./needsList";
 import {
+  type BubbleStyle,
+  TAKEOVER_WAIT_MS,
+  type TakenBubble,
+  answerViaBubble,
+  fallBackOnEntityError,
+  hasPhaseLine,
+  keepFirstSend,
+  progressTarget,
+  renderBubble,
+  spinEnabled,
+  takeBubbleCapped,
+  takeoverEditOptions,
+  trackFlush,
+} from "./progressRender";
+import {
   type HookDeps,
   handleRouterCallback,
   handleRouterMessage,
@@ -45,6 +60,16 @@ import {
   makeRouterLoader,
   routerPath,
 } from "./routerHook";
+import {
+  TOPIC_MAP_FILE,
+  type TopicRoute,
+  makeTopicMapReader,
+  outboundThread,
+  pregateKeyOf,
+  topicIsSilent,
+  topicRoute,
+  topicRouterEnabled,
+} from "./topicRouter";
 
 // The Agents Board is optional. If miniapp.ts is missing next to this file, only /agents stops working.
 const miniapp = await import("./miniapp").catch((err) => {
@@ -831,6 +856,14 @@ class MessageStore {
     return row?.text ?? undefined;
   }
 
+  /** The forum topic a stored message belongs to, or undefined (a message in General, or not stored). */
+  getThreadId(chatId: string, messageId: number, bot = ""): number | undefined {
+    const row = this.db
+      .query("SELECT thread_id FROM messages WHERE chat_id = ? AND message_id = ? AND bot = ? LIMIT 1")
+      .get(chatId, messageId, bot) as { thread_id: number | null } | null;
+    return row?.thread_id ?? undefined;
+  }
+
   /** Delete all messages for a chat (one bot's view of it). Returns the number of rows deleted. */
   clearHistory(chatId: string, bot = ""): number {
     const result = this.db.run("DELETE FROM messages WHERE chat_id = ? AND bot = ?", [chatId, bot]);
@@ -1387,9 +1420,17 @@ function gate(ctx: Context): GateResult {
       return { action: "pair", code, isResend: false };
     }
     const groupAllowFrom = policy.allowFrom ?? [];
-    const requireMention = policy.requireMention ?? true;
+    let requireMention = policy.requireMention ?? true;
     if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
       return { action: "drop" };
+    }
+    // Topic router (flag TELEGRAM_TOPIC_ROUTER, off by default): the topic map can drop the message (a topic another
+    // machine owns) or replace the group's requireMention for this topic. An unmapped topic keeps the group's own rule.
+    if (topicRouterEnabled()) {
+      const threadId = (ctx.message as { message_thread_id?: number } | undefined)?.message_thread_id;
+      const tr: TopicRoute = topicRoute(readTopicMap(), groupId, threadId, requireMention);
+      if (tr.kind === "drop") return { action: "drop" };
+      requireMention = tr.requireMention;
     }
     if (requireMention && !isMentioned(ctx, access.mentionPatterns)) {
       // Don't drop immediately — buffer the message so a mention arriving
@@ -1401,6 +1442,21 @@ function gate(ctx: Context): GateResult {
   }
 
   return { action: "drop" };
+}
+
+/** Topic router: DATA_DIR/topic-map.json, checked with a stat on every call. */
+const readTopicMap = makeTopicMapReader(join(DATA_DIR, TOPIC_MAP_FILE));
+
+/** True when the flag is on and the topic map says the message's topic is `silent`. */
+function topicSilent(ctx: Context): boolean {
+  if (!topicRouterEnabled() || !ctx.chat || !ctx.message) return false;
+  const t = (ctx.message as { message_thread_id?: number }).message_thread_id;
+  return topicRoute(readTopicMap(), String(ctx.chat.id), t, true).kind === "drop";
+}
+
+/** The forum topic a message of this chat belongs to: the in-memory tracker first, then the stored history. */
+function threadOfMessage(chatId: string, msgId: number, b: BotEntry): number | undefined {
+  return threadMap.get(chatId)?.get(msgId)?.threadId ?? messageStore.getThreadId(chatId, msgId, botKey(b));
 }
 
 function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
@@ -2135,11 +2191,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const chat_id = args.chat_id as string;
         const text = args.text as string;
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined;
-        const thread_id = args.thread_id != null ? Number(args.thread_id) : undefined;
+        let thread_id = args.thread_id != null ? Number(args.thread_id) : undefined;
         const files = (args.files as string[] | undefined) ?? [];
         const rawParseMode = (args.parse_mode as string | undefined) ?? "MarkdownV2";
         const parseMode = rawParseMode === "plain" ? undefined : (rawParseMode as "MarkdownV2" | "HTML");
         const b = pickBot(chat_id, args.bot);
+
+        // Topic router (flag TELEGRAM_TOPIC_ROUTER): a reply inside a forum topic carries the topic's thread id even
+        // when the caller left it out, and a topic another machine owns gets no post at all.
+        if (topicRouterEnabled()) {
+          thread_id = outboundThread(thread_id, reply_to, (id) => threadOfMessage(chat_id, id, b));
+          // A topic made silent while the session was composing its answer gets no post at all.
+          if (topicIsSilent(readTopicMap(), chat_id, thread_id))
+            throw new Error("topic is silent: another machine owns it");
+        }
 
         assertAllowedChat(chat_id, b);
 
@@ -2160,23 +2225,32 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const chunks = chunk(finalText, limit, mode);
         const sentIds: number[] = [];
 
-        // Agentic Mode: a single-message answer (no files, no quote, no thread)
-        // replaces the Working bubble in place instead of arriving as a new
-        // message. Telegram sends no push notification for edits. Primary bot only.
-        const bubbleId =
-          b.primary && chunks.length === 1 && files.length === 0 && reply_to == null && thread_id == null
+        // Agentic Mode: a single-message answer (no files, no quote) replaces the
+        // Working bubble in place instead of arriving as a new message. Telegram
+        // sends no push notification for edits. Primary bot only.
+        const taken =
+          b.primary &&
+          chunks.length === 1 &&
+          files.length === 0 &&
+          reply_to == null &&
+          // An answer takes over the bubble only in the thread the bubble lives in (none in a DM).
+          thread_id === progressTurns.get(chat_id)?.threadId
             ? await takeProgressBubble(chat_id)
             : undefined;
-        if (bubbleId != null) {
-          try {
-            await b.bot.api.editMessageText(chat_id, bubbleId, chunks[0], {
-              ...(parseMode ? { parse_mode: parseMode } : {}),
-            });
-            sentIds.push(bubbleId);
-          } catch {
-            // Bubble gone or edit refused: remove it and send normally below.
-            void b.bot.api.deleteMessage(chat_id, bubbleId).catch(() => {});
-          }
+        if (taken?.id != null) {
+          sentIds.push(
+            await answerViaBubble(taken, {
+              edit: (id) => b.bot.api.editMessageText(chat_id, id, chunks[0], takeoverEditOptions(parseMode, {})),
+              del: (id) => b.bot.api.deleteMessage(chat_id, id),
+              send: async () =>
+                (
+                  await b.bot.api.sendMessage(chat_id, chunks[0], {
+                    ...(parseMode ? { parse_mode: parseMode } : {}),
+                    ...(thread_id != null ? { message_thread_id: thread_id } : {}),
+                  })
+                ).message_id,
+            }),
+          );
         }
 
         try {
@@ -3245,6 +3319,8 @@ const routerHookDeps = (ctx: Context): HookDeps => ({
 });
 
 bot.on("message:text", async (ctx) => {
+  // Topic router: a topic another machine owns (`silent`) gets no reply at all, commands included.
+  if (topicSilent(ctx)) return;
   if (await handleRouterMessage(ctx, routerHookDeps(ctx))) return;
   if (await handleAgenticCommand(ctx)) return;
   await handleInbound(ctx, ctx.message.text, undefined, matchCustomCommand(ctx));
@@ -3559,6 +3635,11 @@ interface BufferedCtx {
 }
 
 // Keyed by chatKey(): one buffer per bot and chat.
+// Keyed by chatKey(): one buffer per bot and chat. With the topic router on, one per bot, chat and topic.
+function pregateKey(b: BotEntry, ctx: Context): string {
+  const thread = (ctx.message as { message_thread_id?: number } | undefined)?.message_thread_id;
+  return pregateKeyOf(chatKey(b, String(ctx.chat!.id)), thread, topicRouterEnabled());
+}
 const pregateBuffers = new Map<string, { messages: BufferedCtx[]; timer: ReturnType<typeof setTimeout> }>();
 const MAX_PREGATE_BUFFER = 20;
 
@@ -3751,7 +3832,7 @@ async function handleInbound(
     // Message passed all checks except requireMention. Hold it in the
     // pre-gate buffer — if a mention arrives within BATCH_WINDOW_MS from
     // the same chat, promotePregateBuffer() will deliver everything.
-    const key = chatKey(b, String(ctx.chat!.id));
+    const key = pregateKey(b, ctx);
     const buf = pregateBuffers.get(key);
     if (buf) {
       if (buf.messages.length >= MAX_PREGATE_BUFFER) return; // safety cap
@@ -3770,7 +3851,7 @@ async function handleInbound(
   if (await enforceLimits(ctx, result.access)) return;
 
   // action === "deliver" — first promote any buffered messages from this chat
-  const key = chatKey(b, String(ctx.chat!.id));
+  const key = pregateKey(b, ctx);
   const buffered = pregateBuffers.has(key);
   await promotePregateBuffer(key);
   // The sender's own buffered messages may have used up their last slots.
@@ -3794,6 +3875,8 @@ const DEFAULT_VERBOSE = (() => {
 })();
 const PROGRESS_MAX_LINES = 12;
 const PROGRESS_EDIT_MS = 1500; // Telegram rate-limits edits per chat
+const PROGRESS_SPIN = spinEnabled(process.env.TELEGRAM_PROGRESS_SPIN); // read once; "off" keeps the static bubble
+const progressStyle: BubbleStyle = { custom: true }; // false for the rest of the run once Telegram refuses the entity
 const PROGRESS_STALE_MS = 30 * 60 * 1000; // drop turns that never got a Stop
 const VERBOSE_LABELS = ["quiet", "normal", "detailed"];
 const TOOL_ICONS: Record<string, string> = {
@@ -3816,12 +3899,16 @@ const TOOL_ICONS: Record<string, string> = {
 
 type ProgressTurn = {
   chatId: string;
+  threadId?: number; // the forum topic the bubble belongs to; unset in a DM
+  retired?: boolean; // the topic stopped qualifying (made silent or unmapped) mid-turn; no more progress sends
   startedAt: number;
   lines: string[]; // tool calls since the last message Claude sent
   hidden: number; // lines scrolled out of the bubble
   tools: number;
   msgId?: number;
   sending: boolean;
+  gen?: number; // bumped when the answer gives up on a stuck flush, or the turn moves to another topic
+  inflight?: Promise<void>; // the running flush; the answer takeover awaits it
   dirty: boolean;
   lastEdit: number;
   lastSentAt: number; // turn start, or when Claude last sent a message
@@ -3871,10 +3958,27 @@ function setVerbose(chatId: string, level: number): void {
 
 // A turn is tracked at every verbosity level: level 0 still gets the typing
 // indicator, just no bubble.
-function startProgressTurn(chatId: string): void {
+function startProgressTurn(chatId: string, threadId?: number): void {
   lastTurnChat = chatId;
   const existing = progressTurns.get(chatId);
   if (existing) {
+    // A message from another topic re-points the turn. A first send still in flight for the old topic is
+    // discarded (keepFirstSend sees the new generation), and the next flush creates the bubble in the new topic.
+    if (existing.threadId !== threadId) existing.gen = (existing.gen ?? 0) + 1;
+    // Content gathered for another topic (or while retired) must not show here: start the bubble empty, with the
+    // transcript cutoff (lastSentAt) at now.
+    if (existing.retired || existing.threadId !== threadId) {
+      const at = Date.now();
+      existing.lines = [];
+      existing.hidden = 0;
+      existing.tools = 0;
+      existing.dirty = false;
+      existing.phase = "thinking";
+      existing.phaseAt = at;
+      existing.lastSentAt = at;
+    }
+    existing.threadId = threadId;
+    existing.retired = false;
     // New message mid-turn: drop the bubble so it reappears below it (the
     // answer takes over the bubble and must not land above the user's message).
     deleteProgressBubble(existing);
@@ -3883,6 +3987,7 @@ function startProgressTurn(chatId: string): void {
   const now = Date.now();
   progressTurns.set(chatId, {
     chatId,
+    threadId,
     startedAt: now,
     lines: [],
     hidden: 0,
@@ -3919,19 +4024,10 @@ function onBotMessageSent(chatId: string): void {
 
 // The answer takes over the Working bubble: returns its message id and
 // detaches it from progress so no later "Working..." edit can overwrite it.
-async function takeProgressBubble(chatId: string): Promise<number | undefined> {
+async function takeProgressBubble(chatId: string): Promise<TakenBubble | undefined> {
   const t = progressTurns.get(chatId);
   if (!t) return undefined;
-  for (let i = 0; i < 20 && t.sending; i++) await new Promise((r) => setTimeout(r, 100));
-  const id = t.msgId;
-  t.msgId = undefined;
-  t.lines = [];
-  t.hidden = 0;
-  t.dirty = false;
-  t.phase = "idle";
-  t.lastSentAt = Date.now();
-  t.lastTyping = Date.now();
-  return id;
+  return takeBubbleCapped(t, Date.now(), TAKEOVER_WAIT_MS);
 }
 
 function setProgressPaused(chatId: string, paused: boolean): void {
@@ -3941,20 +4037,12 @@ function setProgressPaused(chatId: string, paused: boolean): void {
   if (!paused) t.lastSentAt = Date.now();
 }
 
-const PHASE_LINES: Partial<Record<ProgressTurn["phase"], string>> = {
-  thinking: "💭 Thinking…",
-  writing: "✍️ Writing…",
-};
-
 function hasProgressContent(t: ProgressTurn): boolean {
-  return t.lines.length > 0 || PHASE_LINES[t.phase] !== undefined;
+  return t.lines.length > 0 || hasPhaseLine(t.phase);
 }
 
-function renderProgress(t: ProgressTurn): string {
-  const secs = Math.round((Date.now() - t.startedAt) / 1000);
-  const more = t.hidden > 0 ? [`… ${t.hidden} earlier`] : [];
-  const status = PHASE_LINES[t.phase];
-  return [`Working... (${secs}s)`, ...more, ...t.lines, ...(status ? [status] : [])].join("\n");
+function renderProgress(t: ProgressTurn) {
+  return renderBubble(t, Date.now(), PROGRESS_SPIN, progressStyle);
 }
 
 function pushProgressLine(t: ProgressTurn, line: string): void {
@@ -4026,25 +4114,70 @@ function scanTranscript(t: ProgressTurn, includeIdle = false): void {
   }
 }
 
+/**
+ * The topic map is hot-reloaded, so a topic that qualified when the turn started may be silent or gone now.
+ * Then the bubble is deleted, an in-flight first send is discarded (generation bump) and the turn sends nothing more.
+ */
+function topicBubbleRetired(t: ProgressTurn): boolean {
+  if (t.threadId == null) return false;
+  if (!t.retired) {
+    const still = progressTarget({
+      chatType: "supergroup",
+      chatId: t.chatId,
+      threadId: t.threadId,
+      primary: true,
+      routerOn: topicRouterEnabled(),
+      map: readTopicMap(),
+    });
+    if (still.start) return false;
+    retireTopicBubble(t);
+  }
+  return true;
+}
+
+/** Stop a topic bubble for good (until a message in its topic starts the turn again) and discard an in-flight send. */
+function retireTopicBubble(t: ProgressTurn): void {
+  t.retired = true;
+  t.gen = (t.gen ?? 0) + 1;
+  deleteProgressBubble(t);
+}
+
+/**
+ * A delivered message that gets no bubble (an unmapped topic, General, another group) becomes the turn that the
+ * progress events describe (lastTurnChat is one slot), so no topic bubble may stay live to show its work.
+ */
+function retireTopicBubbles(): void {
+  for (const t of progressTurns.values()) if (t.threadId != null && !t.retired) retireTopicBubble(t);
+}
+
 async function flushProgress(t: ProgressTurn): Promise<void> {
+  if (topicBubbleRetired(t)) return;
   if (t.sending || !hasProgressContent(t)) return;
-  t.sending = true;
   t.dirty = false;
   t.lastEdit = Date.now();
-  try {
-    if (t.msgId == null) {
-      const sent = await bot.api.sendMessage(t.chatId, renderProgress(t), { disable_notification: true });
-      // The turn may have ended, or Claude may have replied, while we were sending.
-      if (progressTurns.get(t.chatId) === t && hasProgressContent(t)) t.msgId = sent.message_id;
-      else void bot.api.deleteMessage(t.chatId, sent.message_id).catch(() => {});
-    } else {
-      await bot.api.editMessageText(t.chatId, t.msgId, renderProgress(t));
+  const gen = t.gen ?? 0;
+  await trackFlush(t, async () => {
+    try {
+      const view = renderProgress(t);
+      const entities = view.entities as MessageEntity[] | undefined;
+      if (t.msgId == null) {
+        const sent = await bot.api.sendMessage(t.chatId, view.text, {
+          ...(t.threadId != null ? { message_thread_id: t.threadId } : {}),
+          ...(entities ? { entities } : {}),
+          disable_notification: true,
+        });
+        // The turn may have ended, or Claude may have replied, while we were sending.
+        if (keepFirstSend(t, gen, progressTurns.get(t.chatId) === t)) t.msgId = sent.message_id;
+        else void bot.api.deleteMessage(t.chatId, sent.message_id).catch(() => {});
+      } else {
+        await bot.api.editMessageText(t.chatId, t.msgId, view.text, entities ? { entities } : {});
+      }
+    } catch (err) {
+      // Custom emoji refused (owner lost Premium?): plain emoji from now on, sent on the next tick.
+      if (fallBackOnEntityError(progressStyle, err)) t.dirty = true;
+      // "message is not modified", rate limits, deleted message: next tick retries.
     }
-  } catch {
-    // "message is not modified", rate limits, deleted message: next tick retries.
-  } finally {
-    t.sending = false;
-  }
+  });
 }
 
 function onProgressEvent(ev: {
@@ -4063,7 +4196,7 @@ function onProgressEvent(ev: {
   }
   if (!ev.tool || HIDDEN_TOOLS.has(ev.tool) || !lastTurnChat) return;
   const t = progressTurns.get(lastTurnChat);
-  if (!t) return;
+  if (!t || t.retired) return; // a retired topic turn collects nothing
   if (ev.type === "tool_done") {
     t.phase = "thinking";
     t.phaseAt = ev.t ?? Date.now();
@@ -4134,10 +4267,12 @@ function startProgressWatcher(): void {
         progressTurns.delete(t.chatId);
         continue;
       }
-      if (t.paused) continue;
+      if (t.paused || topicBubbleRetired(t)) continue;
       if (now - t.lastTyping >= TYPING_REFRESH_MS) {
         t.lastTyping = now;
-        void bot.api.sendChatAction(t.chatId, "typing").catch(() => {});
+        void bot.api
+          .sendChatAction(t.chatId, "typing", t.threadId != null ? { message_thread_id: t.threadId } : undefined)
+          .catch(() => {});
       }
       if (t.chatId === lastTurnChat) scanTranscript(t);
       if (!hasProgressContent(t) || getVerbose(t.chatId) === 0) continue;
@@ -4146,7 +4281,8 @@ function startProgressWatcher(): void {
         continue;
       }
       if (now - t.lastEdit < PROGRESS_EDIT_MS) continue;
-      if (t.dirty || now - t.lastEdit >= 3000) void flushProgress(t);
+      // Spin on: the frame and the counter change every tick, so flush at the floor even when nothing is dirty.
+      if (t.dirty || PROGRESS_SPIN || now - t.lastEdit >= 3000) void flushProgress(t);
     }
   }, 1000);
 }
@@ -4738,7 +4874,18 @@ async function deliverMessage(
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void ctx.api.sendChatAction(chat_id, "typing").catch(() => {});
   // DMs only: tool lines can show file paths and commands. Primary bot only.
-  if (ctx.chat?.type === "private" && b.primary) startProgressTurn(chat_id);
+  // With the topic router on, also a mapped topic (the bubble then goes to that thread); never another group, General
+  // or an unmapped topic.
+  const bubble = progressTarget({
+    chatType: ctx.chat?.type,
+    chatId: chat_id,
+    threadId: (ctx.message as { message_thread_id?: number } | undefined)?.message_thread_id,
+    primary: b.primary,
+    routerOn: topicRouterEnabled(),
+    map: readTopicMap(),
+  });
+  if (bubble.start) startProgressTurn(chat_id, bubble.thread);
+  else retireTopicBubbles();
 
   // Ack reaction — only for single messages (not during a burst).
   // During batching, skip individual ack reactions to avoid spamming.

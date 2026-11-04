@@ -879,9 +879,9 @@ The outer key is the group's chat id, the inner key the topic's thread id (`thre
 - `owner: "silent"`: another machine owns the topic. This bot drops every message there, with no reaction, no reply and no answer to commands, and the `reply` tool refuses to post into it. Two machines with the same bot token can share one group this way: each lists the other's topics as `silent`.
 - `requireMention` replaces the group's own setting for that topic. A topic without it keeps the group's rule.
 
-A topic or a group the map does not list keeps the group's rule, as before. The file is read again whenever it changes, so an edit needs no restart. An entry with a bad shape is left out and the rest stay. A file over 64 KB counts as empty.
+A topic or a group the map does not list keeps the group's rule. The file is read again whenever it changes, so an edit needs no restart. An entry with a bad shape is left out and the rest stay. A file over 64 KB counts as empty.
 
-With the map on, the `reply` tool fills `thread_id` from the message it answers when the caller left it out, so a reply never lands in General by mistake. A message in a mapped topic that is not `silent` gets the Agentic Mode Working message inside that topic, and the answer replaces it there. General, an unmapped topic and other groups get no Working message, as before. Messages that wait for an @mention are buffered per topic, so a mention in one topic does not release a message from another.
+With the map on, the `reply` tool fills `thread_id` from the message it answers when the caller left it out, so a reply never lands in General by mistake. A message in a mapped topic that is not `silent` gets the Agentic Mode Working message inside that topic, and the answer replaces it there. General, an unmapped topic and other groups get no Working message. Messages that wait for an @mention are buffered per topic, so a mention in one topic does not release a message from another.
 
 ## Owner stop controls (agent-harness router)
 

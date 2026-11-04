@@ -361,7 +361,7 @@ In daemon mode you can watch Claude work, the way you would in the terminal:
 
 ```
 You: Read the README and check package.json for the scripts
-Bot: ✱ Cooking… (14s)
+Bot: 💬 Cooking… (14s)
      💬 Reading the README to see the install steps.
      💻 Bash: Read README intro
      💬 Now checking package.json for the scripts.
@@ -374,7 +374,7 @@ Bot: [the answer replaces the Working message]
 - **Working message** once a turn runs longer than 2.5 seconds, so quick replies never get one. It shows Claude's short notes (💬), each tool call as it starts (Read, Edit, Bash, Grep, WebFetch, Agent, Skill, MCP tools and so on), and what Claude is doing right now: `💭 Thinking…` after a tool returns, `✍️ Writing…` once it is producing output.
 - **The answer replaces the Working message** in place. Telegram sends no push notification for edits, so these answers arrive silently. Quick answers, multi-part answers, files and quote-replies arrive as normal messages.
 - The Working message is always the newest message. If you write while Claude works, it moves below your message. Telegram's own tools (reply, react and so on) and `ToolSearch` aren't listed.
-- The first line is an animated Claude asterisk and a verb that changes every 6 seconds (Thinking, Brewing, Cooking, Untangling and so on), with the elapsed time. The asterisk is a custom emoji, which Telegram shows when the bot owner has Telegram Premium. If Telegram refuses it, the bubble falls back to a plain 💬 for the rest of the run. `TELEGRAM_PROGRESS_SPIN=off` brings back the static `Working... (14s)` line.
+- The first line is an animated Claude asterisk (drawn over the 💬 above) and a verb that changes every 6 seconds (Thinking, Brewing, Cooking, Untangling and so on), with the elapsed time. The asterisk is a custom emoji, which Telegram shows when the bot owner has Telegram Premium. If Telegram refuses it, the bubble falls back to a plain 💬 for the rest of the run. `TELEGRAM_PROGRESS_SPIN=off` brings back the static `Working... (14s)` line.
 - The answer waits for an in-flight edit of the Working message for at most 10 seconds. After that it deletes the message and arrives as a new one, so a stuck Telegram call can never hold an answer back.
 - DMs only, because tool lines can show file paths and commands. With the [topic map](#topic-map) on, a mapped forum topic gets the Working message too, inside that topic.
 

@@ -238,8 +238,8 @@ export type ProgressTarget = { start: false } | { start: true; thread?: number }
 
 /**
  * A DM gets the bubble (as before). With the topic router on, so does a message in a mapped, non-silent topic of a chat
- * the topic map lists (the Town forum group), and the bubble then carries that thread id. Any other group (the family
- * group), an unlisted chat, an unmapped topic, a silent topic (another machine's) and General get none. An empty map
+ * the topic map lists (a mapped forum group), and the bubble then carries that thread id. Any other group (one the map does
+ * not list), an unlisted chat, an unmapped topic, a silent topic (another machine's) and General get none. An empty map
  * or the router off is private-only. Any mapped owner qualifies, an agent-owned topic too: a line the Desk could not
  * deliver, a custom command and media fall through to the session, and that turn gets a bubble like any other.
  */

@@ -4710,7 +4710,8 @@ async function handleAgenticCommand(ctx: Context): Promise<boolean> {
 // message history are kept.
 function requestNewSession(): void {
   mkdirSync(DATA_DIR, { recursive: true });
-  writeFileSync(join(DATA_DIR, "restart.signal"), `${Date.now() + 1000}\n`);
+  // "now": the owner asked for it, so the supervisor doesn't wait for the running turn to end.
+  writeFileSync(join(DATA_DIR, "restart.signal"), `${Date.now() + 1000} now\n`);
 }
 
 // ── Post-gate delivery: download media, build context, add to batch ──

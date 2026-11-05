@@ -6,13 +6,18 @@
  * by the Telegram MCP server when the user requests a full context reset,
  * then kills and restarts the claude process for a fresh session.
  *
+ * A restart waits until the session is idle (no turn in flight), 15 minutes
+ * at most. See "Restart only when idle" below.
+ *
  * Signal file: ~/.claude/channels/telegram/data/restart.signal
+ * Content: "<restart-after ms timestamp>", plus " now" to skip the idle wait.
  *
  * Usage:
  *   bun supervisor.ts [extra claude flags...]
  *   bun supervisor.ts --dangerously-skip-permissions
  */
 
+import { Database } from "bun:sqlite";
 import { type ChildProcess, spawn } from "node:child_process";
 import {
 	closeSync,
@@ -115,8 +120,24 @@ function clearTelegramMcpFailureCache(): void {
 		// No cache file yet, or unreadable: nothing to clear.
 	}
 }
-// Delay before restart to let Claude finish sending Telegram replies
+// Shortest delay before a restart. The idle wait below does the real work.
 const RESTART_DELAY_MS = 3_000;
+// Restart only when idle: a restart signal no longer kills a turn in flight.
+const PROGRESS_FILE = join(DATA_DIR, "progress.jsonl");
+const DB_PATH = join(DATA_DIR, "messages.db");
+const RESTART_MAX_WAIT_MS = 15 * 60 * 1000; // a stuck session still restarts after this
+const IDLE_POLL_MS = 5_000;
+const TOOL_FRESH_MS = 10 * 60 * 1000; // a tool call with no result counts as running this long
+const THINK_FRESH_MS = 3 * 60 * 1000; // time allowed between a tool result and the next event
+const STOP_GRACE_MS = 15_000; // a queued message starts the next turn right after a stop
+const UNANSWERED_FRESH_MS = 3 * 60 * 1000; // a new message with no answer counts as a turn this long
+const REPLAY_WINDOW_S = 300; // server.ts replayUnanswered() re-sends DMs from the last 5 minutes
+const NOTICE_DELAY_MS = 45_000; // after the respawn: time for the new server to start and replay
+// One line sent for a message that a restart lost and the replay can't bring
+// back. TELEGRAM_RESTART_NOTICE changes the text; "off" or empty disables it.
+const RESTART_NOTICE =
+	process.env.TELEGRAM_RESTART_NOTICE ??
+	"I restarted while I was working on this message and lost it. Please send it again.";
 // Auth watchdog: detect 401 errors and notify via Telegram
 const AUTH_CHECK_INTERVAL_MS = 15_000; // Check every 15s
 const AUTH_RECOVERY_CHECK_MS = 30_000; // Check for token recovery every 30s
@@ -126,6 +147,8 @@ let restartCount = 0;
 let lastStartTime = 0;
 let shuttingDown = false;
 let pendingRestart = false;
+let restartInProgress = false; // from a restart signal until the next spawn
+let forceRestart = false; // a "now" signal arrived while a restart was waiting for idle
 let authFailed = false; // Tracks whether we're in auth-failure state
 let lastAuthCheckOffset = 0; // Track where we last read in stdout log
 
@@ -179,6 +202,8 @@ async function killChild(child: ChildProcess): Promise<void> {
 
 function startClaude(): void {
 	if (shuttingDown) return;
+	if (currentChild) return; // never run two sessions
+	restartInProgress = false;
 
 	const uptime = Date.now() - lastStartTime;
 	if (lastStartTime > 0 && uptime > STABLE_UPTIME_MS) {
@@ -237,20 +262,359 @@ function startClaude(): void {
 	});
 }
 
+// ── Restart only when idle ────────────────────────────────────────
+// Every restart path (uptime cap, context threshold, a reset asked for from
+// Telegram) ends in handleRestartSignal(). It used to kill Claude after a fixed
+// 2-3 seconds, in the middle of a turn if one was running. It now waits until
+// the session is idle, RESTART_MAX_WAIT_MS at most.
+//
+// Idle signals, both already on disk:
+//   1. progress.jsonl (Agentic Mode hook): tool / tool_done / own / stop events.
+//      A stop with nothing after it means the turn ended. This is the main signal.
+//   2. messages.db: a new incoming message with no answer yet. It covers the
+//      time before the first tool call of a turn, and Agentic Mode off.
+//
+// If the session is killed with a message still unanswered, replayUnanswered()
+// in server.ts sends DMs from the last 5 minutes to the new session. For what
+// it can't cover (group chats, older DMs) the supervisor sends RESTART_NOTICE.
+
+export type ProgressEvent = { t: number; type: string; tool?: string };
+
+/** Events of the current session (t >= since), oldest first. Bad lines are skipped. */
+export function parseProgress(text: string, since: number): ProgressEvent[] {
+	const events: ProgressEvent[] = [];
+	for (const line of text.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			const ev = JSON.parse(line) as ProgressEvent;
+			if (typeof ev.t === "number" && typeof ev.type === "string" && ev.t >= since) events.push(ev);
+		} catch {}
+	}
+	return events;
+}
+
+export type HookActivity = { busy: boolean; reason: string; lastStop: number | null };
+
+/** What the hook events say: is a turn in flight, and when did the last turn end. */
+export function hookActivity(events: ProgressEvent[], now: number): HookActivity {
+	let lastStop: number | null = null;
+	let open = 0; // tool calls with no result yet, since the last stop
+	let last: ProgressEvent | null = null; // last event since the last stop
+	let lastTool = "";
+	for (const ev of events) {
+		if (ev.type === "stop") {
+			lastStop = ev.t;
+			open = 0;
+			last = null;
+		} else if (ev.type === "tool") {
+			open++;
+			last = ev;
+			lastTool = ev.tool ?? "";
+		} else if (ev.type === "tool_done") {
+			open = Math.max(0, open - 1);
+			last = ev;
+		} else if (ev.type === "own") {
+			// A call to one of the plugin's own tools (react, reply, ...). After an
+			// "On it" reply the chat looks answered, but the turn goes on.
+			last = ev;
+		}
+	}
+	if (!last) {
+		// A message that arrived during the turn starts the next turn right after the stop.
+		const settling = lastStop !== null && now - lastStop < STOP_GRACE_MS;
+		return { busy: settling, reason: settling ? "a turn ended a moment ago" : "", lastStop };
+	}
+	const age = now - last.t;
+	if (open > 0) {
+		return { busy: age < TOOL_FRESH_MS, reason: `tool call in flight${lastTool ? ` (${lastTool})` : ""}`, lastStop };
+	}
+	return { busy: age < THINK_FRESH_MS, reason: "turn in flight, between tool calls", lastStop };
+}
+
+export type MessageRow = {
+	message_id: number;
+	chat_id: string;
+	user_id: string | null;
+	text: string | null;
+	caption: string | null;
+	reply_to_msg_id: number | null;
+	date: number; // seconds
+	is_outgoing: number;
+	thread_id: number | null;
+	bot: string; // "" = primary bot, else the extra bot's username
+};
+
+type GroupRules = { requireMention?: boolean; allowFrom?: string[] };
+type ChatRules = { allowFrom?: string[]; groups?: Record<string, GroupRules> };
+export type AccessRules = ChatRules & { mentionPatterns?: string[]; bots?: Record<string, ChatRules> };
+
+/** addressed: the message mentions the bot, replies to it, or matches a mention pattern. */
+export type PendingMessage = MessageRow & { group: boolean; addressed: boolean };
+
+/**
+ * Incoming messages newer than sinceMs that the bot would deliver to Claude and
+ * that have no later outgoing message in the same chat. Mirrors the gate in
+ * server.ts: allowlisted DMs, and registered groups (allowed sender, and a
+ * mention or a reply to the bot where the group requires one).
+ */
+export function unansweredMessages(
+	rows: MessageRow[],
+	access: AccessRules,
+	primaryUsername: string | null,
+	sinceMs: number,
+	isBotMessage: (chatId: string, bot: string, messageId: number) => boolean = () => false,
+): PendingMessage[] {
+	const lastOutgoing = new Map<string, number>();
+	for (const r of rows) {
+		if (r.is_outgoing !== 1) continue;
+		const k = `${r.bot}\n${r.chat_id}`;
+		if ((lastOutgoing.get(k) ?? 0) < r.date) lastOutgoing.set(k, r.date);
+	}
+	const pending: PendingMessage[] = [];
+	for (const r of rows) {
+		// Negative ids are rows the server writes itself (button taps), not chat messages.
+		if (r.is_outgoing !== 0 || r.message_id <= 0 || r.date * 1000 <= sinceMs) continue;
+		if ((lastOutgoing.get(`${r.bot}\n${r.chat_id}`) ?? 0) >= r.date) continue; // answered
+		const override = r.bot
+			? Object.entries(access.bots ?? {}).find(([k]) => k.replace(/^@/, "").toLowerCase() === r.bot.toLowerCase())?.[1]
+			: undefined;
+		const allowFrom = override?.allowFrom ?? access.allowFrom ?? [];
+		const groups = override?.groups ?? access.groups ?? {};
+		if (allowFrom.includes(r.chat_id)) {
+			pending.push({ ...r, group: false, addressed: true });
+			continue;
+		}
+		const policy = groups[r.chat_id];
+		if (!policy) continue;
+		const senders = policy.allowFrom ?? [];
+		if (senders.length > 0 && !senders.includes(r.user_id ?? "")) continue;
+		const text = r.text ?? r.caption ?? "";
+		const username = r.bot || primaryUsername;
+		const addressed =
+			(username !== null && text.toLowerCase().includes(`@${username.toLowerCase()}`)) ||
+			(r.reply_to_msg_id != null && isBotMessage(r.chat_id, r.bot, r.reply_to_msg_id)) ||
+			(access.mentionPatterns ?? []).some((pat) => {
+				try {
+					return new RegExp(pat, "i").test(text);
+				} catch {
+					return false;
+				}
+			});
+		if ((policy.requireMention ?? true) && !addressed) continue;
+		pending.push({ ...r, group: true, addressed });
+	}
+	return pending;
+}
+
+/**
+ * Of the messages a restart lost, those replayUnanswered() in server.ts can't
+ * bring back: group chats, and DMs older than its 5-minute window at replay
+ * time. One per chat and topic (the newest), so a chat gets a single notice.
+ * In a group only a message addressed to the bot counts: a group that delivers
+ * every message is mostly people talking to each other.
+ */
+export function noticeTargets(lost: PendingMessage[], replayAtS: number): PendingMessage[] {
+	const newest = new Map<string, PendingMessage>();
+	for (const m of lost) {
+		if (!m.group && m.date >= replayAtS - REPLAY_WINDOW_S) continue; // the replay covers it
+		if (m.group && !m.addressed) continue;
+		const k = `${m.bot}\n${m.chat_id}\n${m.thread_id ?? ""}`;
+		const cur = newest.get(k);
+		if (!cur || cur.date <= m.date) newest.set(k, m);
+	}
+	return [...newest.values()];
+}
+
+/** The signal file: "<restart-after ms>" and an optional "now" (skip the idle wait). */
+export function parseRestartSignal(content: string, now: number): { delayMs: number; force: boolean } {
+	const [first, ...rest] = content.trim().split(/\s+/);
+	const until = Number.parseInt(first ?? "", 10);
+	return {
+		delayMs: !Number.isNaN(until) && until > now ? until - now : RESTART_DELAY_MS,
+		force: rest.includes("now"),
+	};
+}
+
+function readProgressEvents(): ProgressEvent[] {
+	try {
+		const size = statSync(PROGRESS_FILE).size;
+		const readSize = Math.min(size, 256 * 1024);
+		const fd = openSync(PROGRESS_FILE, "r");
+		const buf = Buffer.alloc(readSize);
+		readSync(fd, buf, 0, readSize, size - readSize);
+		closeSync(fd);
+		let text = buf.toString("utf-8");
+		if (readSize < size) text = text.slice(text.indexOf("\n") + 1); // drop the cut first line
+		return parseProgress(text, lastStartTime);
+	} catch {
+		return []; // no file: Agentic Mode is off, or nothing ran yet
+	}
+}
+
+let primaryUsername: string | null = null;
+
+async function botUsername(token: string): Promise<string | null> {
+	try {
+		const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+		const body = (await res.json()) as { ok?: boolean; result?: { username?: string } };
+		return body.ok ? (body.result?.username ?? null) : null;
+	} catch {
+		return null;
+	}
+}
+
+// Needed to see @mentions in groups. Without it, a reply to the bot still counts.
+async function loadPrimaryUsername(): Promise<void> {
+	const token = loadBotToken();
+	if (token) primaryUsername = await botUsername(token);
+}
+
+/** Unanswered, deliverable messages newer than sinceMs. Empty on any read error. */
+function readUnanswered(sinceMs: number): PendingMessage[] {
+	let db: Database | null = null;
+	try {
+		if (!existsSync(DB_PATH)) return [];
+		const access = JSON.parse(readFileSync(join(STATE_DIR, "access.json"), "utf-8")) as AccessRules;
+		db = new Database(DB_PATH, { readonly: true });
+		const rows = db
+			.query(
+				"SELECT message_id, chat_id, user_id, text, caption, reply_to_msg_id, date, is_outgoing, thread_id, bot FROM messages WHERE date >= ? ORDER BY date, id",
+			)
+			.all(Math.floor(sinceMs / 1000)) as MessageRow[];
+		const isBot = db.query(
+			"SELECT 1 FROM messages WHERE chat_id = ? AND bot = ? AND message_id = ? AND is_outgoing = 1 LIMIT 1",
+		);
+		return unansweredMessages(rows, access, primaryUsername, sinceMs, (c, b, id) => isBot.get(c, b, id) !== null);
+	} catch {
+		return [];
+	} finally {
+		try {
+			db?.close();
+		} catch {}
+	}
+}
+
+/** Is a turn in flight right now? lostSince: where a search for lost messages starts. */
+function sessionState(now: number): { busy: boolean; reason: string; lostSince: number } {
+	const hook = hookActivity(readProgressEvents(), now);
+	const turnStart = hook.lastStop ?? lastStartTime;
+	// The hook shows a turn in flight: every message since the last stop belongs to it.
+	if (hook.busy) return { busy: true, reason: hook.reason, lostSince: turnStart };
+	// Second check: a message that arrived after the last turn ended and has no
+	// answer yet. Claude is reading it, or is about to. Older rows with no answer
+	// are messages Claude never got (rate limit) or chose not to answer.
+	const lostSince = Math.max(turnStart, now - UNANSWERED_FRESH_MS);
+	const fresh = readUnanswered(lostSince);
+	if (fresh.length > 0) {
+		const m = fresh[fresh.length - 1];
+		return { busy: true, reason: `message ${m.message_id} in chat ${m.chat_id} has no answer yet`, lostSince };
+	}
+	return { busy: false, reason: "", lostSince };
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Waits until the session is idle, RESTART_MAX_WAIT_MS at most. */
+async function waitForIdle(child: ChildProcess): Promise<void> {
+	const started = Date.now();
+	let logged = "";
+	while (!shuttingDown && currentChild === child) {
+		if (forceRestart) {
+			log("restart asked for now — not waiting any longer");
+			return;
+		}
+		const state = sessionState(Date.now());
+		const waited = Date.now() - started;
+		if (!state.busy) {
+			log(waited >= IDLE_POLL_MS ? `session idle after ${Math.round(waited / 1000)}s` : "session idle");
+			return;
+		}
+		if (waited >= RESTART_MAX_WAIT_MS) {
+			log(`session still busy after ${Math.round(waited / 60000)}min (${state.reason}) — restarting anyway`);
+			return;
+		}
+		if (state.reason !== logged) {
+			logged = state.reason;
+			log(`session busy: ${state.reason} — holding the restart until it is idle (${Math.round(RESTART_MAX_WAIT_MS / 60000)}min at most)`);
+		}
+		await sleep(IDLE_POLL_MS);
+	}
+}
+
+const extraBotTokens = new Map<string, string>(); // lowercase username -> token
+
+async function tokenForBot(bot: string): Promise<string | null> {
+	if (!bot) return loadBotToken();
+	const want = bot.toLowerCase();
+	if (!extraBotTokens.has(want)) {
+		for (const token of (loadEnvValue("TELEGRAM_EXTRA_BOT_TOKENS") ?? "").split(",").map((t) => t.trim())) {
+			if (!token) continue;
+			const name = await botUsername(token);
+			if (name) extraBotTokens.set(name.toLowerCase(), token);
+		}
+	}
+	return extraBotTokens.get(want) ?? null;
+}
+
+/** After the respawn: one notice per chat for lost messages the replay didn't cover. */
+async function sendLostNotices(lost: PendingMessage[], lostSince: number): Promise<void> {
+	if (shuttingDown || lost.length === 0) return;
+	// replayUnanswered() runs a few seconds after the new server starts to poll.
+	const replayAtS = Math.floor(lastStartTime / 1000) + 30;
+	// Skip what got an answer since (for example after a replay).
+	const still = new Set(readUnanswered(lostSince).map((m) => `${m.bot}\n${m.chat_id}\n${m.message_id}`));
+	for (const m of noticeTargets(lost, replayAtS)) {
+		if (!still.has(`${m.bot}\n${m.chat_id}\n${m.message_id}`)) continue;
+		const token = await tokenForBot(m.bot);
+		if (!token) {
+			log(`restart notice: no token for bot ${m.bot} — skipped chat ${m.chat_id}`);
+			continue;
+		}
+		try {
+			const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					chat_id: m.chat_id,
+					text: RESTART_NOTICE,
+					...(m.thread_id != null ? { message_thread_id: m.thread_id } : {}),
+					reply_parameters: { message_id: m.message_id, allow_sending_without_reply: true },
+				}),
+			});
+			log(
+				res.ok
+					? `restart notice: asked chat ${m.chat_id} to send message ${m.message_id} again`
+					: `restart notice: Telegram API error ${res.status} for chat ${m.chat_id}`,
+			);
+		} catch (err) {
+			log(`restart notice: failed for chat ${m.chat_id}: ${err}`);
+		}
+	}
+}
+
 async function handleRestartSignal(): Promise<void> {
 	if (!existsSync(SIGNAL_FILE)) return;
-	if (pendingRestart) return; // already handling one
+	if (restartInProgress) {
+		// One restart is enough. Remove the file, or it stays behind and looks pending.
+		// A "now" signal (/new) still ends the wait of the restart in progress.
+		try {
+			if (parseRestartSignal(readFileSync(SIGNAL_FILE, "utf-8"), Date.now()).force) forceRestart = true;
+		} catch {}
+		try {
+			rmSync(SIGNAL_FILE, { force: true });
+		} catch {}
+		log("restart already in progress — dropped a second restart signal");
+		return;
+	}
+	restartInProgress = true;
+	forceRestart = false;
 
 	log("restart signal detected");
 
-	// Read optional delay-until timestamp from the file
-	let delayMs = RESTART_DELAY_MS;
+	// Read the optional delay-until timestamp and "now" flag from the file
+	let signal = { delayMs: RESTART_DELAY_MS, force: false };
 	try {
-		const content = readFileSync(SIGNAL_FILE, "utf-8").trim();
-		const until = Number.parseInt(content, 10);
-		if (!Number.isNaN(until) && until > Date.now()) {
-			delayMs = until - Date.now();
-		}
+		signal = parseRestartSignal(readFileSync(SIGNAL_FILE, "utf-8"), Date.now());
 	} catch {}
 
 	// Consume the signal file immediately
@@ -260,14 +624,40 @@ async function handleRestartSignal(): Promise<void> {
 		log(`warning: could not remove signal file: ${err}`);
 	}
 
-	log(`waiting ${delayMs}ms for Claude to finish sending replies...`);
-	await new Promise((r) => setTimeout(r, delayMs));
+	const child = currentChild;
+	log(`waiting ${signal.delayMs}ms for Claude to finish sending replies...`);
+	await sleep(signal.delayMs);
 
-	if (currentChild) {
+	if (child && currentChild === child) {
+		if (signal.force) log("restart asked for now — not waiting for the session to go idle");
+		else await waitForIdle(child);
+	}
+	if (shuttingDown) {
+		restartInProgress = false;
+		return;
+	}
+
+	if (child && currentChild === child) {
+		const { lostSince } = sessionState(Date.now());
 		pendingRestart = true;
 		log("terminating current claude session for context reset");
-		await killChild(currentChild);
+		await killChild(child);
 		// The exit handler will detect pendingRestart and call startClaude
+		if (RESTART_NOTICE.trim() && RESTART_NOTICE.trim().toLowerCase() !== "off") {
+			// The old server is gone and the new one is not up yet: every unanswered
+			// row here was delivered to the session that was just killed.
+			const lost = readUnanswered(lostSince);
+			if (lost.length > 0) setTimeout(() => void sendLostNotices(lost, lostSince), NOTICE_DELAY_MS);
+		}
+	} else if (currentChild) {
+		// The session crashed or exited during the wait and a new one is running.
+		restartInProgress = false;
+		log("session was already replaced during the wait — no restart needed");
+	} else if (child || authFailed) {
+		// The session exited during the wait (its exit handler starts the next one),
+		// or auth is broken (the recovery poller starts claude when it is valid again).
+		restartInProgress = false;
+		log("session already exited — no restart needed");
 	} else {
 		log("no running claude process — starting fresh");
 		startClaude();
@@ -301,9 +691,6 @@ async function shutdown(sig: string): Promise<void> {
 	}
 	process.exit(0);
 }
-
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 // Kill any orphaned processes from previous runs. Two classes are caught:
 //   1. claude --channels telegram   — the worker itself
@@ -399,15 +786,19 @@ async function cleanupOrphans(): Promise<void> {
 // When detected: stops the restart loop, notifies owner via Telegram,
 // and polls for token recovery (user runs /login).
 
-function loadBotToken(): string | null {
+function loadEnvValue(name: string): string | null {
 	const envFile = join(STATE_DIR, ".env");
 	try {
 		for (const line of readFileSync(envFile, "utf-8").split("\n")) {
-			const m = line.match(/^TELEGRAM_BOT_TOKEN=(.+)$/);
-			if (m) return m[1].trim();
+			const eq = line.indexOf("=");
+			if (eq > 0 && line.slice(0, eq) === name && line.slice(eq + 1).trim()) return line.slice(eq + 1).trim();
 		}
 	} catch {}
-	return process.env.TELEGRAM_BOT_TOKEN || null;
+	return process.env[name] || null;
+}
+
+function loadBotToken(): string | null {
+	return loadEnvValue("TELEGRAM_BOT_TOKEN");
 }
 
 function getOwnerChatId(): string | null {
@@ -570,6 +961,8 @@ function startContextWatchdog(): void {
 	if (contextWatchdogTimer) return;
 	contextWatchdogTimer = setInterval(() => {
 		if (!currentChild || shuttingDown) return;
+		// A restart is already waiting for the session to go idle: don't queue another.
+		if (restartInProgress) return;
 		// Debounce: don't trigger more than once per 60 seconds
 		if (Date.now() - lastWatchdogTrigger < 60_000) return;
 		try {
@@ -617,18 +1010,24 @@ function startContextWatchdog(): void {
 	}, CONTEXT_CHECK_INTERVAL_MS);
 }
 
-// Main
-// Write pidfile so MCP servers can detect daemon mode
-mkdirSync(DATA_DIR, { recursive: true });
-writeFileSync(PID_FILE, String(process.pid));
+// Main. Not run when a test imports this file.
+if (import.meta.main) {
+	process.on("SIGINT", () => void shutdown("SIGINT"));
+	process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-log("telegram daemon supervisor starting");
-log(`router model: ${ROUTER_MODEL} (set TELEGRAM_ROUTER_MODEL to change)`);
-log(`signal file: ${SIGNAL_FILE}`);
-log(`claude args: ${[...BASE_ARGS, ...EXTRA_ARGS].join(" ")}`);
-startWatching();
-startContextWatchdog();
-startAuthWatchdog();
-void cleanupOrphans().then(() => {
-	startClaude();
-});
+	// Write pidfile so MCP servers can detect daemon mode
+	mkdirSync(DATA_DIR, { recursive: true });
+	writeFileSync(PID_FILE, String(process.pid));
+
+	log("telegram daemon supervisor starting");
+	log(`router model: ${ROUTER_MODEL} (set TELEGRAM_ROUTER_MODEL to change)`);
+	log(`signal file: ${SIGNAL_FILE}`);
+	log(`claude args: ${[...BASE_ARGS, ...EXTRA_ARGS].join(" ")}`);
+	startWatching();
+	startContextWatchdog();
+	startAuthWatchdog();
+	void loadPrimaryUsername();
+	void cleanupOrphans().then(() => {
+		startClaude();
+	});
+}

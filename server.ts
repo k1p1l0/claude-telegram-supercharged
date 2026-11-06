@@ -35,6 +35,13 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
+import {
+  askUserSendOptions,
+  askUserSilentCheck,
+  askUserThreadEnabled,
+  askUserThreadId,
+  resolveAskCallback,
+} from "./askUser";
 import { doneButtonText, labelFromKeyboard, parseDecisionData, recordDecisionTap } from "./decisionTap";
 import { createNeeds, defaultTasksDb, lockedRead, readApprovalsDb } from "./needsList";
 import {
@@ -1988,6 +1995,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             enum: ["MarkdownV2", "HTML", "plain"],
             description: "Telegram parse mode for the question text. Default: MarkdownV2.",
           },
+          thread_id: {
+            type: "number",
+            description:
+              "Telegram Forum topic thread ID from the inbound notification; the question posts in that topic.",
+          },
           timeout: {
             type: "number",
             description:
@@ -2362,6 +2374,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
         assertAllowedChat(chat_id, b);
 
+        // Flag TELEGRAM_ASK_USER_THREAD, off by default: with the flag off, thread_id is ignored and the send is as before.
+        // The silent-topic refusal applies only while the topic router (TELEGRAM_TOPIC_ROUTER) is also on.
+        const askThread = askUserThreadId(
+          args.thread_id,
+          askUserThreadEnabled(),
+          askUserSilentCheck(topicRouterEnabled(), (t) => topicIsSilent(readTopicMap(), chat_id, t)),
+        );
+
         if (!buttons.length || buttons.length > 10) {
           throw new Error("buttons must have 1-10 items");
         }
@@ -2385,16 +2405,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
           pendingCallbacks.set(callbackId, { resolve, timer });
 
-          b.bot.api
-            .sendMessage(chat_id, text, {
-              ...(parseMode ? { parse_mode: parseMode } : {}),
-              reply_markup: keyboard,
-            })
-            .catch((err) => {
-              clearTimeout(timer);
-              pendingCallbacks.delete(callbackId);
-              resolve(`error: ${err instanceof Error ? err.message : String(err)}`);
-            });
+          b.bot.api.sendMessage(chat_id, text, askUserSendOptions(askThread, parseMode, keyboard)).catch((err) => {
+            clearTimeout(timer);
+            pendingCallbacks.delete(callbackId);
+            resolve(`error: ${err instanceof Error ? err.message : String(err)}`);
+          });
         });
 
         if (b.primary) setProgressPaused(chat_id, false);
@@ -3533,19 +3548,9 @@ bot.on("callback_query:data", async (ctx) => {
     await handleDecisionCallback(ctx, data);
     return;
   }
-  if (!data.startsWith("ask:")) return;
-
-  const parts = data.split(":");
-  if (parts.length < 3) return;
-  const callbackId = parts[1];
-  const label = parts.slice(2).join(":"); // rejoin in case label contained ':'
-
-  const pending = pendingCallbacks.get(callbackId);
-  if (pending) {
-    clearTimeout(pending.timer);
-    pendingCallbacks.delete(callbackId);
-    pending.resolve(label);
-  }
+  const ask = resolveAskCallback(pendingCallbacks, data);
+  if (!ask) return;
+  const { label } = ask;
 
   // Acknowledge the callback to remove the loading spinner.
   await ctx.answerCallbackQuery({ text: label });

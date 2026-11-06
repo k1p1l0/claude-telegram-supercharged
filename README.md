@@ -155,7 +155,7 @@ Clone this repo and install both the supercharged server and the daemon supervis
 ```sh
 git clone https://github.com/k1p1l0/claude-telegram-supercharged.git
 PLUGIN_DIR=~/.claude/plugins/cache/claude-plugins-official/telegram/$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
-cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts claude-telegram-supercharged/decisionTap.ts claude-telegram-supercharged/needsList.ts claude-telegram-supercharged/routerHook.ts claude-telegram-supercharged/progressRender.ts claude-telegram-supercharged/topicRouter.ts $PLUGIN_DIR/
+cp claude-telegram-supercharged/server.ts claude-telegram-supercharged/miniapp.ts claude-telegram-supercharged/decisionTap.ts claude-telegram-supercharged/needsList.ts claude-telegram-supercharged/routerHook.ts claude-telegram-supercharged/progressRender.ts claude-telegram-supercharged/topicRouter.ts claude-telegram-supercharged/askUser.ts $PLUGIN_DIR/
 cp -R claude-telegram-supercharged/miniapp $PLUGIN_DIR/
 mkdir -p ~/.claude/scripts
 cp claude-telegram-supercharged/supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
@@ -216,7 +216,7 @@ git pull
 # Find the current version (e.g. 0.0.4)
 PLUGIN_VERSION=$(ls ~/.claude/plugins/cache/claude-plugins-official/telegram/ | sort -V | tail -1)
 echo "Updating to version: $PLUGIN_VERSION"
-cp server.ts miniapp.ts decisionTap.ts needsList.ts routerHook.ts progressRender.ts topicRouter.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
+cp server.ts miniapp.ts decisionTap.ts needsList.ts routerHook.ts progressRender.ts topicRouter.ts askUser.ts ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp -R miniapp ~/.claude/plugins/cache/claude-plugins-official/telegram/$PLUGIN_VERSION/
 cp supervisor.ts ~/.claude/scripts/telegram-supervisor.ts
 # Copy skills
@@ -882,6 +882,8 @@ The outer key is the group's chat id, the inner key the topic's thread id (`thre
 A topic or a group the map does not list keeps the group's rule. The file is read again whenever it changes, so an edit needs no restart. An entry with a bad shape is left out and the rest stay. A file over 64 KB counts as empty.
 
 With the map on, the `reply` tool fills `thread_id` from the message it answers when the caller left it out, so a reply never lands in General by mistake. A message in a mapped topic that is not `silent` gets the Agentic Mode Working message inside that topic, and the answer replaces it there. General, an unmapped topic and other groups get no Working message. Messages that wait for an @mention are buffered per topic, so a mention in one topic does not release a message from another.
+
+The `ask_user` tool can post its question inside a topic too. It is a separate flag, off by default: set `TELEGRAM_ASK_USER_THREAD=on` and pass `thread_id`, and the buttons appear in that topic instead of General. With the topic router also on, `ask_user` refuses a `silent` topic, the same way `reply` does. With the flag off, `thread_id` is ignored.
 
 ## Owner stop controls (agent-harness router)
 

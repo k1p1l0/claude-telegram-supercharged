@@ -2,7 +2,7 @@
 // commands forwarded to the
 // agent-harness Telegram router. Pure and injectable: no grammy, no server state.
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export type RouterButton = { label: string; text: string };
@@ -55,10 +55,10 @@ export const ROUTER_TIMEOUT_MS = 20_000;
 const CMD_RE = /^\/(stop|stopall|resume|pause|stops|auto|goal|goals|mandate)(?:@(\w+))?(?:\s+([\s\S]*))?$/i;
 export const DEFAULT_ROUTER_PATH = "~/Projects/agent-harness/telegram-router.ts";
 
-/** Resolve the router file path from env, expanding a leading ~. */
+/** Resolve the router file path from env, expanding a leading ~ (~/ or, on Windows, ~\ too). */
 export function routerPath(env: Record<string, string | undefined> = process.env): string {
   const p = env.AGENT_HARNESS_ROUTER?.trim() || DEFAULT_ROUTER_PATH;
-  return p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p;
+  return p === "~" ? homedir() : p.startsWith("~/") || p.startsWith(`~${sep}`) ? join(homedir(), p.slice(2)) : p;
 }
 
 /** Default loader: dynamic import; undefined when the file or its exports are missing. */

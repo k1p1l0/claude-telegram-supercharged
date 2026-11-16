@@ -579,14 +579,28 @@ describe("lockedRead: shared lock, no retry loop", () => {
     expect(calls[0].args.join(" ")).toContain(lock);
   });
   test("an exclusive writer makes the read fail by timeout instead of reading", async () => {
+    // The writer's side: fcntl.flock LOCK_EX, or on Windows LockFileEx exclusive (2) on the whole file.
     const holder = Bun.spawn(
-      [
-        "python3",
-        "-I",
-        "-c",
-        "import fcntl,sys,time\nf=open(sys.argv[1],'a')\nfcntl.flock(f,fcntl.LOCK_EX)\nprint('held',flush=True)\ntime.sleep(4)",
-        lock,
-      ],
+      process.platform === "win32"
+        ? [
+            process.execPath,
+            "-e",
+            "import{dlopen}from'bun:ffi';\n" +
+              "const k=dlopen('kernel32.dll',{CreateFileW:{args:['ptr','u32','u32','ptr','u32','u32','ptr'],returns:'i64'},\n" +
+              " LockFileEx:{args:['i64','u32','u32','u32','u32','ptr'],returns:'i32'}}).symbols;\n" +
+              "const h=k.CreateFileW(Buffer.from(process.argv.at(-1)+'\\0','utf16le'),0xC0000000,7,null,4,0,null);\n" +
+              "if(h===-1n||!k.LockFileEx(h,2,0,0xffffffff,0xffffffff,new Uint8Array(32)))process.exit(1);\n" +
+              "console.log('held');\nBun.sleepSync(4000);",
+            "--",
+            lock,
+          ]
+        : [
+            "python3",
+            "-I",
+            "-c",
+            "import fcntl,sys,time\nf=open(sys.argv[1],'a')\nfcntl.flock(f,fcntl.LOCK_EX)\nprint('held',flush=True)\ntime.sleep(4)",
+            lock,
+          ],
       { stdout: "pipe" },
     );
     try {
@@ -598,6 +612,10 @@ describe("lockedRead: shared lock, no retry loop", () => {
       holder.kill();
       await holder.exited;
     }
+  });
+  test.skipIf(process.platform !== "win32")("Windows: a lock file that cannot be opened fails the read", async () => {
+    // CreateFileW refuses a folder (error 5): the helper must exit non-zero, not print nothing and look like no state.
+    await expect(lockedRead(state, dir, 4000)).rejects.toThrow(/Windows error 5/);
   });
   test("createNeeds reads state through the injected locked reader on list and on answer", async () => {
     const h = harness(stateJson({ "p1/D1": dec() }));

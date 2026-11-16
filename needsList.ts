@@ -93,11 +93,37 @@ const LOCK_HELPER =
   "try:\n data=open(sys.argv[2],'rb').read()\nexcept FileNotFoundError:\n data=b''\n" +
   "sys.stdout.buffer.write(data)\n";
 
+// Windows has neither flock(1) nor fcntl in its Python, so there the child is this bun (-e) and the lock is
+// LockFileEx, shared, on the whole file (offset 0, 2^64 - 1 bytes): an exclusive lock a writer takes on any part of
+// the file makes it wait. The same rules as LOCK_HELPER: no lock file means no lock, no state.json prints nothing.
+// The handle comes from CreateFileW (GENERIC_READ, all sharing, OPEN_EXISTING); -1n is INVALID_HANDLE_VALUE, and
+// errors 2 and 3 are "file" and "path not found". ESM imports on purpose: a `bun -e` script that calls require()
+// exits 0 when it throws, and a failed lock must fail the read.
+const WIN_LOCK_HELPER =
+  "import{readFileSync,writeSync}from'node:fs';import{toNamespacedPath}from'node:path';import{dlopen}from'bun:ffi';\n" +
+  "const k=dlopen('kernel32.dll',{\n" +
+  " CreateFileW:{args:['ptr','u32','u32','ptr','u32','u32','ptr'],returns:'i64'},\n" +
+  " LockFileEx:{args:['i64','u32','u32','u32','u32','ptr'],returns:'i32'},\n" +
+  " UnlockFileEx:{args:['i64','u32','u32','u32','ptr'],returns:'i32'},\n" +
+  " CloseHandle:{args:['i64'],returns:'i32'},GetLastError:{args:[],returns:'u32'}}).symbols;\n" +
+  "const [lockPath,statePath]=process.argv.slice(-2);\n" +
+  "const h=k.CreateFileW(Buffer.from(toNamespacedPath(lockPath)+'\\0','utf16le'),0x80000000,7,null,3,0,null);\n" +
+  "const err=h===-1n?k.GetLastError():0;\n" +
+  "if(h===-1n&&err!==2&&err!==3)throw new Error(`cannot open the lock file (Windows error ${err})`);\n" +
+  "const ov=new Uint8Array(32);\n" +
+  "if(h!==-1n&&!k.LockFileEx(h,0,0,0xffffffff,0xffffffff,ov))\n" +
+  " throw new Error(`LockFileEx failed (Windows error ${k.GetLastError()})`);\n" +
+  "let data;\n" +
+  "try{data=readFileSync(statePath)}catch(e){if(e.code!=='ENOENT')throw e;data=Buffer.alloc(0)}\n" +
+  "if(h!==-1n){k.UnlockFileEx(h,0,0xffffffff,0xffffffff,ov);k.CloseHandle(h)}\n" +
+  "for(let o=0;o<data.length;)o+=writeSync(1,data,o);\n";
+
 /**
  * Reads state.json while holding LOCK_SH on the skill's .state.lock. The skill's writer takes LOCK_EX through
  * fcntl.flock, so a read never sees a half-written file and waits while it writes. bun has no flock, so a small
- * child does it: flock(1) when it exists, else python3 -I. The child is killed after timeoutMs, so a stuck
- * writer shows as an error instead of hanging the board. Returns null when the file does not exist.
+ * child does it: flock(1) when it exists, else python3 -I; on Windows, this bun with WIN_LOCK_HELPER. The child is
+ * killed after timeoutMs, so a stuck writer shows as an error instead of hanging the board. Returns null when the
+ * file does not exist.
  */
 export function lockedRead(
   statePath: string,
@@ -107,9 +133,11 @@ export function lockedRead(
 ): Promise<string | null> {
   const flock = Bun.which("flock");
   const [cmd, args] =
-    flock && existsSync(lockPath) && existsSync(statePath)
-      ? [flock, ["-s", "-w", String(Math.max(1, Math.floor(timeoutMs / 1000) - 1)), lockPath, "cat", statePath]]
-      : ["python3", ["-I", "-c", LOCK_HELPER, lockPath, statePath]];
+    process.platform === "win32"
+      ? [process.execPath, ["-e", WIN_LOCK_HELPER, "--", lockPath, statePath]]
+      : flock && existsSync(lockPath) && existsSync(statePath)
+        ? [flock, ["-s", "-w", String(Math.max(1, Math.floor(timeoutMs / 1000) - 1)), lockPath, "cat", statePath]]
+        : ["python3", ["-I", "-c", LOCK_HELPER, lockPath, statePath]];
   return new Promise((resolve, reject) => {
     run(cmd, args, { timeout: timeoutMs, maxBuffer: 16 << 20, encoding: "utf8" }, (err, stdout) => {
       if (err)

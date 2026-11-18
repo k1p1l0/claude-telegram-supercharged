@@ -84,7 +84,7 @@ while {[clock seconds] < $deadline} {
 set claude_pid [exp_pid]
 set poller_ok 0
 for {set i 0} {$i < 20} {incr i} {
-    if {![catch {exec pgrep -P $claude_pid -f plugins-official/telegram} out] && $out ne ""} {
+    if {![catch {exec pgrep -P $claude_pid -f {plugins-official/telegram|telegram-supercharged}} out] && $out ne ""} {
         set poller_ok 1
         break
     }

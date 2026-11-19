@@ -28,11 +28,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { extname, join, sep } from "node:path";
+import { extname, isAbsolute, join, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Bot, BotError, type Context, GrammyError, InlineKeyboard, InputFile, webhookCallback } from "grammy";
+import {
+  Bot,
+  BotError,
+  type Context,
+  GrammyError,
+  HttpError,
+  InlineKeyboard,
+  InputFile,
+  webhookCallback,
+} from "grammy";
 import type { MessageEntity, ReactionTypeEmoji } from "grammy/types";
 import { z } from "zod";
 import { doneButtonText, labelFromKeyboard, parseDecisionData, recordDecisionTap } from "./decisionTap";
@@ -175,6 +184,221 @@ const DATA_DIR = join(STATE_DIR, "data");
 const DB_PATH = join(DATA_DIR, "messages.db");
 const MEMORY_FILE = join(DATA_DIR, "memory.md");
 const MEMORY_MAX_CHARS = 10_000;
+
+// ── Agent orchestra hooks (opt-in) ───────────────────────────────────
+// Two optional hooks from agent-harness, a separate repo:
+//   telegram-router.ts     pre-model router, on when <inbox>/telegram-router.json has "enabled": true
+//   telegram-pi-bridge.ts  owner DMs to a Pi session, on when <inbox>/telegram-pi-bridge.json has "enabled": true
+// The code loads from TELEGRAM_ORCHESTRA_HARNESS_DIR, a pinned checkout (never a working folder);
+// TELEGRAM_ORCHESTRA_HARNESS_COMMIT pins it to one commit. <inbox> is TELEGRAM_ORCHESTRA_INBOX, else
+// AGENT_INBOX, else ~/agent-inbox. Without the config files nothing here changes behavior. With a
+// config file on and the code unavailable, messages are held and the sender is told: they never
+// fall through to Claude. See "Agent orchestra hooks" in the README.
+const ORCHESTRA_DIR = (process.env.TELEGRAM_ORCHESTRA_HARNESS_DIR ?? "").trim();
+const ORCHESTRA_COMMIT = (process.env.TELEGRAM_ORCHESTRA_HARNESS_COMMIT ?? "").trim().toLowerCase();
+const ORCHESTRA_INBOX = (() => {
+  const v = (process.env.TELEGRAM_ORCHESTRA_INBOX ?? process.env.AGENT_INBOX ?? "").trim();
+  if (!v || v === "on") return join(homedir(), "agent-inbox");
+  return v.startsWith("~/") ? join(homedir(), v.slice(2)) : v;
+})();
+const ROUTER_CONFIG = "telegram-router.json";
+const PI_BRIDGE_CONFIG = "telegram-pi-bridge.json";
+
+type OrchestraRoute =
+  | { action: "bypass" }
+  | { action: "drop" }
+  | { action: "hold"; reply: string; project?: string }
+  | { action: "dispatch"; project: string; text: string; via: "project" | "claude" };
+type OrchestraRouter = {
+  routeTelegram(
+    input: { chatId: string; userId: string; threadId?: string; text: string },
+    options?: { inbox?: string; accessFile?: string },
+  ): OrchestraRoute;
+};
+type PiBridgeOut = { chatId: string; text: string; replyTo?: string; threadId?: string };
+type PiBridge = {
+  handoff(input: {
+    chatId: string;
+    userId: string;
+    messageId?: string;
+    threadId?: string;
+    text: string;
+    attachments?: { type: string; path: string }[];
+  }): { id: string; delivered: boolean };
+  tick(io: {
+    send(m: PiBridgeOut): Promise<unknown>;
+    ack(m: { chatId: string; messageId: string }): Promise<unknown>;
+  }): Promise<unknown>;
+  /** Stops ticks and waits for the one in flight. Optional: older harness bridges lack it. */
+  close?(): Promise<void>;
+};
+
+/** off: no file or not enabled. error: the file exists but is unreadable (callers fail closed). */
+function orchestraConfig(file: string): { state: "off" | "on" | "error"; chatIds?: string[] } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(join(ORCHESTRA_INBOX, file), "utf8"));
+  } catch (err) {
+    return { state: (err as NodeJS.ErrnoException).code === "ENOENT" ? "off" : "error" };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { state: "error" };
+  const o = raw as { enabled?: unknown; chat_ids?: unknown };
+  if (o.enabled !== true) return { state: "off" };
+  return { state: "on", chatIds: Array.isArray(o.chat_ids) ? o.chat_ids.map((x) => String(x).trim()) : [] };
+}
+
+/** The commit a checkout (plain or worktree) is at, read from .git without running git. */
+function gitHead(dir: string): string | undefined {
+  try {
+    let gitDir = join(dir, ".git");
+    if (statSync(gitDir).isFile()) {
+      const m = readFileSync(gitDir, "utf8").match(/^gitdir:\s*(.+)$/m);
+      if (!m) return undefined;
+      gitDir = isAbsolute(m[1].trim()) ? m[1].trim() : join(dir, m[1].trim());
+    }
+    const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+    if (/^[0-9a-f]{40}$/.test(head)) return head;
+    const ref = head.match(/^ref:\s*(.+)$/)?.[1];
+    if (!ref) return undefined;
+    let common = gitDir;
+    try {
+      const c = readFileSync(join(gitDir, "commondir"), "utf8").trim();
+      common = isAbsolute(c) ? c : join(gitDir, c);
+    } catch {}
+    for (const d of [gitDir, common]) {
+      try {
+        return readFileSync(join(d, ref), "utf8").trim();
+      } catch {}
+    }
+    const line = readFileSync(join(common, "packed-refs"), "utf8")
+      .split("\n")
+      .find((l) => l.endsWith(` ${ref}`));
+    return line?.split(" ")[0];
+  } catch {
+    return undefined;
+  }
+}
+
+/** Throws unless the harness directory is set, absolute and (when pinned) at the pinned commit. */
+function checkOrchestraPin(): void {
+  if (!ORCHESTRA_DIR || !isAbsolute(ORCHESTRA_DIR)) {
+    throw new Error("TELEGRAM_ORCHESTRA_HARNESS_DIR is not set to an absolute path");
+  }
+  if (!ORCHESTRA_COMMIT) return;
+  const head = gitHead(ORCHESTRA_DIR);
+  if (ORCHESTRA_COMMIT.length < 7 || !head?.startsWith(ORCHESTRA_COMMIT)) {
+    throw new Error(`${ORCHESTRA_DIR} is at ${head ?? "an unknown commit"}, not the pinned ${ORCHESTRA_COMMIT}`);
+  }
+}
+
+const orchestraModules = new Map<string, Promise<unknown>>();
+async function loadOrchestra<T>(file: string): Promise<T> {
+  checkOrchestraPin();
+  let mod = orchestraModules.get(file);
+  if (!mod) {
+    mod = import(join(ORCHESTRA_DIR, file));
+    orchestraModules.set(file, mod);
+    mod.catch(() => orchestraModules.delete(file));
+  }
+  return (await mod) as T;
+}
+
+let orchestraLastError = "";
+function orchestraLog(msg: string): void {
+  if (msg === orchestraLastError) return;
+  orchestraLastError = msg;
+  process.stderr.write(`telegram channel: orchestra: ${msg}\n`);
+}
+
+async function routeOrchestra(input: {
+  chatId: string;
+  userId: string;
+  threadId?: string;
+  text: string;
+}): Promise<OrchestraRoute> {
+  const cfg = orchestraConfig(ROUTER_CONFIG);
+  if (cfg.state === "off") return { action: "bypass" };
+  try {
+    if (cfg.state === "error") throw new Error(`${ROUTER_CONFIG} can't be read`);
+    const router = await loadOrchestra<OrchestraRouter>("telegram-router.ts");
+    return router.routeTelegram(input, { inbox: ORCHESTRA_INBOX, accessFile: ACCESS_FILE });
+  } catch (err) {
+    orchestraLog(`router unavailable, holding messages: ${err instanceof Error ? err.message : err}`);
+    return { action: "hold", reply: "Orchestra routing is unavailable; this message was held." };
+  }
+}
+
+/** on: this chat's messages go to Pi, or are held when the bridge can't take them. */
+function piBridgeTarget(chatId: string, chatType: string | undefined): boolean {
+  const cfg = orchestraConfig(PI_BRIDGE_CONFIG);
+  if (cfg.state === "error") return chatType === "private";
+  return cfg.state === "on" && !!cfg.chatIds?.includes(chatId);
+}
+
+type PiBridgeModule = {
+  createTelegramPiBridge(o: {
+    inbox: string;
+    log: (m: string) => void;
+    /** Handoff accepts only regular files whose realpath is inside this folder. */
+    attachmentRoot?: string;
+  }): PiBridge;
+  [exported: string]: unknown;
+};
+let piBridge: PiBridge | undefined;
+let piBridgeModule: PiBridgeModule | undefined;
+let piBridgeClosed = false;
+async function getPiBridge(): Promise<PiBridge> {
+  if (piBridgeClosed) throw new Error("the Pi bridge is shut down");
+  checkOrchestraPin();
+  if (piBridge) return piBridge;
+  const mod = await loadOrchestra<PiBridgeModule>("telegram-pi-bridge.ts");
+  if (piBridgeClosed) throw new Error("the Pi bridge is shut down");
+  piBridgeModule = mod;
+  piBridge = mod.createTelegramPiBridge({
+    inbox: ORCHESTRA_INBOX,
+    log: (m) => process.stderr.write(`telegram channel: pi bridge: ${m}\n`),
+    // Downloads are saved here (INBOX_DIR); attachment paths are these real files.
+    attachmentRoot: INBOX_DIR,
+  });
+  installPiBridgeShutdown();
+  return piBridge;
+}
+
+// Orderly shutdown: stop the bridge's ticks and wait for the one in flight, at most 5 s.
+let piBridgeClosing: Promise<void> | undefined;
+function closePiBridge(): Promise<void> {
+  piBridgeClosed = true;
+  if (piBridgeLoop) clearInterval(piBridgeLoop);
+  piBridgeClosing ??= (async () => {
+    const close = piBridge?.close?.();
+    if (!close) return;
+    await Promise.race([close, new Promise((r) => setTimeout(r, 5000))]).catch((err) =>
+      process.stderr.write(`telegram channel: pi bridge close failed: ${err}\n`),
+    );
+  })();
+  return piBridgeClosing;
+}
+
+// The existing SIGINT/SIGTERM handlers exit synchronously. Once a bridge exists, a signal first
+// closes it, then runs those handlers in their original order, so shutdown otherwise stays the same.
+let piShutdownInstalled = false;
+function installPiBridgeShutdown(): void {
+  if (piShutdownInstalled) return;
+  piShutdownInstalled = true;
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    const earlier = process.listeners(sig);
+    process.removeAllListeners(sig);
+    process.on(sig, () => {
+      void closePiBridge().finally(() => {
+        for (const listener of earlier) (listener as (s: NodeJS.Signals) => void)(sig);
+        process.exit(0);
+      });
+    });
+  }
+  // Claude went away (stdin closed): stop the bridge. Messages for Pi are then held with a notice.
+  process.stdin.once("end", () => void closePiBridge());
+  process.stdin.once("close", () => void closePiBridge());
+}
 
 // --- Single-instance lock ---
 const LOCK_FILE = join(DATA_DIR, "telegram.lock");
@@ -3497,6 +3721,8 @@ bot.on("message_reaction", async (ctx) => {
 
   // Only forward reactions from allowlisted users.
   if (!senderId || !botAccess(access, b).allowFrom.includes(senderId)) return;
+  // A reaction carries no topic id. While the router is on, drop it rather than leak topic context.
+  if ((await routeOrchestra({ chatId: chat_id, userId: senderId, text: "[reaction]" })).action !== "bypass") return;
   // A reaction starts a turn too, so it counts like a message and is dropped over a limit.
   if (overLimit(access, senderId)) return;
 
@@ -4713,6 +4939,223 @@ function requestNewSession(): void {
   writeFileSync(join(DATA_DIR, "restart.signal"), `${Date.now() + 1000}\n`);
 }
 
+// "[Forwarded from X]" for a forwarded message, else undefined.
+function forwardLabel(ctx: Context): string | undefined {
+  const fwd = ctx.message?.forward_origin;
+  if (fwd) {
+    let fwdLabel = "[Forwarded";
+    switch (fwd.type) {
+      case "user": {
+        const u = fwd.sender_user;
+        const name = u.username ? `@${u.username}` : u.first_name;
+        fwdLabel += ` from ${name}`;
+        break;
+      }
+      case "hidden_user":
+        fwdLabel += ` from ${fwd.sender_user_name}`;
+        break;
+      case "chat": {
+        const c = fwd.sender_chat;
+        const cName = c.username ? `@${c.username}` : ((c as any).title ?? "chat");
+        fwdLabel += ` from ${cName}`;
+        break;
+      }
+      case "channel": {
+        const ch = fwd.chat;
+        const chName = ch.username ? `@${ch.username}` : ((ch as any).title ?? "channel");
+        fwdLabel += ` from ${chName}`;
+        if (fwd.message_id) fwdLabel += ` (msg #${fwd.message_id})`;
+        break;
+      }
+    }
+    fwdLabel += "]";
+    return fwdLabel;
+  }
+  return undefined;
+}
+
+// Router first, then the Pi bridge. True: the message was handled here (held, dropped or given to Pi).
+async function orchestraIntercept(
+  ctx: Context,
+  inboundText: string,
+  downloadMedia:
+    | (() => Promise<{ path: string; type: "image" | "audio" | "document"; transcription?: string } | undefined>)
+    | undefined,
+  command?: CustomCommandMatch,
+): Promise<boolean> {
+  const chat_id = String(ctx.chat!.id);
+  const from = ctx.from!;
+  const b = botOf(ctx);
+  const msgId = ctx.message?.message_id;
+  const topicId = (ctx.message as any)?.is_topic_message
+    ? ((ctx.message as any).message_thread_id as number | undefined)
+    : undefined;
+  const inTopic = topicId != null ? { message_thread_id: topicId } : {};
+
+  // Group clients send /pause@botname. Strip only this bot's suffix; one aimed at another bot stays text.
+  const suffixed = inboundText.match(/^\/(pause|resume|claude)@([A-Za-z0-9_]+)([\s\S]*)$/i);
+  const routerText =
+    suffixed && b.username && suffixed[2].toLowerCase() === b.username.toLowerCase()
+      ? `/${suffixed[1]}${suffixed[3]}`
+      : inboundText;
+  const route = await routeOrchestra({
+    chatId: chat_id,
+    userId: String(from.id),
+    ...(topicId != null ? { threadId: String(topicId) } : {}),
+    text: routerText,
+  });
+  if (route.action === "drop") return true;
+  if (route.action === "hold") {
+    await ctx.reply(route.reply, inTopic).catch(() => {});
+    return true;
+  }
+  if (route.action === "dispatch") {
+    await ctx
+      .reply(`Message held for ${route.project}: the isolated project dispatcher is not installed yet.`, inTopic)
+      .catch(() => {});
+    return true;
+  }
+
+  // The Pi bridge: primary bot, bridged chats only. /claude and custom commands stay with Claude.
+  if (!b.primary || command || /^\/claude(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(inboundText)) return false;
+  if (!piBridgeTarget(chat_id, ctx.chat?.type)) return false;
+
+  const notDelivered = (why: string) =>
+    ctx.reply(`Not delivered to Pi: ${why}. Send /claude <text> to reach Claude.`, inTopic).catch(() => {});
+  let bridge: PiBridge;
+  try {
+    bridge = await getPiBridge();
+  } catch (err) {
+    orchestraLog(`pi bridge unavailable, holding messages: ${err instanceof Error ? err.message : err}`);
+    await notDelivered("the Pi bridge is unavailable");
+    return true;
+  }
+  void ctx.api.sendChatAction(chat_id, "typing", inTopic).catch(() => {});
+  usageStore.recordMessage(String(from.id), Date.now());
+  lastBotByChat.set(chat_id, b);
+
+  const media = downloadMedia ? await downloadMedia() : undefined;
+  let text = media?.transcription ? `🎤 Voice transcription:\n${media.transcription}` : inboundText;
+  const fwd = forwardLabel(ctx);
+  if (fwd) text = `${fwd}\n${text}`;
+  const quoted = ctx.message?.reply_to_message;
+  if (quoted) {
+    const q = (quoted.text ?? quoted.caption ?? "").slice(0, 500);
+    text = `[In reply to message ${quoted.message_id}${q ? `: ${q}` : ""}]\n${text}`;
+  }
+  try {
+    const r = bridge.handoff({
+      chatId: chat_id,
+      userId: String(from.id),
+      ...(msgId != null ? { messageId: String(msgId) } : {}),
+      ...(topicId != null ? { threadId: String(topicId) } : {}),
+      text,
+      attachments: media ? [{ type: media.type, path: media.path }] : [],
+    });
+    if (!r.delivered) {
+      await ctx
+        .reply("Saved for Pi, but Pi's inbox can't be written right now. The bridge keeps retrying.", inTopic)
+        .catch(() => {});
+    }
+  } catch (err) {
+    const why = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    process.stderr.write(`telegram channel: pi bridge handoff failed: ${why}\n`);
+    await notDelivered("the Pi bridge refused it");
+  }
+  return true;
+}
+
+// The two ways a Telegram send can fail, mirrored from the harness bridge (telegram-pi-bridge.ts,
+// TelegramSendRejectedError and TelegramSendUncertainError). When the loaded harness exports them,
+// its classes are used, so the bridge's instanceof checks match; these local copies are the
+// fallback for a harness that does not export them yet.
+class TelegramSendRejectedError extends Error {
+  override name = "TelegramSendRejectedError";
+}
+class TelegramSendUncertainError extends Error {
+  override name = "TelegramSendUncertainError";
+}
+
+// How a failed Telegram send ended. rejected: the Bot API answered with a parsed error (4xx such as
+// 400, 403 or 429), so nothing was posted and a retry is safe. uncertain: a timeout, a dropped
+// connection, an unparseable answer, a 5xx gateway error or anything else, where the message may
+// have been posted; the bridge holds it instead of retrying, to avoid a duplicate.
+function classifyTelegramSendError(err: unknown): "rejected" | "uncertain" {
+  if (err instanceof GrammyError && err.error_code >= 400 && err.error_code < 500) return "rejected";
+  if (err instanceof HttpError) return "uncertain";
+  return "uncertain";
+}
+
+function piSendError(err: unknown): Error {
+  const kind = classifyTelegramSendError(err);
+  const name = kind === "rejected" ? "TelegramSendRejectedError" : "TelegramSendUncertainError";
+  const exported = piBridgeModule?.[name];
+  const Cls = (
+    typeof exported === "function"
+      ? exported
+      : kind === "rejected"
+        ? TelegramSendRejectedError
+        : TelegramSendUncertainError
+  ) as new (
+    message: string,
+    options?: { cause?: unknown },
+  ) => Error;
+  return new Cls(err instanceof Error ? err.message : String(err), { cause: err });
+}
+
+// Sends Pi's replies and the consumed-acks. The bridge marks a reply sent only after this resolves.
+const piBridgeIO = {
+  async send(m: PiBridgeOut): Promise<{ message_id: number }> {
+    const b = bots[0];
+    let sent: Awaited<ReturnType<typeof b.bot.api.sendMessage>>;
+    try {
+      sent = await b.bot.api.sendMessage(m.chatId, m.text, {
+        ...(m.replyTo
+          ? { reply_parameters: { message_id: Number(m.replyTo), allow_sending_without_reply: true } }
+          : {}),
+        ...(m.threadId ? { message_thread_id: Number(m.threadId) } : {}),
+      });
+    } catch (err) {
+      throw piSendError(err);
+    }
+    // History, so the restart replay sees the chat as answered. A failure here must not cause a resend.
+    try {
+      messageStore.store({
+        message_id: sent.message_id,
+        chat_id: m.chatId,
+        username: b.username || "bot",
+        text: m.text.slice(0, 2000),
+        reply_to_msg_id: m.replyTo ? Number(m.replyTo) : undefined,
+        date: Math.floor(Date.now() / 1000),
+        is_outgoing: true,
+        thread_id: m.threadId ? Number(m.threadId) : undefined,
+        bot: botKey(b),
+      });
+    } catch (err) {
+      process.stderr.write(`telegram channel: pi bridge: could not store reply in history: ${err}\n`);
+    }
+    return sent;
+  },
+  async ack(m: { chatId: string; messageId: string }): Promise<void> {
+    const want = loadAccess().ackReaction;
+    const emoji = (want && ALLOWED_REACTIONS.has(want) ? want : "👀") as ReactionTypeEmoji["emoji"];
+    await bots[0].bot.api.setMessageReaction(m.chatId, Number(m.messageId), [{ type: "emoji", emoji }]);
+  },
+};
+
+// One bridge pass a second, only in the instance that polls the primary bot.
+let piBridgeLoop: ReturnType<typeof setInterval> | undefined;
+function startPiBridgeLoop(): void {
+  if (!ORCHESTRA_DIR) return;
+  piBridgeLoop = setInterval(() => {
+    if (piBridgeClosed || isSecondary || !ownsLock(bots[0].lockFile)) return;
+    if (orchestraConfig(PI_BRIDGE_CONFIG).state !== "on") return;
+    void getPiBridge()
+      .then((bridge) => bridge.tick(piBridgeIO))
+      .catch((err) => orchestraLog(`pi bridge loop: ${err instanceof Error ? err.message : err}`));
+  }, 1000);
+}
+
 // ── Post-gate delivery: download media, build context, add to batch ──
 
 async function deliverMessage(
@@ -4724,6 +5167,9 @@ async function deliverMessage(
   access: Access,
   command?: CustomCommandMatch,
 ): Promise<void> {
+  // Agent orchestra hooks: before typing, acks and media, so a held message never reaches a model.
+  if (await orchestraIntercept(ctx, inboundText, downloadMedia, command)) return;
+
   const from = ctx.from!;
   const chat_id = String(ctx.chat!.id);
   const msgId = ctx.message?.message_id;
@@ -4755,36 +5201,8 @@ async function deliverMessage(
   let text = media?.transcription ? `🎤 Voice transcription:\n${media.transcription}` : inboundText;
 
   // ── Forwarded message context ─────────────────────────────────────
-  const fwd = ctx.message?.forward_origin;
-  if (fwd) {
-    let fwdLabel = "[Forwarded";
-    switch (fwd.type) {
-      case "user": {
-        const u = fwd.sender_user;
-        const name = u.username ? `@${u.username}` : u.first_name;
-        fwdLabel += ` from ${name}`;
-        break;
-      }
-      case "hidden_user":
-        fwdLabel += ` from ${fwd.sender_user_name}`;
-        break;
-      case "chat": {
-        const c = fwd.sender_chat;
-        const cName = c.username ? `@${c.username}` : ((c as any).title ?? "chat");
-        fwdLabel += ` from ${cName}`;
-        break;
-      }
-      case "channel": {
-        const ch = fwd.chat;
-        const chName = ch.username ? `@${ch.username}` : ((ch as any).title ?? "channel");
-        fwdLabel += ` from ${chName}`;
-        if (fwd.message_id) fwdLabel += ` (msg #${fwd.message_id})`;
-        break;
-      }
-    }
-    fwdLabel += "]";
-    text = `${fwdLabel}\n${text}`;
-  }
+  const fwdLabel = forwardLabel(ctx);
+  if (fwdLabel) text = `${fwdLabel}\n${text}`;
 
   const chatType = ctx.chat?.type;
   const isGroup = chatType === "group" || chatType === "supergroup";
@@ -4901,6 +5319,8 @@ async function deliverMessage(
 // Runs once per bot that this instance polls, over that bot's history.
 function replayUnanswered(b: BotEntry): void {
   if (!ownsLock(b.lockFile) || !(b.primary || b.username)) return;
+  // The replay goes straight to Claude: skip it while the router is on, and for chats bridged to Pi.
+  if (orchestraConfig(ROUTER_CONFIG).state !== "off") return;
   try {
     const cutoff = Math.floor(Date.now() / 1000) - 300; // last 5 minutes
     const access = loadAccess();
@@ -4910,6 +5330,7 @@ function replayUnanswered(b: BotEntry): void {
     for (const chatId of allowedChats) {
       // Blocked messages are in the history too: don't replay them past a limit.
       if (overLimit(access, chatId)) continue;
+      if (b.primary && piBridgeTarget(chatId, "private")) continue;
       // Get last 10 messages from this chat, newest first
       const recent = messageStore.getHistory(chatId, 10, undefined, botKey(b));
       if (recent.length === 0) continue;
@@ -5273,6 +5694,7 @@ if (!isSecondary) {
     webhook: WEBHOOK_MODE ? (req) => webhookHandler?.(req) ?? new Response("Not ready", { status: 503 }) : undefined,
   });
   startPolling(bots[0]);
+  startPiBridgeLoop();
 } else {
   fetchBotInfo(bots[0]);
 }

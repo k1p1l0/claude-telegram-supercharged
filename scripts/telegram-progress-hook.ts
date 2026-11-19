@@ -12,7 +12,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 
-const DATA_DIR = join(userInfo().homedir || homedir(), ".claude", "channels", "telegram", "data");
+const DATA_DIR = join(process.env.TELEGRAM_STATE_DIR || join(userInfo().homedir || homedir(), ".claude", "channels", "telegram"), "data");
 const PROGRESS_FILE = join(DATA_DIR, "progress.jsonl");
 
 // The telegram plugin's own tools (reply, react, edit_message, ...) are the

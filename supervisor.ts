@@ -35,7 +35,7 @@ import { join } from "node:path";
 // overrides HOME (e.g. to give the daemon a separate cwd) otherwise sends every
 // path below to the wrong place and the wrapper spawn fails with ENOENT forever.
 const REAL_HOME = userInfo().homedir || homedir();
-const STATE_DIR = join(REAL_HOME, ".claude", "channels", "telegram");
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR || join(REAL_HOME, ".claude", "channels", "telegram");
 const DATA_DIR = join(STATE_DIR, "data");
 const SIGNAL_FILE = join(DATA_DIR, "restart.signal");
 const CLAUDE_CMD = "claude";

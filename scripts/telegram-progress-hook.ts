@@ -73,6 +73,10 @@ try {
 		line = { t: Date.now(), type: "tool", tool, ...describe(tool, ev.tool_input ?? {}), session: ev.session_id, tp };
 	} else if (ev.hook_event_name === "PostToolUse" && tool && !own) {
 		line = { t: Date.now(), type: "tool_done", tool, session: ev.session_id, tp };
+	} else if (own && (ev.hook_event_name === "PreToolUse" || ev.hook_event_name === "PostToolUse")) {
+		// Not shown in the Working message (no tool name, so server.ts skips it). The
+		// supervisor reads it: a reply or reaction means a turn is in flight.
+		line = { t: Date.now(), type: "own", session: ev.session_id };
 	}
 	if (line) {
 		mkdirSync(DATA_DIR, { recursive: true });

@@ -337,7 +337,9 @@ The plugin ships with a **supervisor script** (`supervisor.ts`) that runs Claude
 
 - **Auto-restart on crash** -- exponential backoff (1s, 2s, 4s... up to 30s), resets after 60s of stable uptime
 - **Context reset from Telegram** -- say "clear everything" in Telegram, Claude saves memory, clears history, and the supervisor restarts Claude with a fresh session. Zero downtime, memory preserved.
-- **Signal file protocol** -- the MCP server writes `~/.claude/channels/telegram/data/restart.signal`, the supervisor detects it within 500ms, waits 3 seconds for Claude to finish sending replies, then kills and respawns
+- **Signal file protocol** -- the MCP server writes `~/.claude/channels/telegram/data/restart.signal`, the supervisor detects it within 500ms, waits until Claude is idle, then kills and respawns
+- **Restart only when idle** -- a restart (2-hour uptime cap, context threshold, or a context reset) waits for the running turn to end, 15 minutes at most. The supervisor reads the Agentic Mode events in `progress.jsonl` (a `stop` event ends a turn) and, as a second check, `messages.db` (a new message with no answer yet). A restart signal that arrives during the wait is dropped. `/new` and the board's "New session" button restart at once, also when another restart is already waiting.
+- **Lost-message notice** -- if a restart does cut a turn (the 15-minute cap, or `/new`), the server replays unanswered DMs from the last 5 minutes to the new session. For what the replay can't cover (group messages that mention the bot or reply to it, and older DMs) the supervisor answers the message with one line that asks to send it again. Set `TELEGRAM_RESTART_NOTICE` in the supervisor environment to change the text; `off` disables it.
 
 ### Usage
 
@@ -612,7 +614,7 @@ The server keeps stats in `messages.db` (table `usage_daily`) for 90 days. It st
 4. Claude sends a confirmation reply to Telegram
 5. Claude calls `clear_history` with `restart_context: true`
 6. The MCP server writes `restart.signal` with a 3-second delay
-7. Supervisor detects the file, waits for Claude to finish, then kills the process
+7. Supervisor detects the file, waits until the turn has ended (15 minutes at most), then kills the process
 8. Supervisor spawns a fresh Claude session -- memory.md is loaded into instructions automatically
 
 ### Always-on with launchd (macOS)

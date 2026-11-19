@@ -1,0 +1,34 @@
+# systemd user unit for the Telegram daemon (Linux). The launchd plist in the README does the same on macOS.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/.claude/scripts/claude-telegram.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now claude-telegram
+#   sudo loginctl enable-linger "$USER"    # start at boot and keep running after logout
+#
+# %h is your home directory. If bun or claude live somewhere else (`which bun`, `which claude`),
+# change ExecStart and PATH below.
+
+[Unit]
+Description=Claude Code Telegram daemon (supervisor)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.bun/bin/bun %h/.claude/scripts/telegram-supervisor.ts
+# The supervisor and the wrapper resolve paths from your home. Don't set HOME here;
+# use TELEGRAM_DAEMON_CWD to change the daemon's working directory.
+WorkingDirectory=%h
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# Same files as the launchd setup: the context and auth watchdogs read supervisor-stdout.log.
+StandardOutput=append:%h/.claude/channels/telegram/data/supervisor-stdout.log
+StandardError=append:%h/.claude/channels/telegram/data/supervisor-stderr.log
+Restart=always
+RestartSec=10
+# SIGTERM goes to the supervisor only, which stops claude gracefully. Leftovers get SIGKILL after the timeout.
+KillMode=mixed
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

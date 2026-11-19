@@ -66,7 +66,7 @@ After user confirms, run the installer from the checkout. It copies `server.ts` 
 TELEGRAM_SUPERCHARGED_DIR=/tmp/claude-telegram-supercharged bash /tmp/claude-telegram-supercharged/install.sh
 ```
 
-Then restart: a new Claude Code session, or for the daemon `launchctl bootout` + `launchctl bootstrap` (a soft restart doesn't reload the supervisor).
+Then restart: a new Claude Code session, or for the daemon `launchctl bootout` + `launchctl bootstrap` on macOS, `systemctl --user restart claude-telegram` on Linux (a soft restart doesn't reload the supervisor).
 
 ### Step 7: Clear update cache
 

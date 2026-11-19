@@ -66,7 +66,7 @@ https://github.com/user-attachments/assets/4c5a5968-b5cc-43f1-a756-4282d3eedae9
 | Questions with inline buttons | ❌ | ✅ `ask_user` |
 | Scheduled messages and reminders | ❌ | ✅ Also syncs to Apple Reminders |
 | Google Calendar | ❌ | ✅ |
-| 24/7 daemon with auto-restart | ❌ | ✅ launchd supervisor |
+| 24/7 daemon with auto-restart | ❌ | ✅ launchd (macOS) or systemd (Linux) supervisor |
 | Model routing (Haiku / Sonnet / Opus) | ❌ | ✅ |
 | Long answers as Telegraph articles | ❌ | ✅ |
 | Approve permission prompts from Telegram | ✅ | ✅ Buttons or "yes <id>", plus an auto-approve list |
@@ -130,6 +130,7 @@ https://github.com/user-attachments/assets/4c5a5968-b5cc-43f1-a756-4282d3eedae9
 ### Prerequisites
 
 - [Bun](https://bun.sh) -- the MCP server runs on Bun. Install with `curl -fsSL https://bun.sh/install | bash`.
+- `expect` -- only for the daemon supervisor. macOS ships it. On Linux install it from your package manager (`sudo apt install expect`, `sudo dnf install expect`).
 
 ### 1. Create a bot with BotFather
 
@@ -354,6 +355,8 @@ bun supervisor.ts --effort high
 ```
 
 The supervisor spawns Claude with `--channels plugin:telegram@claude-plugins-official --dangerously-skip-permissions` by default.
+
+To keep it running across reboots, use [launchd on macOS](#always-on-with-launchd-macos) or [systemd on Linux](#always-on-with-systemd-linux).
 
 ### Agentic Mode
 
@@ -763,6 +766,64 @@ launchd (OS-level)
 - **Claude** runs as a managed child process with the Telegram channel
 
 > **Note:** `caffeinate -s` prevents sleep only when connected to power. On battery with the lid closed, macOS will eventually sleep regardless. For true 24/7 uptime on battery, consider running on a server instead.
+
+### Always-on with systemd (Linux)
+
+On a Linux box the supervisor runs as a systemd **user** service. It does the same job as the launchd setup above: starts at boot, restarts on crash, and writes the same two log files, which the context and auth watchdogs read. Tested on Debian 13 (systemd 257).
+
+#### Setup
+
+1. Install `expect` (`sudo apt install expect`). The daemon wrapper needs it.
+2. Run the [installer](#install-in-one-line). On Linux it also copies the unit file to `~/.claude/scripts/claude-telegram.service`. From a manual checkout, copy `scripts/claude-telegram.service` yourself.
+3. Install and start the unit:
+
+```sh
+mkdir -p ~/.config/systemd/user ~/.claude/channels/telegram/data
+cp ~/.claude/scripts/claude-telegram.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now claude-telegram
+```
+
+4. Let it start at boot and keep running after you log out:
+
+```sh
+sudo loginctl enable-linger "$USER"
+```
+
+The unit runs `~/.bun/bin/bun` and puts `~/.local/bin` (the native `claude` installer's location) and `~/.bun/bin` on `PATH`. If `which bun` or `which claude` point somewhere else, edit `ExecStart` and `PATH` in `~/.config/systemd/user/claude-telegram.service`, then `systemctl --user daemon-reload`.
+
+The data folder has to exist before the first start, because systemd opens the log files before the supervisor runs. That's what the `mkdir` above is for.
+
+> **Don't set `HOME` in the unit**, for the same reason as in the plist. Use `Environment=TELEGRAM_DAEMON_CWD=...` to change the daemon's working directory.
+
+`KillMode=mixed` sends `SIGTERM` to the supervisor only, so it can stop claude cleanly before the next start. That matters because a new claude that boots while the old one is still shutting down silently skips the channel (see [Daemon Troubleshooting](docs/DAEMON-TROUBLESHOOTING.md)).
+
+#### Managing the daemon
+
+```sh
+systemctl --user start claude-telegram      # start
+systemctl --user stop claude-telegram       # stop
+systemctl --user restart claude-telegram    # restart (also reloads supervisor.ts)
+systemctl --user status claude-telegram     # running? since when? main PID
+tail -f ~/.claude/channels/telegram/data/supervisor-stderr.log   # supervisor logs
+
+# remove completely
+systemctl --user disable --now claude-telegram
+rm ~/.config/systemd/user/claude-telegram.service
+```
+
+`/telegram:daemon` and `/telegram:monitor` detect Linux and use these commands.
+
+#### How the layers work together
+
+```
+systemd --user (claude-telegram.service, linger keeps it up without a login)
+  └── supervisor.ts (manages Claude lifecycle)
+        └── expect wrapper (gives claude a terminal)
+              └── claude --channels plugin:telegram (the actual bot)
+```
+
+There is no `caffeinate` step. A server doesn't sleep, and on a laptop you set that in your desktop's power settings or with `systemd-inhibit`.
 
 ## Multiple bots
 

@@ -8,6 +8,8 @@ allowed-tools:
   - Bash(cat *)
   - Bash(grep *)
   - Bash(launchctl *)
+  - Bash(systemctl --user *)
+  - Bash(uname *)
   - Bash(strings *)
   - Bash(head *)
   - Bash(wc *)
@@ -33,17 +35,27 @@ Report:
 - **Expect wrapper** — PID
 - **Claude bot** (claude --channels ...) — PID, TTY, CPU/memory
 - **MCP server** (bun server.ts) — PID (if missing, the Telegram plugin didn't start)
-- **Caffeinate** — running or not
+- **Caffeinate** — running or not (macOS only; Linux has no caffeinate step)
 
 If no processes found, report "Daemon is NOT running."
 
-### 2. Launchd status
+### 2. Service manager status
+
+Check `uname -s`. On macOS (Darwin):
 
 ```bash
 launchctl list | grep claude-telegram
 ```
 
 Report loaded/not loaded.
+
+On Linux:
+
+```bash
+systemctl --user is-active claude-telegram; systemctl --user is-enabled claude-telegram
+```
+
+Report active/inactive/failed and enabled/disabled. Show the row as "Systemd" instead of "Launchd" and drop the Caffeinate row.
 
 ### 3. Recent supervisor logs
 

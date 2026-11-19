@@ -46,10 +46,20 @@ mkdir -p "$SCRIPTS"
 cp "$DIR/supervisor.ts" "$SCRIPTS/telegram-supervisor.ts"
 cp "$DIR/scripts/claude-daemon-wrapper.exp" "$DIR/scripts/telegram-progress-hook.ts" "$SCRIPTS/"
 chmod +x "$SCRIPTS/claude-daemon-wrapper.exp"
+if [ "$(uname -s)" = "Linux" ]; then
+  cp "$DIR/scripts/claude-telegram.service" "$SCRIPTS/"
+fi
 
 echo "Claude Telegram Supercharged $(git -C "$DIR" rev-parse --short HEAD) installed into $TARGET"
 echo "Next:"
 echo "  1. In Claude Code: /telegram:configure <bot token>   (first install only)"
 echo "  2. Restart: claude --channels plugin:telegram@claude-plugins-official"
 echo "     or, for the daemon: bun $SCRIPTS/telegram-supervisor.ts"
+if [ "$(uname -s)" = "Linux" ]; then
+  echo "     always on with systemd: see \"Always-on with systemd (Linux)\" in the README ($SCRIPTS/claude-telegram.service)"
+fi
 echo "Restore the official server any time: cp \"$TARGET/server.ts.official\" \"$TARGET/server.ts\""
+# The daemon wrapper is an expect script. macOS ships expect; most Linux distros don't.
+if ! command -v expect >/dev/null; then
+  echo "Note: the daemon needs expect (Debian/Ubuntu: sudo apt install expect, Fedora: sudo dnf install expect)." >&2
+fi

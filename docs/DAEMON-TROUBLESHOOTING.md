@@ -15,6 +15,15 @@ launchd (com.user.claude-telegram)
 
 State, token, and logs live in `~/.claude/channels/telegram/` (`.env`, `access.json`, `data/telegram.lock`, `data/supervisor-{stdout,stderr}.log`).
 
+On Linux the top of the tree is the systemd user unit `claude-telegram` and there is no `caffeinate`. Everything below the supervisor is the same, so the entries here apply to both. Where a fix uses `launchctl`, the Linux equivalents are:
+
+| macOS | Linux |
+| --- | --- |
+| `launchctl list \| grep claude-telegram` | `systemctl --user status claude-telegram` |
+| `launchctl bootout` + `bootstrap` (hard restart) | `systemctl --user restart claude-telegram` |
+| `launchctl stop com.user.claude-telegram` | `systemctl --user stop claude-telegram` |
+| plugin log `~/Library/Caches/claude-cli-nodejs/<project>/mcp-logs-plugin-telegram-telegram/` | `~/.cache/claude-cli-nodejs/<project>/mcp-logs-plugin-telegram-telegram/` |
+
 ## Health check
 
 1. `launchctl list | grep claude-telegram` shows a PID.
@@ -84,6 +93,13 @@ Symptom: `failed to spawn claude: ENOENT ... /<somewhere>/.claude/scripts/claude
 ### Auth expired
 
 When the stdout log shows `authentication_error` (401), the supervisor stops the restart loop, messages the owner (first `allowFrom` entry) on Telegram, and polls every 30 seconds until `claude -p ping` works again. Run `claude /login` in any terminal, and the daemon restarts itself.
+
+### Linux: unit fails at once, or stops at logout
+
+- `systemctl --user status claude-telegram` shows `status=209/STDOUT`: the data folder doesn't exist yet, so systemd can't open the log files. `mkdir -p ~/.claude/channels/telegram/data` and start again.
+- `failed to spawn claude: ENOENT ... claude-daemon-wrapper.exp`, or the wrapper never starts: `expect` isn't installed (`sudo apt install expect`). The wrapper's `#!/usr/bin/expect` line fails with the same ENOENT as a missing file.
+- The plugin never connects and its MCP log says `Executable not found in $PATH: "bun"`: the unit's `PATH` doesn't include your bun or claude folder. Edit `Environment=PATH=` in the unit and `systemctl --user daemon-reload`.
+- The bot dies when you log out or isn't up after a reboot until you log in: lingering is off. `sudo loginctl enable-linger "$USER"` (check with `loginctl show-user "$USER" -p Linger`).
 
 ### Bot silent in a group
 

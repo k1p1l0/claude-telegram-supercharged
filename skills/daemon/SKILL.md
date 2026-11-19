@@ -4,6 +4,8 @@ description: Manage the Telegram daemon lifecycle — start, stop, restart, chec
 user-invocable: true
 allowed-tools:
   - Bash(launchctl *)
+  - Bash(systemctl --user *)
+  - Bash(uname *)
   - Bash(ps *)
   - Bash(tail *)
   - Bash(cat *)
@@ -15,27 +17,49 @@ allowed-tools:
 
 # /telegram:daemon — Telegram Daemon Lifecycle Manager
 
-Full lifecycle management for the Telegram bot daemon (launchd + supervisor + Claude).
+Full lifecycle management for the Telegram bot daemon (launchd or systemd + supervisor + Claude).
+
+## Platform
+
+Run `uname -s` first:
+
+- **Darwin** (macOS): the daemon is the launchd agent `~/Library/LaunchAgents/com.user.claude-telegram.plist`. Use the **macOS** commands below.
+- **Linux**: the daemon is the systemd user unit `claude-telegram` (`~/.config/systemd/user/claude-telegram.service`). Use the **Linux** commands below.
+
+If the plist (macOS) or the unit (Linux) doesn't exist, say so and point to the "Always-on" section of the README for that platform instead of running anything.
 
 ## Arguments — dispatch on first word
 
 ### `start` (default if no args and daemon is not running)
 
-Start the daemon via launchd:
+macOS:
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.user.claude-telegram.plist 2>&1
 ```
 
 If it fails with "already loaded", report that the daemon is already running.
-After loading, wait 5 seconds, then run the status check to confirm it started.
+
+Linux:
+
+```bash
+systemctl --user start claude-telegram
+```
+
+After starting, wait 5 seconds, then run the status check to confirm it started.
 
 ### `stop`
 
-Stop the daemon:
+macOS:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.user.claude-telegram.plist 2>&1
+```
+
+Linux:
+
+```bash
+systemctl --user stop claude-telegram
 ```
 
 Wait 3 seconds, verify all processes are gone:
@@ -48,12 +72,18 @@ Report success or if orphan processes remain.
 
 ### `restart`
 
-Unload then load:
+macOS: unload then load:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.user.claude-telegram.plist 2>/dev/null
 sleep 2
 launchctl load ~/Library/LaunchAgents/com.user.claude-telegram.plist
+```
+
+Linux:
+
+```bash
+systemctl --user restart claude-telegram
 ```
 
 Wait 10 seconds, then run full status check.
@@ -62,8 +92,8 @@ Wait 10 seconds, then run full status check.
 
 Run the full monitor check — same as /telegram:monitor:
 
-1. Process status (supervisor, expect, claude, MCP server, caffeinate)
-2. Launchd loaded/not
+1. Process status (supervisor, expect, claude, MCP server, and caffeinate on macOS)
+2. Service state: launchd loaded/not (macOS) or `systemctl --user is-active claude-telegram` (Linux)
 3. Remote control URL
 4. Lock file
 5. Last 5 log lines
@@ -99,6 +129,7 @@ Check if daemon is running. If running → show status. If not running → ask i
 ## Important notes
 
 - The `launchctl load/unload` commands may fail with "Input/output error" — this usually means the service is already in the requested state. Handle gracefully.
+- On Linux, `systemctl --user` needs the user's bus. After a plain `su` or `sudo -u` it fails with "Failed to connect to user scope bus"; run `export XDG_RUNTIME_DIR=/run/user/$(id -u)` first, or log in as the user directly.
 - After start/restart, always verify the daemon actually started by checking processes.
-- The plist path is always: `~/Library/LaunchAgents/com.user.claude-telegram.plist`
+- The plist path is always `~/Library/LaunchAgents/com.user.claude-telegram.plist`; the unit is always `claude-telegram` (user scope).
 - Show the remote control URL after every start/restart so the user can monitor.
